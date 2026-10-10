@@ -1,0 +1,570 @@
+import os
+import io
+import json
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+import requests
+from dotenv import load_dotenv
+from movistar_device_auth import (
+    ANDROID_USER_AGENT,
+    build_oauth_auth_header,
+    refresh_oauth_token,
+    register_device
+)
+
+# Base endpoints for Movistar Cloud
+BASE_URL = "https://micloud.movistar.es"
+UPLOAD_URL = "https://upload.micloud.movistar.es"
+
+
+def load_account_config(phone: str = None) -> dict:
+    """Helper to locate and load full Movistar account configuration including device tokens."""
+    candidates = [
+        Path("/app/tokens"),
+        Path("tokens"),
+        Path("../Movistar"),
+        Path("../../Movistar"),
+        Path("."),
+        Path(".."),
+        Path("../..")
+    ]
+
+    cfg = {
+        "phone": os.getenv("MOVISTAR_PHONE", "").strip(),
+        "jsessionid": os.getenv("MOVISTAR_JSESSIONID", "").strip(),
+        "validationkey": os.getenv("MOVISTAR_VALIDATIONKEY", "").strip(),
+        "refresh_token": os.getenv("MOVISTAR_REFRESH_TOKEN", "").strip(),
+        "access_token": os.getenv("MOVISTAR_ACCESS_TOKEN", "").strip(),
+        "device_id": os.getenv("MOVISTAR_DEVICE_ID", "").strip(),
+        "device_name": os.getenv("MOVISTAR_DEVICE_NAME", "").strip(),
+        "token_path": None
+    }
+
+    if phone:
+        clean_phone = "".join(filter(str.isdigit, phone))
+        for base in candidates:
+            for fname in [f"account_{clean_phone}.env", f"{clean_phone}.env"]:
+                p = base / fname
+                if p.exists() and p.is_file():
+                    load_dotenv(p, override=True)
+                    cfg["token_path"] = p
+                    cfg["phone"] = clean_phone
+                    break
+            if cfg["token_path"]:
+                break
+
+    if not cfg["token_path"]:
+        for base in candidates:
+            if not base.exists():
+                continue
+            env_files = sorted(list(base.glob("account_*.env")) + list(base.glob(".env")))
+            for p in env_files:
+                if p.is_file():
+                    load_dotenv(p, override=True)
+                    cfg["token_path"] = p
+                    break
+            if cfg["token_path"]:
+                break
+
+    cfg["phone"] = cfg["phone"] or os.getenv("MOVISTAR_PHONE", "").strip()
+    cfg["jsessionid"] = cfg["jsessionid"] or os.getenv("MOVISTAR_JSESSIONID", "").strip()
+    cfg["validationkey"] = cfg["validationkey"] or os.getenv("MOVISTAR_VALIDATIONKEY", "").strip()
+    cfg["refresh_token"] = cfg["refresh_token"] or os.getenv("MOVISTAR_REFRESH_TOKEN", "").strip()
+    cfg["access_token"] = cfg["access_token"] or os.getenv("MOVISTAR_ACCESS_TOKEN", "").strip()
+    cfg["device_id"] = cfg["device_id"] or os.getenv("MOVISTAR_DEVICE_ID", "").strip()
+    cfg["device_name"] = cfg["device_name"] or os.getenv("MOVISTAR_DEVICE_NAME", "").strip()
+    return cfg
+
+
+def load_credentials(phone: str = None) -> tuple[str, str]:
+    """Helper to locate and load Movistar session credentials from various sources."""
+    cfg = load_account_config(phone)
+    return cfg.get("jsessionid", ""), cfg.get("validationkey", "")
+
+
+class DownloadStream:
+    """
+    Wraps requests.Response stream to ensure:
+    1. Content-Encoding (gzip/deflate) and Transfer-Encoding (chunked) are properly decoded
+       using iter_content() instead of raw socket reads, preventing file corruption.
+    2. Connection is properly closed when done.
+    3. An internal buffer satisfies arbitrary chunk-sized read() calls seamlessly.
+    """
+    DEFAULT_CHUNK_SIZE = 64 * 1024  # 64 KB
+
+    def __init__(self, response, chunk_size: int = DEFAULT_CHUNK_SIZE):
+        self.response = response
+        self.chunk_size = chunk_size
+        self._iter = response.iter_content(chunk_size=chunk_size)
+        self._buffer = bytearray()
+        self._closed = False
+        self._bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if self._closed:
+            return b""
+
+        # Read until EOF
+        if size is None or size < 0:
+            chunks = [bytes(self._buffer)] if self._buffer else []
+            self._buffer.clear()
+            for chunk in self._iter:
+                if chunk:
+                    chunks.append(chunk)
+            data = b"".join(chunks)
+            self._bytes_read += len(data)
+            return data
+
+        if size == 0:
+            return b""
+
+        # Fill buffer until we have at least `size` bytes or EOF
+        while len(self._buffer) < size:
+            try:
+                chunk = next(self._iter)
+                if chunk:
+                    self._buffer.extend(chunk)
+            except StopIteration:
+                break
+
+        if not self._buffer:
+            return b""
+
+        chunk_to_return = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        self._bytes_read += len(chunk_to_return)
+        return chunk_to_return
+
+    def tell(self) -> int:
+        return self._bytes_read
+
+    def readable(self) -> bool:
+        return not self._closed
+
+    def seekable(self) -> bool:
+        return False
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self._buffer.clear()
+            try:
+                self.response.close()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+class MovistarFilesClient:
+    def __init__(
+        self,
+        jsessionid: str = None,
+        validationkey: str = None,
+        refresh_token: str = None,
+        access_token: str = None,
+        device_id: str = None,
+        device_name: str = None,
+        token_path: Path = None
+    ):
+        self.jsessionid = (jsessionid or "").strip()
+        self.validationkey = (validationkey or "").strip()
+        self.refresh_token = (refresh_token or "").strip()
+        self.access_token = (access_token or "").strip()
+        self.device_id = (device_id or "").strip()
+        self.device_name = (device_name or "Samsung SM-S928B (WebDAV Proxy)").strip()
+        self.token_path = token_path
+        self.session = requests.Session()
+        
+        # Modo Dispositivo Android Nativo vs Modo Sesión Web
+        self.is_native_device = bool(self.refresh_token or self.access_token)
+        
+        if self.is_native_device:
+            headers = {
+                "User-Agent": ANDROID_USER_AGENT,
+                "Accept": "application/json, text/plain, */*",
+            }
+            if self.device_id:
+                headers["X-deviceid"] = self.device_id
+                headers["X-devicename"] = self.device_name
+            if self.access_token:
+                headers["Authorization"] = build_oauth_auth_header(self.access_token, self.refresh_token)
+            self.session.headers.update(headers)
+        else:
+            # Modo Sesión Web (fallback)
+            if self.jsessionid:
+                self.session.cookies.set("JSESSIONID", self.jsessionid, domain="micloud.movistar.es", path="/")
+            if self.validationkey:
+                self.session.cookies.set("validationkey", self.validationkey, domain="micloud.movistar.es", path="/")
+            self.session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+            })
+
+    def refresh_device_token(self) -> bool:
+        """Renueva el access_token usando el refresh_token permanente de Android."""
+        if not self.refresh_token:
+            return False
+        try:
+            print("[OAuth] 🔄 Renovando access_token de dispositivo con refresh_token...", flush=True)
+            res = refresh_oauth_token(self.refresh_token)
+            new_access = res.get("access_token")
+            new_refresh = res.get("refresh_token") or self.refresh_token
+            if new_access:
+                self.access_token = new_access
+                self.refresh_token = new_refresh
+                self.session.headers["Authorization"] = build_oauth_auth_header(self.access_token, self.refresh_token)
+                
+                # Persistir los tokens renovados en disco si existe el archivo
+                if self.token_path and Path(self.token_path).exists():
+                    try:
+                        p = Path(self.token_path)
+                        text = p.read_text(encoding="utf-8")
+                        lines = []
+                        for line in text.splitlines():
+                            if line.startswith("MOVISTAR_ACCESS_TOKEN="):
+                                lines.append(f'MOVISTAR_ACCESS_TOKEN="{self.access_token}"')
+                            elif line.startswith("MOVISTAR_REFRESH_TOKEN="):
+                                lines.append(f'MOVISTAR_REFRESH_TOKEN="{self.refresh_token}"')
+                            else:
+                                lines.append(line)
+                        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                    except Exception as e:
+                        print(f"[OAuth] Error al persistir token renovado en disco: {e}", flush=True)
+
+                print("[OAuth] ✔ Access token renovado con éxito.", flush=True)
+                return True
+        except Exception as e:
+            print(f"[OAuth] ❌ Error al renovar token de dispositivo: {e}", flush=True)
+        return False
+
+    def _url(self, base: str, endpoint: str) -> str:
+        if self.validationkey:
+            sep = "&" if "?" in endpoint else "?"
+            return f"{base}{endpoint}{sep}validationkey={self.validationkey}"
+        return f"{base}{endpoint}"
+
+    def get_system_info(self):
+        """Get system info (public endpoint)."""
+        url = self._url(BASE_URL, "/sapi/system/information?action=get")
+        r = self.session.get(url, timeout=15)
+        print(f"[System Info] Status: {r.status_code}")
+        return r.json() if r.status_code == 200 else r.text
+
+    def get_root_folders(self):
+        """1. Discover Root Folders (Ficheros root)."""
+        url = self._url(BASE_URL, "/sapi/media/folder/root?action=get")
+        print(f"[Root Folders] GET {url[:60]}...")
+        r = self.session.get(url, timeout=15)
+        print(f"  Response ({r.status_code}): {r.text[:300]}")
+        return r
+
+    def list_subfolders(self, parent_id: int, limit: int = 200, offset: int = None):
+        """List a single batch of subfolders inside parent folder."""
+        url_part = f"/sapi/media/folder?action=list&parentid={parent_id}&limit={limit}"
+        if offset is not None and int(offset) > 0:
+            url_part += f"&offset={offset}"
+        url = self._url(BASE_URL, url_part)
+        r = self.session.get(url, timeout=20)
+        return r
+
+    def list_all_subfolders(self, parent_id: int, batch_size: int = 200) -> list:
+        """Fetch all subfolders inside parent_id with automatic pagination."""
+        all_folders = []
+        offset = 0
+        while True:
+            r = self.list_subfolders(parent_id, limit=batch_size, offset=offset)
+            if r.status_code != 200:
+                print(f"[!] list_subfolders HTTP {r.status_code}: {r.text[:200]}", flush=True)
+                break
+            try:
+                res_data = r.json()
+            except Exception as e:
+                print(f"[!] list_subfolders JSON decode error: {e}", flush=True)
+                break
+            if "error" in res_data:
+                print(f"[!] list_subfolders API error: {res_data.get('error')}", flush=True)
+                break
+            folders = res_data.get("data", {}).get("folders", [])
+            if not folders:
+                break
+            all_folders.extend(folders)
+            if len(folders) < batch_size:
+                break
+            offset += len(folders)
+        return all_folders
+
+    def list_media_in_folder(self, folder_id: int, limit: int = 200, offset: int = None):
+        """List a single batch of media/files inside a folder."""
+        url_part = f"/sapi/media?action=get&folderid={folder_id}&limit={limit}"
+        if offset is not None and int(offset) > 0:
+            url_part += f"&offset={offset}"
+        url = self._url(BASE_URL, url_part)
+        payload = {
+            "data": {
+                "fields": [
+                    "name",
+                    "modificationdate",
+                    "creationdate",
+                    "size",
+                    "url",
+                    "etag",
+                    "folderid"
+                ]
+            }
+        }
+        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=20)
+        return r
+
+    def list_all_media_in_folder(self, folder_id: int, batch_size: int = 200) -> list:
+        """Fetch all media/files inside folder_id with automatic pagination."""
+        all_files = []
+        offset = 0
+        while True:
+            r = self.list_media_in_folder(folder_id, limit=batch_size, offset=offset)
+            if r.status_code != 200:
+                print(f"[!] list_media_in_folder HTTP {r.status_code}: {r.text[:200]}", flush=True)
+                break
+            try:
+                res_data = r.json()
+            except Exception as e:
+                print(f"[!] list_media_in_folder JSON decode error: {e}", flush=True)
+                break
+            if "error" in res_data:
+                print(f"[!] list_media_in_folder API error: {res_data.get('error')}", flush=True)
+                break
+            files = res_data.get("data", {}).get("media", [])
+            if not files:
+                break
+            all_files.extend(files)
+            if len(files) < batch_size:
+                break
+            offset += len(files)
+        return all_files
+
+    def create_folder(self, name: str, parent_id: int):
+        """2. Create a new folder."""
+        url = self._url(BASE_URL, "/sapi/media/folder?action=save")
+        payload = {
+            "data": {
+                "magic": False,
+                "offline": False,
+                "name": name,
+                "parentid": parent_id
+            }
+        }
+        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        return r
+
+    def update_folder(self, folder_id: int, name: str, parent_id: int = None):
+        """Update/rename/move an existing folder."""
+        url = self._url(BASE_URL, "/sapi/media/folder?action=save")
+        data = {
+            "id": folder_id,
+            "name": name,
+        }
+        if parent_id is not None:
+            data["parentid"] = parent_id
+        payload = {"data": data}
+        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        return r
+
+    def update_media(self, media_id: str, name: str = None, folder_id: int = None, mediatype: str = "file"):
+        """Update/rename an existing media file in Movistar Cloud."""
+        url = self._url(BASE_URL, f"/sapi/upload/{mediatype}?action=save-metadata")
+        data = {"id": str(media_id)}
+        if name is not None:
+            data["name"] = name
+        if folder_id is not None:
+            data["folderid"] = folder_id
+        payload = {"data": data}
+        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        return r
+
+    def upload_file_to_folder(self, file_name: str, content, folder_id: int, mime: str = "application/octet-stream"):
+        """3. Upload a file directly into a folder."""
+        url = self._url(UPLOAD_URL, "/sapi/upload?action=save&acceptasynchronous=true")
+        now_rfc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        
+        if isinstance(content, bytes):
+            size = len(content)
+            body = content
+        else:
+            content.seek(0, 2)
+            size = content.tell()
+            content.seek(0)
+            body = content
+            
+        meta = {
+            "data": {
+                "name": file_name,
+                "size": size,
+                "modificationdate": now_rfc,
+                "creationdate": now_rfc,
+                "contenttype": mime,
+                "folderid": folder_id
+            }
+        }
+        files = {
+            "data": (None, json.dumps(meta), "application/json"),
+            "file": (file_name, body, mime)
+        }
+        r = self.session.post(url, files=files, timeout=600)
+        return r
+
+    def download_file_stream(self, file_info: dict):
+        """
+        Download a file from Movistar Cloud returning a streaming file-like object.
+        Supports file_info with 'url' or 'id'.
+        Verifies that the server does not return an error JSON disguised with HTTP 200.
+        """
+        url = file_info.get("url")
+        file_id = file_info.get("id")
+
+        def _is_valid_download(resp):
+            if resp.status_code != 200:
+                resp.close()
+                return False
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            if "application/json" in ct or "text/javascript" in ct:
+                try:
+                    err_json = resp.json()
+                    err_msg = err_json.get("error", err_json)
+                    print(f"[!] download_file_stream: Movistar returned error JSON (Content-Type: {ct}): {err_msg}", flush=True)
+                except Exception:
+                    print(f"[!] download_file_stream: Movistar returned non-binary response (Content-Type: {ct}): {resp.text[:200]}", flush=True)
+                resp.close()
+                return False
+            return True
+
+        # 1. Try URL if present
+        if url:
+            if not url.startswith("http"):
+                url = f"{BASE_URL}{url}"
+            if "validationkey=" not in url:
+                sep = "&" if "?" in url else "?"
+                url = f"{url}{sep}validationkey={self.validationkey}"
+            try:
+                r = self.session.get(url, stream=True, timeout=60)
+                if _is_valid_download(r):
+                    return DownloadStream(r)
+            except Exception as e:
+                print(f"[!] download_file_stream URL request failed: {e}", flush=True)
+
+        # 2. Try download endpoints by id
+        if file_id:
+            # 2a. Request fresh signed URL from media API
+            try:
+                meta_url = self._url(BASE_URL, f"/sapi/media?action=get&id={file_id}")
+                r_meta = self.session.post(
+                    meta_url,
+                    json={"data": {"fields": ["name", "size", "url", "etag"]}},
+                    headers={"Content-Type": "application/json;charset=UTF-8"},
+                    timeout=15
+                )
+                if r_meta.status_code == 200:
+                    media_items = r_meta.json().get("data", {}).get("media", [])
+                    target_media = next((m for m in media_items if str(m.get("id")) == str(file_id)), None)
+                    if target_media and target_media.get("url"):
+                        fresh_url = target_media["url"]
+                        if not fresh_url.startswith("http"):
+                            fresh_url = f"{BASE_URL}{fresh_url}"
+                        if "validationkey=" not in fresh_url:
+                            sep = "&" if "?" in fresh_url else "?"
+                            fresh_url = f"{fresh_url}{sep}validationkey={self.validationkey}"
+                        r_fresh = self.session.get(fresh_url, stream=True, timeout=60)
+                        if _is_valid_download(r_fresh):
+                            return DownloadStream(r_fresh)
+            except Exception as e:
+                print(f"[!] download_file_stream fresh URL request failed for id {file_id}: {e}", flush=True)
+
+            # 2b. Candidate direct download endpoints
+            candidate_endpoints = [
+                f"/sapi/media/download?id={file_id}",
+                f"/sapi/media?action=download&id={file_id}",
+                f"/sapi/media/content?id={file_id}",
+            ]
+            for ep in candidate_endpoints:
+                try:
+                    dl_url = self._url(BASE_URL, ep)
+                    r = self.session.get(dl_url, stream=True, timeout=60)
+                    if _is_valid_download(r):
+                        return DownloadStream(r)
+                except Exception as e:
+                    print(f"[!] download_file_stream endpoint {ep} request failed: {e}", flush=True)
+
+        return io.BytesIO(b"")
+
+    def delete_folder(self, folder_id: int, permanent: bool = False):
+        """Delete a folder (soft delete or permanent)."""
+        action = "delete" if permanent else "softdelete"
+        url = self._url(BASE_URL, f"/sapi/media/folder?action={action}")
+        payload = {
+            "data": {
+                "folders": [folder_id]
+            }
+        }
+        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        return r
+
+    def delete_file(self, file_id: str):
+        """Delete a file (soft delete)."""
+        url = self._url(BASE_URL, f"/sapi/media?action=softdelete&id={file_id}")
+        r = self.session.post(url, json={}, timeout=15)
+        return r
+
+
+def main():
+    print("Testing Movistar Cloud Files Client...")
+    jsid, vk = load_credentials()
+    print(f"JSESSIONID: {jsid[:6]}... (len {len(jsid) if jsid else 0})")
+    print(f"ValidationKey: {vk[:6]}... (len {len(vk) if vk else 0})")
+
+    if not jsid or not vk:
+        print("[!] No credentials found. Please login via the Web UI or set environment variables.")
+        return
+
+    client = MovistarFilesClient(jsid, vk)
+    
+    # 1. System info
+    client.get_system_info()
+    print("System info received.")
+
+    # 2. Root folder listing
+    res_root = client.get_root_folders()
+
+    # 3. If root folder found, test list subfolders and media with pagination
+    if res_root.status_code == 200:
+        data = res_root.json()
+        folders = data.get("data", {}).get("folders", [])
+        print(f"Found {len(folders)} root folders.")
+        root_folder = next((f for f in folders if f.get("magic")), folders[0] if folders else None)
+        if root_folder:
+            root_id = root_folder["id"]
+            print(f"Active Root Folder: ID={root_id}, Name={root_folder.get('name')}")
+            subfolders = client.list_all_subfolders(root_id)
+            print(f"Total subfolders (paginated): {len(subfolders)}")
+            media_files = client.list_all_media_in_folder(root_id)
+            print(f"Total files in root (paginated): {len(media_files)}")
+            
+            # Test create folder
+            test_folder_name = f"Duplicati_Test_{int(time.time())}"
+            res_create = client.create_folder(test_folder_name, root_id)
+            if res_create.status_code == 200:
+                created_folder = res_create.json()
+                new_folder_id = created_folder.get("id")
+                print(f"Successfully created folder {test_folder_name} with ID: {new_folder_id}")
+                
+                # Test upload
+                test_content = b"Hello from Movistar Duplicati Test!"
+                res_upload = client.upload_file_to_folder("test.txt", test_content, new_folder_id)
+                print("Upload response:", res_upload.text[:300])
+
+
+if __name__ == "__main__":
+    main()

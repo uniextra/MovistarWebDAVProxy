@@ -1,0 +1,6 @@
+﻿requests
+Pillow
+flask
+wsgidav
+cheroot
+python-dotenv

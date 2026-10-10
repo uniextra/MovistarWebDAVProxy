@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  movistar-webdav-proxy:
+    image: uniextra/movistar-webdav-proxy:latest
+    build: .
+    container_name: movistar-webdav-proxy
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-5000}:5000"      # Panel Web de gestión y logs
+      - "${WEBDAV_PORT:-5050}:8080"   # Endpoint WebDAV (Duplicati / Synology HyperBackup)
+      - "${VNC_PORT:-8084}:8084"      # Interfaz gráfica VNC para login por SMS
+    volumes:
+      - movistar_tokens:/app/tokens
+
+volumes:
+  movistar_tokens:
+    name: movistar_webdav_tokens
