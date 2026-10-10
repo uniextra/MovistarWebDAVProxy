@@ -37,8 +37,8 @@ def perform_movistar_login(phone=None):
     except Exception:
         pass
 
-    login_url = get_oauth_login_url()
-    print("Iniciando navegador virtual para registro de dispositivo Android nativo...", flush=True)
+    login_url = "https://micloud.movistar.es"
+    print("Iniciando navegador virtual para Movistar Cloud España...", flush=True)
     print("Por favor, introduce tu número de móvil y el código SMS recibido.", flush=True)
     print("Esta ventana se cerrará automáticamente en cuanto se complete la vinculación.", flush=True)
     
@@ -60,7 +60,7 @@ def perform_movistar_login(phone=None):
         context = browser.new_context(no_viewport=True)
         page = context.new_page()
         
-        # Interceptar navegación y respuestas para detectar el authorization code
+        # Interceptar navegación y respuestas para detectar el authorization code si aplica
         def check_url(url):
             nonlocal auth_code
             if "clientoauth.html" in url and "code=" in url:
@@ -71,7 +71,7 @@ def perform_movistar_login(phone=None):
 
         page.on("framenavigated", lambda frame: check_url(frame.url))
         
-        # Navegamos a la URL de autorización nativa OAuth
+        # Navegamos a la página oficial de Movistar Cloud España
         page.goto(login_url)
         
         start_time = time.time()
@@ -85,7 +85,7 @@ def perform_movistar_login(phone=None):
 
             check_url(page.url)
 
-            # Leer cookies como fallback
+            # Leer cookies de sesión
             cookies = context.cookies()
             for c in cookies:
                 c_name = c.get('name', '').lower()
@@ -94,28 +94,36 @@ def perform_movistar_login(phone=None):
                 elif c_name in ('validationkey', 'validation_key', 'vk'):
                     validationkey = c['value']
 
-            # Si ya tenemos el authorization code, podemos proceder
+            # Extraer validationkey de URL y localStorage/sessionStorage
+            if not validationkey:
+                try:
+                    current_url = page.url
+                    if "validationkey=" in current_url:
+                        parsed = urllib.parse.parse_qs(urllib.parse.urlparse(current_url).query)
+                        if "validationkey" in parsed:
+                            validationkey = parsed["validationkey"][0]
+
+                    storage_vk = page.evaluate("() => localStorage.getItem('validationkey') || sessionStorage.getItem('validationkey') || ''")
+                    if storage_vk:
+                        validationkey = storage_vk
+                except Exception:
+                    pass
+
+            # Si se intercepta authorization code
             if auth_code:
                 try:
-                    print("[OAuth] Canjeando Authorization Code por Refresh Token de dispositivo Android...", flush=True)
+                    print("[OAuth] Canjeando Authorization Code...", flush=True)
                     tokens_data = exchange_code_for_tokens(auth_code)
-                    print("[OAuth] ✔ Tokens de dispositivo obtenidos con éxito (Refresh Token permanente activo).", flush=True)
+                    print("[OAuth] ✔ Tokens obtenidos con éxito.", flush=True)
                     break
                 except Exception as e:
                     print(f"[OAuth] Error al canjear code: {e}", flush=True)
-                    auth_code = None  # Reintentar si falla
+                    auth_code = None
 
-            # Fallback secundario: si se logueó por web y tenemos cookies completas
-            if not auth_code and jsessionid and validationkey:
-                # Comprobar si además logramos extraer el code de la URL
-                current_url = page.url
-                check_url(current_url)
-                if auth_code:
-                    continue
-                # Si pasaron más de 5 segundos con cookies web pero sin code, permitir fallback
-                if time.time() - start_time > 15:
-                    print("[Web] Credenciales de sesión web detectadas (fallback).", flush=True)
-                    break
+            # Si ya tenemos ambas credenciales de España, login completado
+            if jsessionid and validationkey:
+                print(f"[Login] ✔ Credenciales de Movistar España detectadas con éxito.", flush=True)
+                break
 
             if len(context.pages) == 0:
                 print("Se cerró el navegador antes de completar el login.", flush=True)
