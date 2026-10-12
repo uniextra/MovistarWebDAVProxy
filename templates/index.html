@@ -82,8 +82,16 @@
                         <span class="font-semibold text-emerald-700">Máx. 3 subidas/descargas paralelas</span>
                     </div>
                     <div class="flex justify-between text-slate-600">
-                        <span class="font-medium">Cuota virtual reportada:</span>
-                        <span class="font-semibold">10 TB disponibles</span>
+                        <span class="font-medium">Espacio en Movistar Cloud:</span>
+                        <span id="cloud-storage-used" class="font-semibold text-blue-700">-</span>
+                    </div>
+                    <div class="flex justify-between text-slate-600">
+                        <span class="font-medium">Límite por Archivo SAPI:</span>
+                        <span id="cluster-max-file" class="font-semibold">4 GB (4096 MB)</span>
+                    </div>
+                    <div class="flex justify-between text-slate-600">
+                        <span class="font-medium">Cluster Ingesta:</span>
+                        <span id="cluster-endpoint" class="font-mono text-[11px] text-slate-500">upload.micloud.movistar.es</span>
                     </div>
                 </div>
             </div>
@@ -207,6 +215,31 @@
                     }
                     if (data.jsessionid) jsessionidInput.value = data.jsessionid;
                     if (data.validationkey) validationkeyInput.value = data.validationkey;
+                    if (data.has_device_token || data.has_credentials) {
+                        loadStorageInfo(phone);
+                    }
+                }
+            } catch (err) {}
+        }
+
+        async function loadStorageInfo(phone) {
+            if (!phone) return;
+            try {
+                const res = await fetch('/storage_info?phone=' + encodeURIComponent(phone));
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const storageEl = document.getElementById('cloud-storage-used');
+                    if (storageEl) {
+                        storageEl.textContent = `${data.used_str} / ${data.total_str}`;
+                    }
+                    const maxFileEl = document.getElementById('cluster-max-file');
+                    if (maxFileEl && data.max_upload_size_mb) {
+                        maxFileEl.textContent = `${Math.round(data.max_upload_size_mb / 1024)} GB (${data.max_upload_size_mb} MB)`;
+                    }
+                    const epEl = document.getElementById('cluster-endpoint');
+                    if (epEl && data.upload_endpoint) {
+                        epEl.textContent = data.upload_endpoint.replace(/^https?:\/\//, '');
+                    }
                 }
             } catch (err) {}
         }

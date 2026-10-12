@@ -206,6 +206,73 @@ class MovistarFilesClient:
                 "Accept": "application/json, text/plain, */*",
             })
 
+        self.upload_url = UPLOAD_URL
+        self.max_upload_size_mb = 4096
+        self._init_system_info()
+
+    def _init_system_info(self):
+        """Fetch system information to resolve dynamic upload endpoint and SAPI limits."""
+        try:
+            url = f"{BASE_URL}/sapi/system/information?action=get"
+            r = self.session.get(url, timeout=5)
+            ct = (r.headers.get("content-type") or r.headers.get("Content-Type") or "").lower()
+            if r.status_code == 200 and "application/json" in ct:
+                data = r.json()
+                ep = data.get("sapi.upload.endpoint")
+                if ep and str(ep).startswith("http"):
+                    self.upload_url = str(ep).rstrip("/")
+                max_mb = data.get("sapi.upload.max-size-in-mb")
+                if max_mb and str(max_mb).isdigit():
+                    self.max_upload_size_mb = int(max_mb)
+        except Exception:
+            pass
+
+    def get_storage_space(self) -> dict:
+        """
+        Fetch account storage quota and used space from Movistar Cloud SAPI.
+        Endpoint discovered via REA: /sapi/media?action=get-storage-space&softdeleted=true
+        Returns dict with keys: used_bytes, total_bytes, free_bytes, raw.
+        """
+        url = self._url(BASE_URL, "/sapi/media?action=get-storage-space&softdeleted=true")
+        try:
+            r = self.session.get(url, timeout=15)
+            ct = (r.headers.get("content-type") or r.headers.get("Content-Type") or "").lower()
+            if r.status_code == 200 and "application/json" in ct:
+                res_data = r.json()
+                data = res_data.get("data", {})
+                used = data.get("used", 0)
+                total = data.get("total", 0)
+                try:
+                    used_bytes = int(used) if used is not None else 0
+                except (ValueError, TypeError):
+                    used_bytes = 0
+                try:
+                    total_bytes = int(total) if total is not None else 0
+                except (ValueError, TypeError):
+                    total_bytes = 0
+                free_bytes = max(0, total_bytes - used_bytes) if total_bytes > 0 else 0
+                return {
+                    "used_bytes": used_bytes,
+                    "total_bytes": total_bytes,
+                    "free_bytes": free_bytes,
+                    "raw": data
+                }
+        except Exception as e:
+            print(f"[!] get_storage_space error: {e}", flush=True)
+        return {"used_bytes": 0, "total_bytes": 0, "free_bytes": 0, "raw": {}}
+
+    def check_session(self) -> bool:
+        """
+        Ultra-lightweight heartbeat / session validation discovered from official desktop app.
+        Calls /sapi/system/information?action=get.
+        """
+        url = self._url(BASE_URL, "/sapi/system/information?action=get")
+        try:
+            r = self.session.get(url, timeout=10)
+            return r.status_code == 200
+        except Exception:
+            return False
+
     def refresh_device_token(self) -> bool:
         """Renueva el access_token usando el refresh_token permanente de Android."""
         if not self.refresh_token:
@@ -387,8 +454,8 @@ class MovistarFilesClient:
         return r
 
     def upload_file_to_folder(self, file_name: str, content, folder_id: int, mime: str = "application/octet-stream"):
-        """3. Upload a file directly into a folder."""
-        url = self._url(UPLOAD_URL, "/sapi/upload?action=save&acceptasynchronous=true")
+        """3. Upload a file directly into a folder using dynamic upload endpoint and enforcing max size limit."""
+        url = self._url(self.upload_url, "/sapi/upload?action=save&acceptasynchronous=true")
         now_rfc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         
         if isinstance(content, bytes):
@@ -399,6 +466,10 @@ class MovistarFilesClient:
             size = content.tell()
             content.seek(0)
             body = content
+
+        max_allowed_bytes = getattr(self, "max_upload_size_mb", 4096) * 1024 * 1024
+        if size > max_allowed_bytes:
+            raise ValueError(f"File '{file_name}' size ({size / (1024 * 1024):.2f} MB) exceeds maximum allowed size ({self.max_upload_size_mb} MB) for SAPI cluster upload.")
             
         meta = {
             "data": {

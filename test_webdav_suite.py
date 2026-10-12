@@ -23,7 +23,12 @@ class MockResponse:
         self.content = content
         self.text = json.dumps(self._json_data) if json_data else content.decode("utf-8", errors="ignore")
         self.raw = io.BytesIO(content)
-        self.headers = headers or {}
+        h = dict(headers or {})
+        if json_data is not None and not any(k.lower() == "content-type" for k in h):
+            h["content-type"] = "application/json"
+        self.headers = {k.lower(): v for k, v in h.items()}
+        for k, v in h.items():
+            self.headers[k] = v
 
     def json(self):
         return self._json_data
@@ -497,6 +502,96 @@ def test_download_file_stream_accepts_octet_stream():
         downloaded = stream.read()
         assert downloaded == binary_data
         stream.close()
+
+
+def test_storage_space_and_quota():
+    """Discovery #1: Test get_storage_space API and WebDAV quota integration."""
+    client = MovistarFilesClient("mock_jsid", "mock_vk")
+    mock_quota_resp = MockResponse(
+        200,
+        json_data={"data": {"used": 85899345920, "total": 0}},  # ~80 GB used, unlimited total
+        headers={"Content-Type": "application/json"}
+    )
+    with patch.object(client.session, "get", return_value=mock_quota_resp):
+        space = client.get_storage_space()
+        assert space["used_bytes"] == 85899345920
+        assert space["total_bytes"] == 0
+
+    # Test WebDAV provider & collection quota reporting
+    provider = MovistarProvider(client)
+    provider.get_storage_space = MagicMock(return_value={
+        "used_bytes": 85899345920,
+        "total_bytes": 0,
+        "free_bytes": 0
+    })
+    environ = {"movistar.api": client, "wsgidav.provider": provider}
+    col = MovistarCollection("/", environ, {"id": 1})
+    assert col.get_used_bytes() == 85899345920
+    # For unlimited account, available bytes is 10 TB - used
+    assert col.get_available_bytes() == 10 * 1024 * 1024 * 1024 * 1024 - 85899345920
+
+
+def test_dynamic_ingestion_endpoint():
+    """Discovery #2: Test dynamic resolution of sapi.upload.endpoint."""
+    mock_sys_info = MockResponse(
+        200,
+        json_data={
+            "sapi.upload.endpoint": "https://dynamic-upload.micloud.movistar.es",
+            "sapi.upload.max-size-in-mb": "4096"
+        },
+        headers={"Content-Type": "application/json"}
+    )
+    with patch("requests.Session.get", return_value=mock_sys_info):
+        client = MovistarFilesClient("mock_jsid", "mock_vk")
+        assert client.upload_url == "https://dynamic-upload.micloud.movistar.es"
+        assert client.max_upload_size_mb == 4096
+
+
+def test_max_file_size_limit():
+    """Discovery #3: Test enforcement of cluster max upload size limit."""
+    client = MovistarFilesClient("mock_jsid", "mock_vk")
+    client.max_upload_size_mb = 100  # set small 100 MB limit for test
+    oversized_content = io.BytesIO(b"0" * (101 * 1024 * 1024))  # 101 MB
+
+    with pytest.raises(ValueError, match="exceeds maximum allowed size"):
+        client.upload_file_to_folder("huge_file.zip", oversized_content, 123)
+
+
+def test_session_check_and_heartbeat():
+    """Discovery #4: Test ultra-lightweight heartbeat with /sapi/system/information."""
+    client = MovistarFilesClient("mock_jsid", "mock_vk")
+    with patch.object(client.session, "get", return_value=MockResponse(200)):
+        assert client.check_session() is True
+
+    with patch.object(client.session, "get", return_value=MockResponse(401)):
+        assert client.check_session() is False
+
+
+def test_md5_block_checksum_on_upload():
+    """Discovery #5: Test MD5 block checksum calculation and caching on PUT."""
+    import hashlib
+    client = MovistarFilesClient("mock_jsid", "mock_vk")
+    provider = MovistarProvider(client)
+    environ = {"movistar.api": client, "wsgidav.provider": provider}
+
+    file_bytes = b"Hello Movistar Cloud deduplication test payload"
+    expected_md5 = hashlib.md5(file_bytes).hexdigest()
+
+    writer = MovistarWriteObject("/test_dedup.bin", environ, folder_id=10)
+    writer.write(file_bytes)
+
+    mock_upload_resp = MockResponse(200, json_data={"data": {"id": "media-999", "name": "test_dedup.bin"}})
+    with patch.object(client, "upload_file_to_folder", return_value=mock_upload_resp):
+        writer.close()
+
+    assert "/test_dedup.bin" in provider.upload_cache
+    cached_entry = provider.upload_cache["/test_dedup.bin"]
+    assert cached_entry.get("md5") == expected_md5
+    assert cached_entry.get("id") == "media-999"
+
+    # ETag for cached memory file should match MD5
+    mem_file = MovistarMemoryFile("/test_dedup.bin", environ, cached_entry)
+    assert mem_file.get_etag() == expected_md5
 
 
 

@@ -8,6 +8,7 @@ import requests
 import logging
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from vnc_helper import ensure_vnc_services, get_vnc_status
+from test_movistar_api import MovistarFilesClient, load_account_config, build_oauth_auth_header, refresh_oauth_token
 
 # Inicialización autónoma de los servicios gráficos VNC/X11
 ensure_vnc_services()
@@ -110,7 +111,7 @@ def save_env_vars(jsid, vkey, phone=None):
         pass
 
 def keepalive_worker():
-    """Hilo demonio que realiza ping periódico a Movistar Cloud para evitar que JSESSIONID caduque por inactividad."""
+    """Hilo demonio que realiza ping periódico a Movistar Cloud con /sapi/system/information para mantener la sesión activa."""
     import time
     while True:
         time.sleep(300)  # Cada 5 minutos
@@ -126,23 +127,46 @@ def keepalive_worker():
                 if not (env_path.exists() and env_path.is_file()):
                     continue
                 try:
-                    jsid, vk = "", ""
+                    jsid, vk, access_token, refresh_token = "", "", "", ""
                     with open(env_path, 'r', encoding='utf-8') as f:
                         for line in f:
                             if "MOVISTAR_JSESSIONID=" in line:
                                 jsid = line.split("=", 1)[1].strip().strip('"').strip("'")
                             elif "MOVISTAR_VALIDATIONKEY=" in line:
                                 vk = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if jsid and vk and vk not in checked_keys:
-                        checked_keys.add(vk)
-                        s = requests.Session()
+                            elif "MOVISTAR_ACCESS_TOKEN=" in line:
+                                access_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            elif "MOVISTAR_REFRESH_TOKEN=" in line:
+                                refresh_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+
+                    session_key = refresh_token or vk
+                    if not session_key or session_key in checked_keys:
+                        continue
+                    checked_keys.add(session_key)
+
+                    s = requests.Session()
+                    if access_token and refresh_token:
+                        s.headers.update({
+                            "User-Agent": "MovistarCloud-KeepAlive/1.0",
+                            "Authorization": build_oauth_auth_header(access_token, refresh_token)
+                        })
+                        url = "https://micloud.movistar.es/sapi/system/information?action=get"
+                    elif jsid and vk:
                         s.cookies.set("JSESSIONID", jsid, domain="micloud.movistar.es", path="/")
                         s.cookies.set("validationkey", vk, domain="micloud.movistar.es", path="/")
                         s.headers.update({"User-Agent": "MovistarCloud-KeepAlive/1.0"})
                         url = f"https://micloud.movistar.es/sapi/system/information?action=get&validationkey={vk}"
-                        r = s.get(url, timeout=15)
-                        if r.status_code == 200:
-                            app.logger.debug(f"Keep-Alive heartbeat OK para {env_path.name}")
+                    else:
+                        continue
+
+                    r = s.get(url, timeout=15)
+                    if r.status_code == 200:
+                        app.logger.debug(f"Keep-Alive heartbeat OK para {env_path.name}")
+                    elif r.status_code == 401 and refresh_token:
+                        try:
+                            refresh_oauth_token(refresh_token)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
         except Exception as e:
@@ -450,6 +474,57 @@ def get_env():
         "has_device_token": has_dev,
         "device_id": env.get("MOVISTAR_DEVICE_ID", "")
     })
+
+@app.route("/storage_info", methods=["GET"])
+def storage_info():
+    """Fetch real account storage quota and SAPI limits from Movistar Cloud."""
+    phone = sanitize_phone(request.args.get("phone", ""))
+    cfg = load_account_config(phone)
+    if not (cfg.get("refresh_token") or cfg.get("access_token") or cfg.get("jsessionid")):
+        return jsonify({"status": "error", "message": "No credentials configured"}), 400
+
+    try:
+        client = MovistarFilesClient(
+            jsessionid=cfg.get("jsessionid"),
+            validationkey=cfg.get("validationkey"),
+            refresh_token=cfg.get("refresh_token"),
+            access_token=cfg.get("access_token"),
+            device_id=cfg.get("device_id"),
+            device_name=cfg.get("device_name"),
+            token_path=cfg.get("token_path")
+        )
+        info = client.get_storage_space()
+        used = info.get("used_bytes", 0)
+        total = info.get("total_bytes", 0)
+        free = info.get("free_bytes", 0)
+
+        def format_size(bytes_val):
+            if bytes_val <= 0:
+                return "0 B"
+            val = float(bytes_val)
+            for unit in ["B", "KB", "MB", "GB", "TB"]:
+                if val < 1024.0:
+                    return f"{val:.2f} {unit}"
+                val /= 1024.0
+            return f"{val:.2f} PB"
+
+        used_str = format_size(used)
+        total_str = format_size(total) if total > 0 else "Unlimited"
+        free_str = format_size(free) if total > 0 else "Unlimited"
+
+        return jsonify({
+            "status": "ok",
+            "used_bytes": used,
+            "total_bytes": total,
+            "free_bytes": free,
+            "used_str": used_str,
+            "total_str": total_str,
+            "free_str": free_str,
+            "upload_endpoint": getattr(client, "upload_url", "https://upload.micloud.movistar.es"),
+            "max_upload_size_mb": getattr(client, "max_upload_size_mb", 4096)
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 def autostart_proxy():
     global UPLOAD_PROCESS, ACTIVE_UPLOAD_PHONE, UPLOAD_LOGS

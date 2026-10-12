@@ -5,6 +5,7 @@ import time
 import threading
 from datetime import datetime, timezone
 import tempfile
+import hashlib
 from wsgidav.dav_provider import DAVProvider, DAVCollection, DAVNonCollection
 from wsgidav.dav_error import DAVError, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_CONFLICT, HTTP_INTERNAL_ERROR
 from wsgidav import util
@@ -269,6 +270,8 @@ class MovistarMemoryFile(DAVNonCollection):
         return True
 
     def get_etag(self):
+        if self.cache_data.get("md5"):
+            return self.cache_data["md5"]
         fid = self.cache_data.get("id", "mem")
         mtime = int(self.cache_data.get("time", time.time()))
         size = self.get_content_length()
@@ -480,8 +483,25 @@ class MovistarWriteObject:
                 pass
 
         size_mb = size / (1024 * 1024)
+        max_mb = getattr(api, "max_upload_size_mb", 4096)
+        if size > max_mb * 1024 * 1024:
+            self.buffer.close()
+            self.buffer = None
+            raise DAVError(413, f"File '{file_name}' size ({size_mb:.2f} MB) exceeds maximum allowed size ({max_mb} MB) for Movistar Cloud")
+
+        # Calculate fast MD5 block checksum (identical to official Movistar desktop sync engine)
+        hasher = hashlib.md5()
+        self.buffer.seek(0)
+        while True:
+            chunk = self.buffer.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+        file_md5 = hasher.hexdigest()
+        self.buffer.seek(0)
+
         now_str = datetime.now().strftime("%H:%M:%S")
-        print(f"[{now_str}] [WebDAV] ⬆ Subiendo: '{file_name}' ({size_mb:.2f} MB) a Movistar Cloud...", flush=True)
+        print(f"[{now_str}] [WebDAV] ⬆ Subiendo: '{file_name}' ({size_mb:.2f} MB, MD5: {file_md5[:8]}...) a Movistar Cloud...", flush=True)
 
         with TRANSFER_SEMAPHORE:
             res = api.upload_file_to_folder(file_name, self.buffer, self.folder_id, mime=mime)
@@ -540,7 +560,8 @@ class MovistarWriteObject:
                 "content": content_to_cache,
                 "size": size,
                 "time": now,
-                "url": real_url
+                "url": real_url,
+                "md5": file_md5
             }
             provider.invalidate_cache(self.folder_id)
 
@@ -554,11 +575,26 @@ class MovistarCollection(DAVCollection):
 
     def get_available_bytes(self):
         """RFC 4331 quota-available-bytes for WebDAV clients (e.g. Synology HyperBackup)."""
-        return 10 * 1024 * 1024 * 1024 * 1024  # 10 TB
+        provider = self.environ.get("wsgidav.provider")
+        if provider and hasattr(provider, "get_storage_space"):
+            space = provider.get_storage_space()
+            free_bytes = space.get("free_bytes", 0)
+            if free_bytes > 0:
+                return free_bytes
+            # For unlimited Movistar accounts (total_bytes == 0), report 10 TB virtual capacity minus used
+            used = space.get("used_bytes", 0)
+            return max(0, 10 * 1024 * 1024 * 1024 * 1024 - used)
+        return 10 * 1024 * 1024 * 1024 * 1024  # 10 TB virtual fallback
 
     def get_used_bytes(self):
-        """RFC 4331 quota-used-bytes."""
-        return 1024 * 1024 * 1024  # 1 GB
+        """RFC 4331 quota-used-bytes querying real storage from Movistar Cloud."""
+        provider = self.environ.get("wsgidav.provider")
+        if provider and hasattr(provider, "get_storage_space"):
+            space = provider.get_storage_space()
+            used = space.get("used_bytes")
+            if used is not None and used > 0:
+                return used
+        return 1024 * 1024 * 1024  # 1 GB fallback
 
     def get_creation_date(self):
         return parse_movistar_time(
@@ -850,6 +886,7 @@ class MovistarProvider(DAVProvider):
 
     def invalidate_cache(self, folder_id=None):
         """Invalidate in-memory listings when changes occur."""
+        self._storage_space_cache = None
         if folder_id:
             self.folder_cache.pop(folder_id, None)
             self.media_cache.pop(folder_id, None)
@@ -857,6 +894,17 @@ class MovistarProvider(DAVProvider):
             self.folder_cache.clear()
             self.media_cache.clear()
             self.path_cache.clear()
+
+    def get_storage_space(self):
+        """Cached account storage quota and used bytes (Discovery #1)."""
+        now = time.time()
+        if hasattr(self, "_storage_space_cache") and self._storage_space_cache:
+            cached_time, cached_val = self._storage_space_cache
+            if now - cached_time < 60.0:
+                return cached_val
+        res = self.api.get_storage_space()
+        self._storage_space_cache = (now, res)
+        return res
 
     def get_subfolders(self, parent_id):
         """Cached paginated listing of subfolders with immediate consistency for newly created folders."""
