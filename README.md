@@ -1,52 +1,52 @@
 # Movistar Cloud WebDAV Proxy ☁️🔐
 
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker)](https://www.docker.com/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![WebDAV](https://img.shields.io/badge/WebDAV-RFC%204918%20%7C%20RFC%204331-green)](https://tools.ietf.org/html/rfc4918)
 
-Un servidor proxy WebDAV en Docker que traduce las peticiones WebDAV estándar de herramientas de copia de seguridad (**Duplicati**, **Synology HyperBackup**, etc.) hacia la API propietaria de **Movistar Cloud España (sección Ficheros)** en tiempo real.
+A lightweight Docker WebDAV proxy that seamlessly translates standard WebDAV backup requests (**Duplicati**, **Synology HyperBackup**, **rclone**, etc.) into the proprietary **Movistar Cloud Spain (Files)** API in real-time.
 
-Permite utilizar tu almacenamiento ilimitado de Movistar Cloud como destino seguro y transparente para tus copias de seguridad de servidores, NAS y equipos personales.
-
----
-
-## 🌟 Características Principales
-
-* 🔄 **Traducción Completa de Métodos WebDAV (RFC 4918):**
-  * `PROPFIND` (listado con paginación automática sin límites de 200 items de Movistar).
-  * `PUT` (subida de archivos con búfer temporal en disco para soportar archivos de cualquier tamaño sin agotar la RAM).
-  * `GET` y `HEAD` (descargas con decodificación de chunks y compresión gzip en bruto para evitar fallos de *Hash Mismatch* en verificaciones de integridad).
-  * `MKCOL` (creación de carpetas con resolución inmediata de ID y compatibilidad con directorios anidados de tareas `.hbk`).
-  * `DELETE` (eliminación limpia de archivos y carpetas).
-  * `MOVE` y `COPY` (renombrado y movimiento nativo en la nube, esencial para el ciclo `.tmp` -> `.zip.aes` de Duplicati).
-  * `LOCK` y `UNLOCK` (gestión de bloqueos en memoria mediante WsgiDAV).
-* 📊 **Soporte de Cuotas RFC 4331:**
-  * Informa espacio disponible (`quota-available-bytes`) y usado para que los asistentes de Synology DSM y herramientas de backup validen el destino sin errores de *"Cuota insuficiente"*.
-* 🛡️ **Tolerancia a Eventual Consistency y Colisiones:**
-  * Oculta los retrasos de indexación de la CDN de Movistar mediante una memoria intermedia inteligente y reintentos automáticos.
-  * Elimina archivos obsoletos antes de sobrescribir para prevenir que Movistar duplique archivos con sufijos ` (1)`.
-  * Filtro de normalización al vuelo para garantizar que Synology siempre reciba nombres canónicos.
-* 🚦 **Semáforo de Concurrencia (Máx. 3 transferencias):**
-  * Limita estrictamente las subidas y descargas pesadas simultáneas a 3 conexiones concurrentes para trabajar en la zona óptima de la API de Movistar Cloud sin bloqueos por saturación (*Rate Limits*), manteniendo los hilos de control siempre fluidos.
-* 🔑 **Autenticación Permisiva para Clientes:**
-  * Puedes introducir cualquier usuario y contraseña en tu cliente WebDAV (Synology DSM o Duplicati obligan a rellenar estos campos); el proxy intercepta y autoriza la petición internamente contra las cookies activas de tu cuenta.
-* 📱 **Tokens Nativos de Dispositivo Android (OAuth 2.0 Permanente):**
-  * Simula ser un dispositivo Android nativo registrado (`omh android client` con identificador único de dispositivo `X-deviceid` y `refresh_token`).
-  * **Sesión independiente y multi-dispositivo:** Ya no te desconecta si inicias sesión por la web en otro ordenador; el proxy mantiene su token de dispositivo dedicado sin conflicto.
-* 💓 **Keep-Alive y Renovación Automática:**
-  * Si un `access_token` caduca, el proxy lo renueva silenciosamente usando el `refresh_token` de dispositivo. Si se usan cookies web de respaldo, un hilo demonio realiza un *heartbeat* cada 5 minutos.
-* 🖥️ **Asistente de Login Gráfico noVNC Integrado:**
-  * Permite iniciar sesión fácilmente recibiendo el código SMS en una ventana de navegador virtual (Chromium en Xvfb + noVNC) desde el puerto 5000; el proxy intercepta el flujo OAuth nativo, registra el dispositivo en Movistar Cloud y arranca el WebDAV.
-* 🚀 **Auto-reinicio Autónomo:**
-  * Si el servidor se reinicia o el contenedor se actualiza, el proxy detecta automáticamente las credenciales guardadas en `/app/tokens` y arranca el servicio WebDAV en milisegundos sin requerir intervención manual.
+Turn your unlimited Movistar Cloud storage into a transparent, secure, and remote destination for your server, NAS, and personal backups.
 
 ---
 
-## 🐳 Despliegue con Docker
+## 🌟 Key Features
 
-### Opción 1: Docker Compose (Recomendado)
+* 🔄 **Full WebDAV Method Translation (RFC 4918):**
+  * `PROPFIND` (automatic server-side pagination overcoming Movistar's default 200-item limit).
+  * `PUT` (disk-buffered streaming upload supporting files of any size without RAM exhaustion).
+  * `GET` & `HEAD` (streaming downloads with chunk decoding and gzip decompression to prevent *Hash Mismatch* corruption).
+  * `MKCOL` (folder creation with instant ID resolution and nested directory support for `.hbk` archives).
+  * `DELETE` (clean pruning of files and collections).
+  * `MOVE` & `COPY` (atomic server-side renaming/moving, essential for Duplicati's `.tmp` -> `.zip.aes` workflow).
+  * `LOCK` & `UNLOCK` (in-memory lock manager backed by WsgiDAV).
+* 📊 **RFC 4331 Storage Quota Support:**
+  * Reports virtual quota (`quota-available-bytes`) and usage so that Synology DSM and backup wizards pass pre-flight checks without *"Insufficient storage"* errors.
+* 🛡️ **Eventual Consistency & Collision Resilience:**
+  * Hides Movistar CDN indexing propagation delays via an intelligent transient cache and automatic retries.
+  * Deletes superseded cloud files prior to overwriting to prevent Movistar from generating ` (1)` duplicate suffix collisions.
+  * On-the-fly filename normalization ensuring backup software always receives canonical file paths.
+* 🚦 **Concurrency Semaphore (Max 3 Transfers):**
+  * Strictly bounds heavy concurrent uploads and downloads to 3 parallel streams to operate in Movistar Cloud's optimal throughput band without API rate-limiting or socket resets, keeping control threads fluid.
+* 🔑 **Permissive Client Authentication:**
+  * Accepts any username and password in your WebDAV client (Synology DSM and Duplicati require these fields); the proxy authorizes requests internally using your active account credentials.
+* 📱 **Native Device OAuth 2.0 Emulation:**
+  * Emulates an official Android mobile device (`omh android client` with dedicated `X-deviceid` and persistent `refresh_token`).
+  * **Zero session conflicts:** You can log into Movistar Cloud via web browsers on your PC or phone without ever kicking the WebDAV proxy offline.
+* 💓 **Automatic Keep-Alive & Token Refresh:**
+  * Expired access tokens are renewed silently in the background using the device `refresh_token`. For web cookie fallback sessions, an automatic daemon heartbeat runs every 5 minutes.
+* 🖥️ **Integrated noVNC SMS Login Assistant:**
+  * Clean web dashboard on port `5000` with an embedded noVNC virtual browser for seamless one-click SMS verification; credentials and tokens are captured and saved automatically.
+* 🚀 **Autonomous Auto-Start:**
+  * On container startup or reboot, the proxy detects saved credentials in `/app/tokens` and starts the WebDAV service in milliseconds without manual intervention.
 
-Crea un archivo `docker-compose.yml`:
+---
+
+## 🐳 Docker Deployment
+
+### Option 1: Docker Compose (Recommended)
+
+Create a `docker-compose.yml` file:
 
 ```yaml
 version: '3.8'
@@ -58,9 +58,9 @@ services:
     container_name: movistar-webdav-proxy
     restart: unless-stopped
     ports:
-      - "5000:5000"      # Panel Web de gestión y login
-      - "5050:8080"      # Puerto WebDAV (Usa 5050 en el host para no chocar con Portainer 8080)
-      - "8084:8084"      # VNC / noVNC para login visual por SMS
+      - "5000:5000"      # Web Management UI & logs
+      - "5050:8080"      # WebDAV Endpoint (map to 5050 on host to avoid port 8080 conflicts)
+      - "8084:8084"      # noVNC Virtual Browser (SMS login)
     volumes:
       - movistar_tokens:/app/tokens
 
@@ -69,12 +69,12 @@ volumes:
     name: movistar_webdav_tokens
 ```
 
-Inicia el servicio:
+Start the service:
 ```bash
 docker compose up -d
 ```
 
-### Opción 2: Docker CLI
+### Option 2: Docker CLI
 
 ```bash
 docker run -d \
@@ -89,72 +89,72 @@ docker run -d \
 
 ---
 
-## 🔑 Primer Inicio y Autenticación (Vinculación de Dispositivo)
+## 🔑 Initial Setup & Authentication (Device Pairing)
 
-1. Abre tu navegador web y accede al panel de control: `http://IP_DE_TU_SERVIDOR:5000`.
-2. Introduce tu número de teléfono móvil asociado a Movistar Cloud y pulsa **Iniciar Login**.
-3. Se abrirá una ventana flotante con el asistente visual noVNC.
-4. Introduce el código SMS de verificación que recibirás en tu móvil.
-5. El proxy interceptará el código OAuth, intercambiará el token con la API de Movistar, registrará el dispositivo nativo (`WebDAV Proxy Android`) y guardará los tokens persistentes en `/app/tokens`.
-6. En el panel verás el estado en verde: `📱 Dispositivo Nativo Android` y el servicio WebDAV arrancará de inmediato en el puerto `8080` (o `5050` según tu mapeo). ¡A partir de este momento, puedes iniciar sesión por la web en cualquier otro ordenador sin afectar a este proxy!
+1. Open your web browser and navigate to the management dashboard: `http://YOUR_SERVER_IP:5000`.
+2. Enter your mobile phone number associated with Movistar Cloud and click **"Vincular Dispositivo"**.
+3. A modal with an embedded noVNC virtual browser will appear.
+4. Enter the SMS verification code received on your phone.
+5. The proxy captures the session credentials, registers the device, saves persistent tokens into `/app/tokens`, and boots the WebDAV service immediately.
+6. The dashboard will show the active state, and the WebDAV service will begin accepting requests on port `8080` (or `5050` based on your host port mapping).
 
 ---
 
-## ⚙️ Configuración en Clientes de Backup
+## ⚙️ Backup Client Configuration
 
-### 1. Configuración en Duplicati
+### 1. Duplicati Setup
 
-En el asistente de destino de Duplicati:
+In the Duplicati destination setup wizard:
 
-| Parámetro | Valor |
+| Setting | Value |
 | :--- | :--- |
-| **Tipo de Almacenamiento** | `WebDAV` |
-| **Servidor** | IP de tu servidor (ej: `192.168.1.100`) |
-| **Puerto** | `5050` (o el puerto externo que hayas mapeado al `8080` del contenedor) |
-| **Ruta / Carpeta** | Nombre de la carpeta de destino (ej: `Backup_Duplicati` o `/Backup_Duplicati/`) |
-| **Conexión integrada (SSL)** | Desactivado (salvo que uses un reverse proxy HTTPS externo) |
-| **Nombre de usuario** | Cualquier valor (ej: `test` o `admin`) |
-| **Contraseña** | Cualquier valor (ej: `test` o `password`) |
+| **Storage Type** | `WebDAV` |
+| **Server** | Your server IP (e.g. `192.168.1.100`) |
+| **Port** | `5050` (or the host port mapped to `8080`) |
+| **Path on server** | Target folder name (e.g. `Backup_Duplicati` or `/Backup_Duplicati/`) |
+| **Integrated connection (SSL)** | Disabled (unless using an external HTTPS reverse proxy) |
+| **Username** | Any value (e.g. `admin`) |
+| **Password** | Any value (e.g. `admin`) |
 
 > [!TIP]
-> Puedes pulsar **"Probar conexión"** y Duplicati verificará permisos y creará la carpeta automáticamente si no existía.
+> Click **"Test connection"**; Duplicati will verify permissions and create the remote directory automatically.
 
 ---
 
-### 2. Configuración en Synology HyperBackup
+### 2. Synology HyperBackup Setup
 
-En el asistente de HyperBackup en DSM:
+In DSM HyperBackup wizard:
 
-1. Selecciona la opción **WebDAV**.
-2. Rellena los datos de conexión:
-   * **Dirección del servidor:** `http://IP_DE_TU_HOST_DOCKER:5050`
-   * **Nombre de usuario:** `admin` (o cualquier usuario)
-   * **Contraseña:** `admin` (o cualquier clave)
-   * **Carpeta compartida:** Selecciona una carpeta dedicada para HyperBackup (ej: `HyperBackup_NAS`).
-   * **Directorio:** Nombre del repositorio (ej: `Server_Backup.hbk`).
-3. Finaliza el asistente. La tarea quedará en estado **Online** y lista para ejecutarse de forma programada o manual.
+1. Select **WebDAV** as the backup destination.
+2. Fill in the connection settings:
+   * **Server address:** `http://YOUR_DOCKER_HOST_IP:5050`
+   * **Username:** `admin` (or any string)
+   * **Password:** `admin` (or any string)
+   * **Folder:** Select or enter a dedicated folder for HyperBackup (e.g. `HyperBackup_NAS`).
+   * **Directory:** Repository name (e.g. `Server_Backup.hbk`).
+3. Complete the wizard. The backup task will report **Online** and is ready for scheduled or on-demand backups.
 
 > [!IMPORTANT]
-> **Recomendación:** Mantén carpetas separadas en Movistar Cloud para Duplicati y HyperBackup (por ejemplo, `/Duplicati_Server/` y `/HyperBackup_NAS/`) para que cada herramienta gestione sus índices de forma aislada.
+> **Best Practice:** Keep separate folders in Movistar Cloud for Duplicati and HyperBackup (e.g. `/Duplicati_Server/` and `/HyperBackup_NAS/`) so that each application manages its indices in complete isolation.
 
 ---
 
-## 🧪 Tests y Validación
+## 🧪 Tests & Verification
 
-El proyecto incluye una suite de pruebas unitarias y de integración que verifica la conformidad del protocolo WebDAV:
+The repository includes a comprehensive unit and integration test suite:
 
 ```bash
 python test_webdav_suite.py
 ```
 
-Valida:
-* Concurrencia de streams de descarga.
-* Normalización de sufijos ` (1)` y extensiones `.hbk`.
-* Reporte de cuotas RFC 4331.
-* Rechazo de respuestas JSON con código 200 ante errores de API.
+Validates:
+* Download stream concurrency and binary chunk decoding.
+* Collision normalization (` (1)` suffix pruning and `.hbk` directory resolution).
+* RFC 4331 quota reporting.
+* Rejection of API error JSON payloads disguised with HTTP 200 OK status.
 
 ---
 
-## 📄 Licencia
+## 📄 License
 
-Este proyecto está bajo la Licencia [MIT](LICENSE).
+This project is licensed under the [MIT License](LICENSE).
