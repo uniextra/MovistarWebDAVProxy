@@ -8,6 +8,10 @@ A lightweight Docker WebDAV proxy that seamlessly translates standard WebDAV bac
 
 Turn your unlimited Movistar Cloud storage into a transparent, secure, and remote destination for your server, NAS, and personal backups.
 
+<p align="center">
+  <img src="screenshot.png" alt="Movistar WebDAV Proxy Dashboard & HyperBackup Live Terminal" width="850">
+</p>
+
 ---
 
 ## 🌟 Key Features
