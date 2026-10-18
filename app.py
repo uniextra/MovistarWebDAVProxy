@@ -101,12 +101,32 @@ def save_env_vars(jsid, vkey, phone=None):
     if not phone_clean:
         return
 
-    content = f'MOVISTAR_JSESSIONID="{jsid}"\nMOVISTAR_VALIDATIONKEY="{vkey}"\nMOVISTAR_PHONE="{phone_clean}"\n'
+    # Preservar tokens de dispositivo nativo si ya existían
+    existing = get_env_vars(phone_clean)
+    refresh_token = existing.get("MOVISTAR_REFRESH_TOKEN", "")
+    access_token = existing.get("MOVISTAR_ACCESS_TOKEN", "")
+    device_id = existing.get("MOVISTAR_DEVICE_ID", "")
+    device_name = existing.get("MOVISTAR_DEVICE_NAME", "")
+
+    lines = [
+        f'MOVISTAR_PHONE="{phone_clean}"',
+        f'MOVISTAR_JSESSIONID="{jsid}"',
+        f'MOVISTAR_VALIDATIONKEY="{vkey}"'
+    ]
+    if device_id:
+        lines.append(f'MOVISTAR_DEVICE_ID="{device_id}"')
+    if device_name:
+        lines.append(f'MOVISTAR_DEVICE_NAME="{device_name}"')
+    if refresh_token:
+        lines.append(f'MOVISTAR_REFRESH_TOKEN="{refresh_token}"')
+    if access_token:
+        lines.append(f'MOVISTAR_ACCESS_TOKEN="{access_token}"')
+
     target = TOKENS_DIR / f"account_{phone_clean}.env"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, 'w', encoding='utf-8') as f:
-            f.write(content)
+            f.write("\n".join(lines) + "\n")
     except Exception:
         pass
 
@@ -319,16 +339,23 @@ def start():
         vkey = data.get("validationkey", "").strip()
         takeout = data.get("takeout", False)
 
+        existing_env = get_env_vars(phone)
+        has_device_token = bool(existing_env.get("MOVISTAR_REFRESH_TOKEN"))
+
         if not path:
             return jsonify({"status": "error", "message": "La ruta no puede estar vacía"}), 400
-        if not jsid or not vkey:
-            return jsonify({"status": "error", "message": "Faltan las credenciales de sesión"}), 400
+        if not has_device_token and (not jsid or not vkey):
+            return jsonify({"status": "error", "message": "Faltan las credenciales de sesión. Por favor, pulsa 'Vincular Dispositivo (Login SMS Oficial)' para generar tus tokens permanentes."}), 400
 
-        save_env_vars(jsid, vkey, phone=phone)
+        if jsid and vkey:
+            save_env_vars(jsid, vkey, phone=phone)
+
         proc_env = os.environ.copy()
         proc_env.update(get_env_vars(phone))
-        proc_env["MOVISTAR_JSESSIONID"] = jsid
-        proc_env["MOVISTAR_VALIDATIONKEY"] = vkey
+        if jsid:
+            proc_env["MOVISTAR_JSESSIONID"] = jsid
+        if vkey:
+            proc_env["MOVISTAR_VALIDATIONKEY"] = vkey
         proc_env["MOVISTAR_PHONE"] = phone
 
         cmd = [

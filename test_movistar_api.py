@@ -329,6 +329,14 @@ class MovistarFilesClient:
         print(f"[Root Folders] GET {url[:60]}...")
         r = self.session.get(url, timeout=15)
         print(f"  Response ({r.status_code}): {r.text[:300]}")
+        if r.status_code == 401:
+            if self.refresh_token:
+                print("[!] 401 detectado en get_root_folders. Intentando renovar token con refresh_token...", flush=True)
+                if self.refresh_device_token():
+                    r = self.session.get(url, timeout=15)
+                    print(f"  Retry Response ({r.status_code}): {r.text[:300]}")
+            else:
+                print("[!] ⚠️ ERROR 401: La sesión web de Movistar Cloud ha caducado. Abre el panel web (puerto 5000) y pulsa '🔑 Vincular Dispositivo (Login SMS Oficial)' para generar credenciales permanentes que no caduquen.", flush=True)
         return r
 
     def list_subfolders(self, parent_id: int, limit: int = 200, offset: int = None):
