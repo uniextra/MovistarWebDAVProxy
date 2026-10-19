@@ -1081,11 +1081,13 @@ def main():
         device_name=cfg.get("device_name"),
         token_path=cfg.get("token_path")
     )
+    PROXY_VERSION = "v1.0.3"
     if api.is_native_device:
         print(f"[WebDAV] 📱 Modo Autenticación: DISPOSITIVO ANDROID NATIVO ({cfg.get('device_id')})", flush=True)
         print("[WebDAV] 🔒 Inmune a desconexiones web. Refresh Token permanente activo.", flush=True)
     elif cfg.get("jsessionid"):
         print("[WebDAV] 🌐 Modo Autenticación: Sesión Web (Fallback)", flush=True)
+        print("[WebDAV] ℹ️ Recomendado: Para sesiones 24/7 sin caducidad, pulsa '🔑 Vincular Dispositivo (Login SMS)' en el panel web (puerto 5000).", flush=True)
     else:
         print("[!] Warning: Movistar credentials not found. Inicia sesión en el panel Web (puerto 5000).", flush=True)
 
@@ -1106,7 +1108,7 @@ def main():
     app = WebDAVTrafficLogger(raw_app)
     
     now_str = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now_str}] [WebDAV] ✔ Proxy WebDAV iniciado y escuchando en http://{config['host']}:{config['port']}", flush=True)
+    print(f"[{now_str}] [WebDAV] ✔ Proxy WebDAV {PROXY_VERSION} iniciado y escuchando en http://{config['host']}:{config['port']}", flush=True)
     try:
         from cheroot import wsgi
         server = wsgi.Server(bind_addr=(config["host"], config["port"]), wsgi_app=app, numthreads=8)

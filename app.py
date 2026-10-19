@@ -14,6 +14,7 @@ from test_movistar_api import MovistarFilesClient, load_account_config, build_oa
 ensure_vnc_services()
 
 app = Flask(__name__)
+APP_VERSION = "v1.0.3"
 
 # Silenciar peticiones repetitivas de polling (/status, /health, /logs, websockets) de los logs de Docker
 class EndpointFilter(logging.Filter):
@@ -263,12 +264,17 @@ def status():
     return jsonify({
         "status": "running" if is_running else "stopped",
         "phone": ACTIVE_UPLOAD_PHONE or "",
-        "is_running": is_running
+        "is_running": is_running,
+        "version": APP_VERSION
     })
+
+@app.route("/version", methods=["GET"])
+def version():
+    return jsonify({"version": APP_VERSION})
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "version": APP_VERSION})
 
 @app.route("/favicon.ico")
 def favicon():
@@ -277,7 +283,7 @@ def favicon():
 @app.route("/")
 def index():
     # Se renderiza la interfaz limpia sin filtrar credenciales en el HTML inicial
-    return render_template("index.html")
+    return render_template("index.html", version=APP_VERSION)
 
 @app.route("/verify_phone", methods=["POST"])
 def verify_phone():

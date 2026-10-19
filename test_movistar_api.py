@@ -235,7 +235,7 @@ class MovistarFilesClient:
         """
         url = self._url(BASE_URL, "/sapi/media?action=get-storage-space&softdeleted=true")
         try:
-            r = self.session.get(url, timeout=15)
+            r = self._request("GET", url, timeout=15)
             ct = (r.headers.get("content-type") or r.headers.get("Content-Type") or "").lower()
             if r.status_code == 200 and "application/json" in ct:
                 res_data = r.json()
@@ -316,6 +316,36 @@ class MovistarFilesClient:
             return f"{base}{endpoint}{sep}validationkey={self.validationkey}"
         return f"{base}{endpoint}"
 
+    def _request(self, method: str, url: str, **kwargs):
+        """Unified request handler with automatic 401 token renewal and retry for native Android devices."""
+        req_fn = getattr(self.session, method.lower(), None)
+        if callable(req_fn):
+            r = req_fn(url, **kwargs)
+        else:
+            r = self.session.request(method, url, **kwargs)
+
+        if r.status_code == 401:
+            if self.refresh_token:
+                print(f"[OAuth] 🔄 HTTP 401 recibido en {url.split('?')[0]}. Renovando access_token de dispositivo automáticamente...", flush=True)
+                if self.refresh_device_token():
+                    if "headers" in kwargs and isinstance(kwargs["headers"], dict) and "Authorization" in kwargs["headers"]:
+                        kwargs["headers"]["Authorization"] = self.session.headers.get("Authorization")
+                    if "files" in kwargs and isinstance(kwargs["files"], dict):
+                        for k, v in kwargs["files"].items():
+                            if isinstance(v, tuple) and len(v) >= 2 and hasattr(v[1], "seek"):
+                                try:
+                                    v[1].seek(0)
+                                except Exception:
+                                    pass
+                    if callable(req_fn):
+                        r = req_fn(url, **kwargs)
+                    else:
+                        r = self.session.request(method, url, **kwargs)
+                    print(f"[OAuth] 🔁 Petición reintentada tras renovación de token: HTTP {r.status_code}", flush=True)
+            else:
+                print(f"[!] ⚠️ ERROR 401: La sesión web de Movistar Cloud ha caducado. Abre el panel web (puerto 5000) y pulsa '🔑 Vincular Dispositivo (Login SMS Oficial)' para generar credenciales permanentes que no caduquen.", flush=True)
+        return r
+
     def get_system_info(self):
         """Get system info (public endpoint)."""
         url = self._url(BASE_URL, "/sapi/system/information?action=get")
@@ -327,16 +357,8 @@ class MovistarFilesClient:
         """1. Discover Root Folders (Ficheros root)."""
         url = self._url(BASE_URL, "/sapi/media/folder/root?action=get")
         print(f"[Root Folders] GET {url[:60]}...")
-        r = self.session.get(url, timeout=15)
+        r = self._request("GET", url, timeout=15)
         print(f"  Response ({r.status_code}): {r.text[:300]}")
-        if r.status_code == 401:
-            if self.refresh_token:
-                print("[!] 401 detectado en get_root_folders. Intentando renovar token con refresh_token...", flush=True)
-                if self.refresh_device_token():
-                    r = self.session.get(url, timeout=15)
-                    print(f"  Retry Response ({r.status_code}): {r.text[:300]}")
-            else:
-                print("[!] ⚠️ ERROR 401: La sesión web de Movistar Cloud ha caducado. Abre el panel web (puerto 5000) y pulsa '🔑 Vincular Dispositivo (Login SMS Oficial)' para generar credenciales permanentes que no caduquen.", flush=True)
         return r
 
     def list_subfolders(self, parent_id: int, limit: int = 200, offset: int = None):
@@ -345,7 +367,7 @@ class MovistarFilesClient:
         if offset is not None and int(offset) > 0:
             url_part += f"&offset={offset}"
         url = self._url(BASE_URL, url_part)
-        r = self.session.get(url, timeout=20)
+        r = self._request("GET", url, timeout=20)
         return r
 
     def list_all_subfolders(self, parent_id: int, batch_size: int = 200) -> list:
@@ -393,7 +415,7 @@ class MovistarFilesClient:
                 ]
             }
         }
-        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=20)
+        r = self._request("POST", url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=20)
         return r
 
     def list_all_media_in_folder(self, folder_id: int, batch_size: int = 200) -> list:
@@ -433,7 +455,7 @@ class MovistarFilesClient:
                 "parentid": parent_id
             }
         }
-        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        r = self._request("POST", url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
         return r
 
     def update_folder(self, folder_id: int, name: str, parent_id: int = None):
@@ -446,7 +468,7 @@ class MovistarFilesClient:
         if parent_id is not None:
             data["parentid"] = parent_id
         payload = {"data": data}
-        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        r = self._request("POST", url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
         return r
 
     def update_media(self, media_id: str, name: str = None, folder_id: int = None, mediatype: str = "file"):
@@ -458,7 +480,7 @@ class MovistarFilesClient:
         if folder_id is not None:
             data["folderid"] = folder_id
         payload = {"data": data}
-        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        r = self._request("POST", url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
         return r
 
     def upload_file_to_folder(self, file_name: str, content, folder_id: int, mime: str = "application/octet-stream"):
@@ -493,7 +515,7 @@ class MovistarFilesClient:
             "data": (None, json.dumps(meta), "application/json"),
             "file": (file_name, body, mime)
         }
-        r = self.session.post(url, files=files, timeout=600)
+        r = self._request("POST", url, files=files, timeout=600)
         return r
 
     def download_file_stream(self, file_info: dict):
@@ -529,7 +551,7 @@ class MovistarFilesClient:
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}validationkey={self.validationkey}"
             try:
-                r = self.session.get(url, stream=True, timeout=60)
+                r = self._request("GET", url, stream=True, timeout=60)
                 if _is_valid_download(r):
                     return DownloadStream(r)
             except Exception as e:
@@ -540,7 +562,8 @@ class MovistarFilesClient:
             # 2a. Request fresh signed URL from media API
             try:
                 meta_url = self._url(BASE_URL, f"/sapi/media?action=get&id={file_id}")
-                r_meta = self.session.post(
+                r_meta = self._request(
+                    "POST",
                     meta_url,
                     json={"data": {"fields": ["name", "size", "url", "etag"]}},
                     headers={"Content-Type": "application/json;charset=UTF-8"},
@@ -556,7 +579,7 @@ class MovistarFilesClient:
                         if "validationkey=" not in fresh_url:
                             sep = "&" if "?" in fresh_url else "?"
                             fresh_url = f"{fresh_url}{sep}validationkey={self.validationkey}"
-                        r_fresh = self.session.get(fresh_url, stream=True, timeout=60)
+                        r_fresh = self._request("GET", fresh_url, stream=True, timeout=60)
                         if _is_valid_download(r_fresh):
                             return DownloadStream(r_fresh)
             except Exception as e:
@@ -571,7 +594,7 @@ class MovistarFilesClient:
             for ep in candidate_endpoints:
                 try:
                     dl_url = self._url(BASE_URL, ep)
-                    r = self.session.get(dl_url, stream=True, timeout=60)
+                    r = self._request("GET", dl_url, stream=True, timeout=60)
                     if _is_valid_download(r):
                         return DownloadStream(r)
                 except Exception as e:
@@ -588,13 +611,13 @@ class MovistarFilesClient:
                 "folders": [folder_id]
             }
         }
-        r = self.session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
+        r = self._request("POST", url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=15)
         return r
 
     def delete_file(self, file_id: str):
         """Delete a file (soft delete)."""
         url = self._url(BASE_URL, f"/sapi/media?action=softdelete&id={file_id}")
-        r = self.session.post(url, json={}, timeout=15)
+        r = self._request("POST", url, json={}, timeout=15)
         return r
 
 
