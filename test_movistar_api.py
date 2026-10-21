@@ -10,7 +10,8 @@ from movistar_device_auth import (
     ANDROID_USER_AGENT,
     build_oauth_auth_header,
     refresh_oauth_token,
-    register_device
+    register_device,
+    sapi_login_oauth
 )
 
 # Base endpoints for Movistar Cloud
@@ -194,14 +195,29 @@ class MovistarFilesClient:
                 headers["X-devicename"] = self.device_name
             if self.access_token:
                 headers["Authorization"] = build_oauth_auth_header(self.access_token, self.refresh_token)
+            if self.jsessionid and self.jsessionid != "None":
+                self.session.cookies.set("JSESSIONID", self.jsessionid, domain="micloud.movistar.es", path="/")
+            if self.validationkey and self.validationkey != "None":
+                self.session.cookies.set("validationkey", self.validationkey, domain="micloud.movistar.es", path="/")
             self.session.headers.update(headers)
+            
+            # Si no hay access_token pero hay refresh_token, renovar
             if self.refresh_token and not self.access_token:
                 self.refresh_device_token()
+            elif self.access_token and (not self.validationkey or self.validationkey == "None"):
+                # Inicializar sesión SAPI para obtener validationkey
+                sapi_res = sapi_login_oauth(self.session, self.access_token, self.refresh_token, self.device_id, self.device_name)
+                if sapi_res.get("validationkey"):
+                    self.validationkey = sapi_res["validationkey"]
+                    self.session.cookies.set("validationkey", self.validationkey, domain="micloud.movistar.es", path="/")
+                if sapi_res.get("jsessionid"):
+                    self.jsessionid = sapi_res["jsessionid"]
+                    self.session.cookies.set("JSESSIONID", self.jsessionid, domain="micloud.movistar.es", path="/")
         else:
             # Modo Sesión Web (fallback)
-            if self.jsessionid:
+            if self.jsessionid and self.jsessionid != "None":
                 self.session.cookies.set("JSESSIONID", self.jsessionid, domain="micloud.movistar.es", path="/")
-            if self.validationkey:
+            if self.validationkey and self.validationkey != "None":
                 self.session.cookies.set("validationkey", self.validationkey, domain="micloud.movistar.es", path="/")
             self.session.headers.update({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -288,33 +304,59 @@ class MovistarFilesClient:
                 self.access_token = new_access
                 self.refresh_token = new_refresh
                 self.session.headers["Authorization"] = build_oauth_auth_header(self.access_token, self.refresh_token)
+
+                # Renovar sesión SAPI con los nuevos tokens para sincronizar validationkey y JSESSIONID
+                try:
+                    sapi_res = sapi_login_oauth(self.session, self.access_token, self.refresh_token, self.device_id, self.device_name)
+                    if sapi_res.get("validationkey"):
+                        self.validationkey = sapi_res["validationkey"]
+                        self.session.cookies.set("validationkey", self.validationkey, domain="micloud.movistar.es", path="/")
+                    if sapi_res.get("jsessionid"):
+                        self.jsessionid = sapi_res["jsessionid"]
+                        self.session.cookies.set("JSESSIONID", self.jsessionid, domain="micloud.movistar.es", path="/")
+                except Exception as e:
+                    print(f"[SAPI] Aviso renovación sesión SAPI: {e}", flush=True)
                 
-                # Persistir los tokens renovados en disco si existe el archivo
+                # Persistir los tokens renovados en disco en todos los archivos de entorno
+                target_paths = set()
                 if self.token_path and Path(self.token_path).exists():
+                    target_paths.add(Path(self.token_path))
+                if Path("/app/tokens/.env").exists():
+                    target_paths.add(Path("/app/tokens/.env"))
+
+                for p in target_paths:
                     try:
-                        p = Path(self.token_path)
                         text = p.read_text(encoding="utf-8")
-                        has_access = False
-                        has_refresh = False
                         lines = []
+                        keys_updated = set()
                         for line in text.splitlines():
                             if line.startswith("MOVISTAR_ACCESS_TOKEN="):
                                 lines.append(f'MOVISTAR_ACCESS_TOKEN="{self.access_token}"')
-                                has_access = True
+                                keys_updated.add("MOVISTAR_ACCESS_TOKEN")
                             elif line.startswith("MOVISTAR_REFRESH_TOKEN="):
                                 lines.append(f'MOVISTAR_REFRESH_TOKEN="{self.refresh_token}"')
-                                has_refresh = True
+                                keys_updated.add("MOVISTAR_REFRESH_TOKEN")
+                            elif line.startswith("MOVISTAR_VALIDATIONKEY=") and self.validationkey:
+                                lines.append(f'MOVISTAR_VALIDATIONKEY="{self.validationkey}"')
+                                keys_updated.add("MOVISTAR_VALIDATIONKEY")
+                            elif line.startswith("MOVISTAR_JSESSIONID=") and self.jsessionid:
+                                lines.append(f'MOVISTAR_JSESSIONID="{self.jsessionid}"')
+                                keys_updated.add("MOVISTAR_JSESSIONID")
                             else:
                                 lines.append(line)
-                        if not has_access:
+                        if "MOVISTAR_ACCESS_TOKEN" not in keys_updated:
                             lines.append(f'MOVISTAR_ACCESS_TOKEN="{self.access_token}"')
-                        if not has_refresh:
+                        if "MOVISTAR_REFRESH_TOKEN" not in keys_updated:
                             lines.append(f'MOVISTAR_REFRESH_TOKEN="{self.refresh_token}"')
+                        if self.validationkey and "MOVISTAR_VALIDATIONKEY" not in keys_updated:
+                            lines.append(f'MOVISTAR_VALIDATIONKEY="{self.validationkey}"')
+                        if self.jsessionid and "MOVISTAR_JSESSIONID" not in keys_updated:
+                            lines.append(f'MOVISTAR_JSESSIONID="{self.jsessionid}"')
                         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
                     except Exception as e:
-                        print(f"[OAuth] Error al persistir token renovado en disco: {e}", flush=True)
+                        print(f"[OAuth] Error al persistir token renovado en {p}: {e}", flush=True)
 
-                print("[OAuth] ✔ Access token renovado con éxito.", flush=True)
+                print("[OAuth] ✔ Access token y sesión SAPI renovados con éxito.", flush=True)
                 return True
         except Exception as e:
             print(f"[OAuth] ❌ Error al renovar token de dispositivo: {e}", flush=True)
@@ -352,8 +394,30 @@ class MovistarFilesClient:
                     else:
                         r = self.session.request(method, url, **kwargs)
                     print(f"[OAuth] 🔁 Petición reintentada tras renovación de token: HTTP {r.status_code}", flush=True)
-            else:
-                print(f"[!] ⚠️ ERROR 401: La sesión web de Movistar Cloud ha caducado. Abre el panel web (puerto 5000) y pulsa '🔑 Vincular Dispositivo (Login SMS Oficial)' para generar credenciales permanentes que no caduquen.", flush=True)
+
+            # Si sigue en 401 o no había refresh_token, intentar auto-renovación web persistente sin SMS
+            if r.status_code == 401:
+                try:
+                    from movistar_login import renew_web_session
+                    if renew_web_session():
+                        cfg = load_account_config()
+                        self.jsessionid = cfg.get("jsessionid", "")
+                        self.validationkey = cfg.get("validationkey", "")
+                        if self.jsessionid:
+                            self.session.cookies.set("JSESSIONID", self.jsessionid, domain="micloud.movistar.es", path="/")
+                        if self.validationkey:
+                            self.session.cookies.set("validationkey", self.validationkey, domain="micloud.movistar.es", path="/")
+                        retry_url = self._url(BASE_URL, url.replace(BASE_URL, "").split("?")[0])
+                        if callable(req_fn):
+                            r = req_fn(retry_url, **kwargs)
+                        else:
+                            r = self.session.request(method, retry_url, **kwargs)
+                        print(f"[AutoRenew] 🔁 Petición reintentada tras auto-renovación web: HTTP {r.status_code}", flush=True)
+                except Exception as e:
+                    print(f"[AutoRenew] Intento de auto-renovación web fallido: {e}", flush=True)
+
+            if r.status_code == 401:
+                print(f"[!] ⚠️ ERROR 401: La sesión de Movistar Cloud ha caducado. Abre el panel web (puerto 5000) para renovar credenciales.", flush=True)
         return r
 
     def get_system_info(self):

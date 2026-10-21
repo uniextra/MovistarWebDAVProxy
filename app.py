@@ -624,7 +624,21 @@ def autostart_proxy():
     else:
         print("[*] No se encontraron credenciales válidas. Esperando inicio manual desde el panel web.")
 
+def background_session_renewer():
+    """Hilo en segundo plano que renueva la sesión web preventivamente cada 12 horas para que nunca caduque."""
+    import time
+    while True:
+        time.sleep(12 * 3600)
+        try:
+            from movistar_login import renew_web_session
+            print("[AutoRenew] Ejecutando renovación preventiva programada (cada 12h)...", flush=True)
+            renew_web_session()
+        except Exception as e:
+            print(f"[AutoRenew] Error en renovación programada: {e}", flush=True)
+
 if __name__ == "__main__":
     ensure_vnc_services()
     autostart_proxy()
+    renewer_th = threading.Thread(target=background_session_renewer, daemon=True)
+    renewer_th.start()
     app.run(host="0.0.0.0", port=5000)

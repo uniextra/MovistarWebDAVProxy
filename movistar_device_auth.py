@@ -142,3 +142,48 @@ def register_device(session: requests.Session, device_id: str, device_name: str,
         return res.status_code in (200, 201)
     except Exception:
         return False
+
+
+def sapi_login_oauth(session: requests.Session, access_token: str, refresh_token: str = "", device_id: str = "", device_name: str = "") -> dict:
+    """
+    Ejecuta el login nativo en Movistar Cloud SAPI (/sapi/login/oauth?action=login&responsetime=true)
+    para inicializar la sesión en el backend y obtener validationkey y JSESSIONID.
+    """
+    url = f"{SAPI_BASE_URL}/login/oauth?action=login&responsetime=true"
+    auth_header = build_oauth_auth_header(access_token, refresh_token)
+    headers = {
+        "Authorization": auth_header,
+        "User-Agent": ANDROID_USER_AGENT,
+        "Accept": "application/json, text/plain, */*"
+    }
+    if device_id:
+        headers["X-deviceid"] = device_id
+    if device_name:
+        headers["X-devicename"] = device_name
+
+    try:
+        res = session.get(url, headers=headers, timeout=20)
+    except Exception as e:
+        return {"status_code": 0, "validationkey": None, "jsessionid": None, "error": str(e)}
+
+    validationkey = None
+    jsessionid = session.cookies.get("JSESSIONID")
+
+    if res.status_code == 200:
+        try:
+            data = res.json()
+            if isinstance(data, dict):
+                inner = data.get("data", {})
+                validationkey = inner.get("validationkey") or inner.get("validationKey")
+        except Exception:
+            pass
+
+    if not validationkey:
+        validationkey = session.cookies.get("validationkey") or session.cookies.get("validationKey")
+
+    return {
+        "status_code": res.status_code,
+        "validationkey": validationkey,
+        "jsessionid": jsessionid,
+        "raw": res.text
+    }

@@ -9,7 +9,8 @@ from movistar_device_auth import (
     get_oauth_login_url,
     generate_device_id,
     exchange_code_for_tokens,
-    register_device
+    register_device,
+    sapi_login_oauth
 )
 
 
@@ -37,10 +38,10 @@ def perform_movistar_login(phone=None):
     except Exception:
         pass
 
-    code_verifier, login_url = get_oauth_login_url()
+    login_url = "https://micloud.movistar.es"
     print("Iniciando navegador virtual para vinculación permanente con Movistar Cloud España...", flush=True)
     print("Por favor, introduce tu número de móvil y el código SMS recibido.", flush=True)
-    print("Esta ventana se cerrará automáticamente en cuanto se complete la vinculación permanente.", flush=True)
+    print("Esta ventana se cerrará automáticamente en cuanto se complete la vinculación.", flush=True)
     
     os.environ["DISPLAY"] = ":99"
     
@@ -48,17 +49,20 @@ def perform_movistar_login(phone=None):
     jsessionid = None
     validationkey = None
     tokens_data = {}
+
+    profile_dir = Path("/app/tokens/browser_profile")
+    profile_dir.mkdir(parents=True, exist_ok=True)
     
     with sync_playwright() as p:
         exec_path = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
 
-        browser = p.chromium.launch(
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
             headless=False,
             executable_path=exec_path,
             args=["--start-maximized", "--no-sandbox", "--disable-dev-shm-usage"]
         )
-        context = browser.new_context(no_viewport=True)
-        page = context.new_page()
+        page = context.pages[0] if context.pages else context.new_page()
         
         # Interceptar navegación y respuestas para detectar el authorization code
         def check_url(url):
@@ -122,6 +126,20 @@ def perform_movistar_login(phone=None):
                     print("[OAuth] Canjeando Authorization Code con PKCE...", flush=True)
                     tokens_data = exchange_code_for_tokens(auth_code, code_verifier)
                     print("[OAuth] ✔ Tokens permanentes obtenidos con éxito.", flush=True)
+
+                    acc_token = tokens_data.get("access_token", "")
+                    ref_token = tokens_data.get("refresh_token", "")
+                    if acc_token:
+                        print("[SAPI] Inicializando sesión oficial en SAPI...", flush=True)
+                        import requests
+                        sapi_sess = requests.Session()
+                        sapi_res = sapi_login_oauth(sapi_sess, acc_token, ref_token)
+                        if sapi_res.get("validationkey"):
+                            validationkey = sapi_res["validationkey"]
+                            print(f"[SAPI] ✔ ValidationKey obtenida: {validationkey[:6]}...", flush=True)
+                        if sapi_res.get("jsessionid"):
+                            jsessionid = sapi_res["jsessionid"]
+                            print(f"[SAPI] ✔ JSESSIONID obtenida: {jsessionid[:6]}...", flush=True)
                     break
                 except Exception as e:
                     print(f"[OAuth] Error al canjear code: {e}", flush=True)
@@ -142,13 +160,65 @@ def perform_movistar_login(phone=None):
                 
             time.sleep(1)
             
-        browser.close()
+        context.close()
 
     return {
         "tokens": tokens_data,
         "jsessionid": jsessionid,
         "validationkey": validationkey
     }
+
+
+def renew_web_session(phone=None):
+    """
+    Renueva la sesión web automáticamente en segundo plano usando el perfil persistente de Chromium.
+    No requiere introducir SMS ya que la sesión persistente del navegador mantiene la autenticación.
+    """
+    profile_dir = Path("/app/tokens/browser_profile")
+    if not profile_dir.exists():
+        return False
+
+    print("[AutoRenew] 🔄 Comprobando renovación automática de sesión web...", flush=True)
+    try:
+        with sync_playwright() as p:
+            exec_path = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=True,
+                executable_path=exec_path,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto("https://micloud.movistar.es", wait_until="networkidle", timeout=30000)
+
+            jsessionid = None
+            validationkey = None
+            for c in context.cookies():
+                c_name = c.get('name', '').lower()
+                if c_name == 'jsessionid':
+                    jsessionid = c['value']
+                elif c_name in ('validationkey', 'validation_key', 'vk'):
+                    validationkey = c['value']
+
+            if not validationkey:
+                try:
+                    vk = page.evaluate("() => localStorage.getItem('validationkey') || sessionStorage.getItem('validationkey') || ''")
+                    if vk:
+                        validationkey = vk
+                except Exception:
+                    pass
+
+            context.close()
+
+            if jsessionid and validationkey:
+                save_account_env({"jsessionid": jsessionid, "validationkey": validationkey}, phone)
+                print(f"[AutoRenew] ✔ Sesión web renovada automáticamente sin SMS. JSESSIONID: {jsessionid[:6]}...", flush=True)
+                return True
+            else:
+                print("[AutoRenew] La sesión persistente ha expirado; se requiere login manual.", flush=True)
+    except Exception as e:
+        print(f"[AutoRenew] Error en renovación automática: {e}", flush=True)
+    return False
 
 
 def save_account_env(login_result: dict, phone: str):
