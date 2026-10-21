@@ -14,7 +14,7 @@ from test_movistar_api import MovistarFilesClient, load_account_config, build_oa
 ensure_vnc_services()
 
 app = Flask(__name__)
-APP_VERSION = "v1.0.4"
+APP_VERSION = "v1.0.5"
 
 # Silenciar peticiones repetitivas de polling (/status, /health, /logs, websockets) de los logs de Docker
 class EndpointFilter(logging.Filter):

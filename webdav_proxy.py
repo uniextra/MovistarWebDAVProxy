@@ -1,5 +1,13 @@
 import os
+import sys
 import io
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import re
 import time
 import threading
@@ -1081,7 +1089,7 @@ def main():
         device_name=cfg.get("device_name"),
         token_path=cfg.get("token_path")
     )
-    PROXY_VERSION = "v1.0.4"
+    PROXY_VERSION = "v1.0.5"
     if api.is_native_device:
         print(f"[WebDAV] 📱 Modo Autenticación: DISPOSITIVO ANDROID NATIVO ({cfg.get('device_id')})", flush=True)
         print("[WebDAV] 🔒 Inmune a desconexiones web. Refresh Token permanente activo.", flush=True)

@@ -206,87 +206,91 @@ def test_wsgidav_end_to_end_methods():
     from werkzeug.test import Client
 
     client = MovistarFilesClient("mock_jsid", "mock_vk")
-    with patch.object(client, "get_root_folders", return_value=MockResponse(200, {"data": {"folders": [{"id": 10, "magic": True}]}})):
+    with patch.object(client, "get_root_folders", return_value=MockResponse(200, {"data": {"folders": [{"id": 10, "magic": True}]}})), \
+         patch.object(client, "list_all_subfolders", return_value=[]), \
+         patch.object(client, "list_all_media_in_folder", return_value=[]):
         provider = MovistarProvider(client)
 
-    config = {
-        "host": "127.0.0.1",
-        "port": 8080,
-        "provider_mapping": {"/": provider},
-        "simple_dc": {"user_mapping": {"*": True}},
-        "lock_storage": True,
-        "verbose": 0
-    }
-    app = WsgiDAVApp(config)
-    test_client = Client(app)
+        config = {
+            "host": "127.0.0.1",
+            "port": 8080,
+            "provider_mapping": {"/": provider},
+            "simple_dc": {"user_mapping": {"*": True}},
+            "lock_storage": True,
+            "verbose": 0
+        }
+        app = WsgiDAVApp(config)
+        test_client = Client(app)
 
-    # 1. MKCOL /backup
-    with patch.object(client, "create_folder", return_value=MockResponse(201, {"id": 20})):
-        res = test_client.open("/backup", method="MKCOL")
-        assert res.status_code in (201, 204)
+        # 1. MKCOL /backup
+        with patch.object(client, "create_folder", return_value=MockResponse(201, {"id": 20})):
+            res = test_client.open("/backup", method="MKCOL")
+            assert res.status_code in (201, 204)
 
-    # Verify immediate PROPFIND without manual cache hack
-    res_prop = test_client.open("/backup", method="PROPFIND", headers={"Depth": "0"})
-    assert res_prop.status_code == 207
+        # Verify immediate PROPFIND without manual cache hack
+        res_prop = test_client.open("/backup", method="PROPFIND", headers={"Depth": "0"})
+        assert res_prop.status_code == 207
 
-    # 2. PUT /backup/data.dblock
-    uploaded_payload = b"Duplicati backup block binary content 12345"
-    with patch.object(client, "upload_file_to_folder", return_value=MockResponse(200, {"id": "100", "url": "https://download/100"})) as mock_up:
-        res = test_client.open("/backup/data.dblock", method="PUT", data=uploaded_payload)
-        assert res.status_code in (201, 204)
-        assert mock_up.called
+        # 2. PUT /backup/data.dblock
+        uploaded_payload = b"Duplicati backup block binary content 12345"
+        with patch.object(client, "upload_file_to_folder", return_value=MockResponse(200, {"id": "100", "url": "https://download/100"})) as mock_up:
+            res = test_client.open("/backup/data.dblock", method="PUT", data=uploaded_payload)
+            assert res.status_code in (201, 204)
+            assert mock_up.called
 
-    # 3. GET /backup/data.dblock
-    res = test_client.open("/backup/data.dblock", method="GET")
-    assert res.status_code == 200
-    assert res.data == uploaded_payload
+        # 3. GET /backup/data.dblock
+        res = test_client.open("/backup/data.dblock", method="GET")
+        assert res.status_code == 200
+        assert res.data == uploaded_payload
 
-    # 4. HEAD /backup/data.dblock
-    res = test_client.open("/backup/data.dblock", method="HEAD")
-    assert res.status_code == 200
-    assert res.data == b""
-    assert int(res.headers.get("Content-Length", 0)) == len(uploaded_payload)
+        # 4. HEAD /backup/data.dblock
+        res = test_client.open("/backup/data.dblock", method="HEAD")
+        assert res.status_code == 200
+        assert res.data == b""
+        assert int(res.headers.get("Content-Length", 0)) == len(uploaded_payload)
 
-    # 5. PROPFIND /backup (Depth: 1)
-    res = test_client.open("/backup", method="PROPFIND", headers={"Depth": "1"})
-    assert res.status_code == 207  # Multi-Status
-    assert b"data.dblock" in res.data or b"backup" in res.data
+        # 5. PROPFIND /backup (Depth: 1)
+        res = test_client.open("/backup", method="PROPFIND", headers={"Depth": "1"})
+        assert res.status_code == 207  # Multi-Status
+        assert b"data.dblock" in res.data or b"backup" in res.data
 
-    # 6. MOVE /backup/data.dblock -> /backup/data_renamed.dblock
-    with patch.object(client, "update_media", return_value=MockResponse(200)):
-        res = test_client.open(
-            "/backup/data.dblock",
-            method="MOVE",
-            headers={"Destination": "/backup/data_renamed.dblock", "Overwrite": "T"}
-        )
-        assert res.status_code in (201, 204)
+        # 6. MOVE /backup/data.dblock -> /backup/data_renamed.dblock
+        with patch.object(client, "update_media", return_value=MockResponse(200)):
+            res = test_client.open(
+                "/backup/data.dblock",
+                method="MOVE",
+                headers={"Destination": "/backup/data_renamed.dblock", "Overwrite": "T"}
+            )
+            assert res.status_code in (201, 204)
 
-    # 7. DELETE /backup/data_renamed.dblock
-    with patch.object(client, "delete_file", return_value=MockResponse(200)):
-        res = test_client.open("/backup/data_renamed.dblock", method="DELETE")
-        assert res.status_code in (200, 204)
+        # 7. DELETE /backup/data_renamed.dblock
+        with patch.object(client, "delete_file", return_value=MockResponse(200)):
+            res = test_client.open("/backup/data_renamed.dblock", method="DELETE")
+            assert res.status_code in (200, 204)
 
-    # 8. LOCK on unmapped URL /backup/lockfile
-    lock_xml = """<?xml version="1.0" encoding="utf-8" ?>
+        # 8. LOCK on unmapped URL /backup/lockfile
+        lock_xml = """<?xml version="1.0" encoding="utf-8" ?>
 <D:lockinfo xmlns:D='DAV:'>
 <D:lockscope><D:exclusive/></D:lockscope>
 <D:locktype><D:write/></D:locktype>
 <D:owner><D:href>http://duplicati.local/</D:href></D:owner>
 </D:lockinfo>"""
-    res = test_client.open(
-        "/backup/lockfile",
-        method="LOCK",
-        headers={"Timeout": "Second-3600", "Content-Type": "text/xml"},
-        data=lock_xml
-    )
-    assert res.status_code in (200, 201)
+        res = test_client.open(
+            "/backup/lockfile",
+            method="LOCK",
+            headers={"Timeout": "Second-3600", "Content-Type": "text/xml"},
+            data=lock_xml
+        )
+        assert res.status_code in (200, 201)
+        assert b"locktoken" in res.data.lower()
     assert b"locktoken" in res.data.lower()
 
 
 def test_large_file_download_fallback_from_cache():
     """Verify that a >1MB file in upload_cache streams from API instead of returning 0 bytes."""
     client = MovistarFilesClient("mock_jsid", "mock_vk")
-    provider = MovistarProvider(client)
+    with patch.object(client, "get_root_folders", return_value=MockResponse(200, {"data": {"folders": [{"id": 10, "magic": True}]}})):
+        provider = MovistarProvider(client)
     provider.root_id = 10
     environ = {"movistar.api": client, "wsgidav.provider": provider, "wsgidav.config": {}}
 
@@ -304,7 +308,8 @@ def test_large_file_download_fallback_from_cache():
     assert mem_file.get_content_length() == 52428800
 
     stream_content = b"X" * 1024  # Simulated stream
-    with patch.object(client, "download_file_stream", return_value=io.BytesIO(stream_content)) as mock_dl:
+    with patch.object(provider, "get_media", return_value=[{"id": "777", "name": "large.dblock.zip", "url": "https://micloud.movistar.es/sapi/media/download?id=777"}]), \
+         patch.object(client, "download_file_stream", return_value=io.BytesIO(stream_content)) as mock_dl:
         content_stream = mem_file.get_content()
         assert content_stream.read() == stream_content
         assert mock_dl.called
@@ -354,14 +359,16 @@ def test_thousand_files_propfind_pagination():
 def test_create_collection_returns_dav_collection_instance():
     """Verify that create_collection returns a valid DAVCollection instance and registers in cache."""
     client = MovistarFilesClient("mock_jsid", "mock_vk")
-    provider = MovistarProvider(client)
+    with patch.object(client, "get_root_folders", return_value=MockResponse(200, {"data": {"folders": [{"id": 10, "magic": True}]}})):
+        provider = MovistarProvider(client)
     provider.root_id = 10
     environ = {"movistar.api": client, "wsgidav.provider": provider, "wsgidav.config": {}}
 
     root_col = MovistarCollection("/", environ, {"id": 10})
 
     # Successful creation
-    with patch.object(client, "create_folder", return_value=MockResponse(201, {"id": 55})):
+    with patch.object(client, "create_folder", return_value=MockResponse(201, {"id": 55})), \
+         patch.object(client, "list_all_subfolders", return_value=[]):
         created_res = root_col.create_collection("my_duplicati_folder")
         assert isinstance(created_res, MovistarCollection)
         assert created_res.is_collection is True
@@ -370,7 +377,8 @@ def test_create_collection_returns_dav_collection_instance():
         assert "/my_duplicati_folder" in provider.created_folders
 
     # Failed creation raises DAVError
-    with patch.object(client, "create_folder", return_value=MockResponse(500, content=b"Server error")):
+    with patch.object(client, "create_folder", return_value=MockResponse(500, content=b"Server error")), \
+         patch.object(client, "list_all_subfolders", return_value=[]):
         with pytest.raises(DAVError):
             root_col.create_collection("failed_folder")
 
@@ -403,7 +411,9 @@ def test_duplicati_mkcol_eventual_consistency_and_immediate_verification():
 
     # Simulate eventual consistency: API list_all_subfolders returns empty list
     with patch.object(client, "create_folder", return_value=MockResponse(201, {"id": 77})) as mock_create, \
-         patch.object(client, "list_all_subfolders", return_value=[]) as mock_list_sub:
+         patch.object(client, "list_all_subfolders", return_value=[]) as mock_list_sub, \
+         patch.object(client, "list_all_media_in_folder", return_value=[]), \
+         patch.object(client, "get_root_folders", return_value=MockResponse(200, {"data": {"folders": [{"id": 10, "magic": True}]}})):
 
         # 1. Duplicati executes MKCOL
         res_mkcol = test_client.open("/duplicati_backup", method="MKCOL")
