@@ -335,7 +335,9 @@ def start():
                     "message": f"Ya hay una subida en curso para el número {ACTIVE_UPLOAD_PHONE}. Espera a que termine o cancélala antes de iniciar otra cuenta."
                 }), 400
             else:
-                return jsonify({"status": "error", "message": "Ya hay una subida en curso para esta cuenta"}), 400
+                # Si ya está corriendo para esta cuenta, detenemos el proceso anterior para reiniciar con las nuevas credenciales
+                kill_process_tree(UPLOAD_PROCESS)
+                UPLOAD_PROCESS = None
 
         path = data.get("path", "").strip()
         recursive = data.get("recursive", False)
@@ -492,6 +494,19 @@ def stop_login():
         return jsonify({"status": "ok", "message": "Login cancelado"})
     LOGIN_PROCESS = None
     return jsonify({"status": "ok", "message": "No había proceso de login activo"})
+
+@app.route("/login_status", methods=["GET"])
+def login_status():
+    global LOGIN_PROCESS, LOGIN_PHONE
+    if LOGIN_PROCESS is None:
+        return jsonify({"status": "idle"})
+    ret = LOGIN_PROCESS.poll()
+    if ret is None:
+        return jsonify({"status": "in_progress", "phone": LOGIN_PHONE})
+    elif ret == 0:
+        return jsonify({"status": "completed", "phone": LOGIN_PHONE})
+    else:
+        return jsonify({"status": "failed", "phone": LOGIN_PHONE, "code": ret})
 
 @app.route("/env", methods=["GET"])
 def get_env():

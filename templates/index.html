@@ -34,7 +34,7 @@
                 
                 <div class="mb-4">
                     <label class="block text-xs font-semibold text-slate-500 mb-1">Teléfono Móvil Asociado</label>
-                    <input type="text" id="phone" placeholder="Ej: 686594519" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                    <input type="text" id="phone" placeholder="Ej: 611223344" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
                 </div>
 
                 <div id="device-info-box" class="hidden mb-4 p-3 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-900 space-y-1">
@@ -360,24 +360,27 @@
             vncIframe.src = `http://${host}:8084/vnc.html?autoconnect=true&resize=scale`;
             vncModal.classList.remove('hidden');
 
-            // Polling para detectar cuándo termina el login
+            // Polling para detectar cuándo termina el proceso de vinculación
             if (loginCheckInterval) clearInterval(loginCheckInterval);
             loginCheckInterval = setInterval(async () => {
-                const res = await fetch('/verify_phone', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone})
-                });
-                const data = await res.json();
-                if (data.has_credentials) {
-                    clearInterval(loginCheckInterval);
-                    loginCheckInterval = null;
-                    closeLoginModal();
-                    await checkCredentials();
-                    // Auto-iniciar proxy si estaba detenido
-                    startProxy();
-                }
-            }, 2500);
+                try {
+                    const res = await fetch('/login_status');
+                    const data = await res.json();
+                    if (data.status === 'completed') {
+                        clearInterval(loginCheckInterval);
+                        loginCheckInterval = null;
+                        closeLoginModal();
+                        await checkCredentials();
+                        // Reiniciar el proxy automáticamente con los nuevos tokens
+                        startProxy();
+                    } else if (data.status === 'failed') {
+                        clearInterval(loginCheckInterval);
+                        loginCheckInterval = null;
+                        alert("El proceso de vinculación se canceló o no se completó. Por favor, inténtalo de nuevo.");
+                        closeLoginModal();
+                    }
+                } catch (e) {}
+            }, 2000);
         }
 
         function closeLoginModal() {
