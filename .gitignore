@@ -48,6 +48,7 @@ account_*.env
 
 # Testing & Logs
 .pytest_cache/
+extracted/
 pytest-cache-files-*/
 .coverage
 htmlcov/

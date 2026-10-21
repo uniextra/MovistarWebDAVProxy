@@ -37,10 +37,10 @@ def perform_movistar_login(phone=None):
     except Exception:
         pass
 
-    login_url = "https://micloud.movistar.es"
-    print("Iniciando navegador virtual para Movistar Cloud España...", flush=True)
+    code_verifier, login_url = get_oauth_login_url()
+    print("Iniciando navegador virtual para vinculación permanente con Movistar Cloud España...", flush=True)
     print("Por favor, introduce tu número de móvil y el código SMS recibido.", flush=True)
-    print("Esta ventana se cerrará automáticamente en cuanto se complete la vinculación.", flush=True)
+    print("Esta ventana se cerrará automáticamente en cuanto se complete la vinculación permanente.", flush=True)
     
     os.environ["DISPLAY"] = ":99"
     
@@ -60,18 +60,25 @@ def perform_movistar_login(phone=None):
         context = browser.new_context(no_viewport=True)
         page = context.new_page()
         
-        # Interceptar navegación y respuestas para detectar el authorization code si aplica
+        # Interceptar navegación y respuestas para detectar el authorization code
         def check_url(url):
             nonlocal auth_code
-            if "clientoauth.html" in url and "code=" in url:
-                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-                if "code" in parsed:
-                    auth_code = parsed["code"][0]
+            if auth_code:
+                return
+            if "code=" in url:
+                parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                if "code" in parsed_q:
+                    auth_code = parsed_q["code"][0]
                     print(f"[OAuth] ¡Authorization Code interceptado con éxito!", flush=True)
+                    return
+                parsed_f = urllib.parse.parse_qs(urllib.parse.urlparse(url).fragment)
+                if "code" in parsed_f:
+                    auth_code = parsed_f["code"][0]
+                    print(f"[OAuth] ¡Authorization Code interceptado con éxito (fragment)!", flush=True)
 
         page.on("framenavigated", lambda frame: check_url(frame.url))
         
-        # Navegamos a la página oficial de Movistar Cloud España
+        # Navegamos a la URL oficial de login OAuth de Telefónica con PKCE
         page.goto(login_url)
         
         start_time = time.time()
@@ -112,15 +119,19 @@ def perform_movistar_login(phone=None):
             # Si se intercepta authorization code
             if auth_code:
                 try:
-                    print("[OAuth] Canjeando Authorization Code...", flush=True)
-                    tokens_data = exchange_code_for_tokens(auth_code)
-                    print("[OAuth] ✔ Tokens obtenidos con éxito.", flush=True)
+                    print("[OAuth] Canjeando Authorization Code con PKCE...", flush=True)
+                    tokens_data = exchange_code_for_tokens(auth_code, code_verifier)
+                    print("[OAuth] ✔ Tokens permanentes obtenidos con éxito.", flush=True)
                     break
                 except Exception as e:
                     print(f"[OAuth] Error al canjear code: {e}", flush=True)
                     auth_code = None
 
-            # Si ya tenemos ambas credenciales de España, login completado
+            # Si ya tenemos tokens permanentes, salir con éxito
+            if tokens_data and tokens_data.get("refresh_token"):
+                break
+
+            # Si ya tenemos ambas credenciales de España (fallback web), login completado
             if jsessionid and validationkey:
                 print(f"[Login] ✔ Credenciales de Movistar España detectadas con éxito.", flush=True)
                 break
@@ -186,8 +197,29 @@ MOVISTAR_VALIDATIONKEY="{vk}"
         target.write_text(content, encoding='utf-8')
         print(f"✔ Credenciales de dispositivo guardadas correctamente en: {target}", flush=True)
         print(f"  Device ID: {device_id} ({device_name})", flush=True)
+        
+        # Sincronizar también con /app/tokens/.env para máxima compatibilidad
+        try:
+            primary_env = Path("/app/tokens/.env")
+            primary_env.write_text(content, encoding='utf-8')
+        except Exception:
+            pass
+
         if refresh_token:
             print("  Modo: DISPOSITIVO ANDROID NATIVO (Tokens permanentes)", flush=True)
+            if access_token:
+                try:
+                    import requests
+                    from movistar_device_auth import build_oauth_auth_header, register_device
+                    reg_session = requests.Session()
+                    reg_session.headers["Authorization"] = build_oauth_auth_header(access_token, refresh_token)
+                    reg_session.headers["X-deviceid"] = device_id
+                    reg_session.headers["X-devicename"] = device_name
+                    reg_ok = register_device(reg_session, device_id, device_name)
+                    if reg_ok:
+                        print("  ✔ Dispositivo registrado formalmente en Movistar Cloud (SAPI).", flush=True)
+                except Exception as e:
+                    print(f"  Aviso registro dispositivo SAPI: {e}", flush=True)
         else:
             print("  Modo: Sesión Web (Fallback)", flush=True)
     except Exception as e:

@@ -195,6 +195,8 @@ class MovistarFilesClient:
             if self.access_token:
                 headers["Authorization"] = build_oauth_auth_header(self.access_token, self.refresh_token)
             self.session.headers.update(headers)
+            if self.refresh_token and not self.access_token:
+                self.refresh_device_token()
         else:
             # Modo Sesión Web (fallback)
             if self.jsessionid:
@@ -292,14 +294,22 @@ class MovistarFilesClient:
                     try:
                         p = Path(self.token_path)
                         text = p.read_text(encoding="utf-8")
+                        has_access = False
+                        has_refresh = False
                         lines = []
                         for line in text.splitlines():
                             if line.startswith("MOVISTAR_ACCESS_TOKEN="):
                                 lines.append(f'MOVISTAR_ACCESS_TOKEN="{self.access_token}"')
+                                has_access = True
                             elif line.startswith("MOVISTAR_REFRESH_TOKEN="):
                                 lines.append(f'MOVISTAR_REFRESH_TOKEN="{self.refresh_token}"')
+                                has_refresh = True
                             else:
                                 lines.append(line)
+                        if not has_access:
+                            lines.append(f'MOVISTAR_ACCESS_TOKEN="{self.access_token}"')
+                        if not has_refresh:
+                            lines.append(f'MOVISTAR_REFRESH_TOKEN="{self.refresh_token}"')
                         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
                     except Exception as e:
                         print(f"[OAuth] Error al persistir token renovado en disco: {e}", flush=True)
