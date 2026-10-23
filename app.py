@@ -396,8 +396,7 @@ def start():
 
         return jsonify({"status": "ok", "message": "Subida iniciada"})
 
-@app.route("/stop", methods=["POST"])
-def stop():
+def stop_proxy_internal():
     global UPLOAD_PROCESS, UPLOAD_LOGS, ACTIVE_UPLOAD_PHONE
     with UPLOAD_LOCK:
         proc = UPLOAD_PROCESS
@@ -407,11 +406,18 @@ def stop():
             UPLOAD_LOGS.append("--- Proceso abortado por el usuario ---")
             UPLOAD_PROCESS = None
             ACTIVE_UPLOAD_PHONE = None
-            return jsonify({"status": "ok", "message": "Proceso detenido con éxito"})
+            return True
         else:
             UPLOAD_PROCESS = None
             ACTIVE_UPLOAD_PHONE = None
-            return jsonify({"status": "ok", "message": "No hay proceso activo"})
+            return False
+
+@app.route("/stop", methods=["POST"])
+def stop():
+    if stop_proxy_internal():
+        return jsonify({"status": "ok", "message": "Proceso detenido con éxito"})
+    else:
+        return jsonify({"status": "ok", "message": "No hay proceso activo"})
 
 @app.route("/logs", methods=["GET"])
 def logs():
