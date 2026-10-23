@@ -477,6 +477,14 @@ def start_login():
 
     ensure_vnc_services()
 
+    # Detener el proxy WebDAV para que no compita por Chromium mientras el usuario introduce el SMS
+    stop_proxy_internal()
+
+    try:
+        Path("/tmp/login_in_progress.lock").touch()
+    except Exception:
+        pass
+
     if LOGIN_PROCESS is not None and LOGIN_PROCESS.poll() is None:
         kill_process_tree(LOGIN_PROCESS)
         LOGIN_PROCESS = None
@@ -488,6 +496,10 @@ def start_login():
 @app.route("/stop_login", methods=["POST"])
 def stop_login():
     global LOGIN_PROCESS
+    try:
+        Path("/tmp/login_in_progress.lock").unlink(missing_ok=True)
+    except Exception:
+        pass
     if LOGIN_PROCESS is not None and LOGIN_PROCESS.poll() is None:
         kill_process_tree(LOGIN_PROCESS)
         LOGIN_PROCESS = None
@@ -504,8 +516,16 @@ def login_status():
     if ret is None:
         return jsonify({"status": "in_progress", "phone": LOGIN_PHONE})
     elif ret == 0:
+        try:
+            Path("/tmp/login_in_progress.lock").unlink(missing_ok=True)
+        except Exception:
+            pass
         return jsonify({"status": "completed", "phone": LOGIN_PHONE})
     else:
+        try:
+            Path("/tmp/login_in_progress.lock").unlink(missing_ok=True)
+        except Exception:
+            pass
         return jsonify({"status": "failed", "phone": LOGIN_PHONE, "code": ret})
 
 @app.route("/env", methods=["GET"])

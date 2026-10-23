@@ -31,6 +31,21 @@ except Exception:
     pass
 
 
+def cleanup_profile_locks(profile_dir):
+    """Elimina ficheros de bloqueo residuales de Chromium si una sesión previa se cerró abruptamente."""
+    try:
+        p = Path(profile_dir)
+        for lock_name in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
+            lock_file = p / lock_name
+            if lock_file.exists() or lock_file.is_symlink():
+                try:
+                    lock_file.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def perform_movistar_login(phone=None):
     try:
         from vnc_helper import ensure_vnc_services
@@ -52,6 +67,7 @@ def perform_movistar_login(phone=None):
 
     profile_dir = Path("/app/tokens/browser_profile")
     profile_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_profile_locks(profile_dir)
     
     with sync_playwright() as p:
         exec_path = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
@@ -62,6 +78,12 @@ def perform_movistar_login(phone=None):
             executable_path=exec_path,
             args=["--start-maximized", "--no-sandbox", "--disable-dev-shm-usage"]
         )
+        # Limpiar cookies residuales caducadas para no confundirlas con la nueva sesión
+        try:
+            context.clear_cookies()
+        except Exception:
+            pass
+
         page = context.pages[0] if context.pages else context.new_page()
         
         # Interceptar navegación y respuestas para detectar el authorization code
@@ -149,10 +171,23 @@ def perform_movistar_login(phone=None):
             if tokens_data and tokens_data.get("refresh_token"):
                 break
 
-            # Si ya tenemos ambas credenciales de España (fallback web), login completado
-            if jsessionid and validationkey:
-                print(f"[Login] ✔ Credenciales de Movistar España detectadas con éxito.", flush=True)
-                break
+            curr_url = page.url.lower()
+            is_on_login = ("segu-loginapp" in curr_url or "t3.movistar.es" in curr_url or "action=login" in curr_url)
+
+            # Si ya tenemos ambas credenciales de España Y no estamos en la pantalla de login, validar en SAPI
+            if not is_on_login and jsessionid and validationkey:
+                import requests
+                test_sess = requests.Session()
+                test_sess.cookies.set("JSESSIONID", jsessionid, domain="micloud.movistar.es", path="/")
+                test_sess.cookies.set("validationkey", validationkey, domain="micloud.movistar.es", path="/")
+                test_url = f"https://micloud.movistar.es/sapi/media/folder/root?action=get&validationkey={validationkey}"
+                try:
+                    v_res = test_sess.get(test_url, timeout=5)
+                    if v_res.status_code == 200:
+                        print(f"[Login] ✔ Credenciales de Movistar España verificadas con éxito en SAPI.", flush=True)
+                        break
+                except Exception:
+                    pass
 
             if len(context.pages) == 0:
                 print("Se cerró el navegador antes de completar el login.", flush=True)
@@ -216,10 +251,15 @@ def renew_web_session(phone=None):
     Renueva la sesión web automáticamente en segundo plano usando el perfil persistente de Chromium.
     No requiere introducir SMS ya que la sesión persistente del navegador mantiene la autenticación.
     """
+    if Path("/tmp/login_in_progress.lock").exists():
+        print("[AutoRenew] ⏳ Login interactivo en curso por el usuario. Saltando renovación en segundo plano.", flush=True)
+        return False
+
     profile_dir = Path("/app/tokens/browser_profile")
     if not profile_dir.exists():
         return False
 
+    cleanup_profile_locks(profile_dir)
     phone = detect_account_phone(phone)
     print(f"[AutoRenew] 🔄 Comprobando renovación automática de sesión web (móvil: {phone or 'autodetectando'})...", flush=True)
     try:
