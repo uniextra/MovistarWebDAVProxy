@@ -625,14 +625,17 @@ def autostart_proxy():
         print("[*] No se encontraron credenciales válidas. Esperando inicio manual desde el panel web.")
 
 def background_session_renewer():
-    """Hilo en segundo plano que renueva la sesión web preventivamente cada 12 horas para que nunca caduque."""
+    """Hilo en segundo plano que renueva la sesión web preventivamente cada 6 horas para que nunca caduque."""
     import time
     while True:
-        time.sleep(12 * 3600)
+        time.sleep(6 * 3600)
         try:
             from movistar_login import renew_web_session
-            print("[AutoRenew] Ejecutando renovación preventiva programada (cada 12h)...", flush=True)
-            renew_web_session()
+            from test_movistar_api import load_account_config
+            cfg = load_account_config()
+            target_phone = LOGIN_PHONE or cfg.get("phone")
+            print(f"[AutoRenew] Ejecutando renovación preventiva programada cada 6h (móvil: {target_phone or 'autodetectando'})...", flush=True)
+            renew_web_session(phone=target_phone)
         except Exception as e:
             print(f"[AutoRenew] Error en renovación programada: {e}", flush=True)
 

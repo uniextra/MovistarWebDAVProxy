@@ -171,8 +171,10 @@ class MovistarFilesClient:
         access_token: str = None,
         device_id: str = None,
         device_name: str = None,
-        token_path: Path = None
+        token_path: Path = None,
+        phone: str = None
     ):
+        self.phone = (phone or "").strip()
         self.jsessionid = (jsessionid or "").strip()
         self.validationkey = (validationkey or "").strip()
         self.refresh_token = (refresh_token or "").strip()
@@ -180,6 +182,11 @@ class MovistarFilesClient:
         self.device_id = (device_id or "").strip()
         self.device_name = (device_name or "Samsung SM-S928B (WebDAV Proxy)").strip()
         self.token_path = token_path
+        if not self.phone and self.token_path:
+            import re
+            m = re.search(r"account_(\d+)\.env", str(self.token_path))
+            if m:
+                self.phone = m.group(1)
         self.session = requests.Session()
         
         # Modo Dispositivo Android Nativo vs Modo Sesión Web
@@ -399,8 +406,8 @@ class MovistarFilesClient:
             if r.status_code == 401:
                 try:
                     from movistar_login import renew_web_session
-                    if renew_web_session():
-                        cfg = load_account_config()
+                    if renew_web_session(phone=self.phone):
+                        cfg = load_account_config(phone=self.phone)
                         self.jsessionid = cfg.get("jsessionid", "")
                         self.validationkey = cfg.get("validationkey", "")
                         if self.jsessionid:

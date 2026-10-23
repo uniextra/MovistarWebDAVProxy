@@ -1087,7 +1087,8 @@ def main():
         access_token=cfg.get("access_token"),
         device_id=cfg.get("device_id"),
         device_name=cfg.get("device_name"),
-        token_path=cfg.get("token_path")
+        token_path=cfg.get("token_path"),
+        phone=cfg.get("phone")
     )
     PROXY_VERSION = "v1.0.5"
     if api.is_native_device:

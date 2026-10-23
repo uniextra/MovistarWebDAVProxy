@@ -169,6 +169,48 @@ def perform_movistar_login(phone=None):
     }
 
 
+def detect_account_phone(phone=None):
+    """Detecta el número de teléfono móvil buscando en argumentos, variables de entorno o archivos de tokens."""
+    import re
+    if phone:
+        p_clean = re.sub(r"\D", "", str(phone).strip())
+        if len(p_clean) == 11 and p_clean.startswith("34"):
+            p_clean = p_clean[2:]
+        if p_clean:
+            return p_clean
+
+    env_phone = os.environ.get("MOVISTAR_PHONE")
+    if env_phone:
+        p_clean = re.sub(r"\D", "", str(env_phone).strip())
+        if len(p_clean) == 11 and p_clean.startswith("34"):
+            p_clean = p_clean[2:]
+        if p_clean:
+            return p_clean
+
+    for t_dir in [Path("/app/tokens"), Path("tokens"), Path(".")]:
+        if t_dir.exists():
+            acc_files = sorted(list(t_dir.glob("account_*.env")))
+            for f in acc_files:
+                m = re.search(r"account_(\d+)\.env", f.name)
+                if m:
+                    return m.group(1)
+
+    for env_path in [Path("/app/tokens/.env"), Path("tokens/.env"), Path(".env")]:
+        if env_path.exists():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("MOVISTAR_PHONE="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        p_clean = re.sub(r"\D", "", val)
+                        if len(p_clean) == 11 and p_clean.startswith("34"):
+                            p_clean = p_clean[2:]
+                        if p_clean:
+                            return p_clean
+            except Exception:
+                pass
+    return None
+
+
 def renew_web_session(phone=None):
     """
     Renueva la sesión web automáticamente en segundo plano usando el perfil persistente de Chromium.
@@ -178,7 +220,8 @@ def renew_web_session(phone=None):
     if not profile_dir.exists():
         return False
 
-    print("[AutoRenew] 🔄 Comprobando renovación automática de sesión web...", flush=True)
+    phone = detect_account_phone(phone)
+    print(f"[AutoRenew] 🔄 Comprobando renovación automática de sesión web (móvil: {phone or 'autodetectando'})...", flush=True)
     try:
         with sync_playwright() as p:
             exec_path = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
@@ -189,7 +232,16 @@ def renew_web_session(phone=None):
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto("https://micloud.movistar.es", wait_until="networkidle", timeout=30000)
+            try:
+                page.goto("https://micloud.movistar.es", wait_until="networkidle", timeout=30000)
+            except Exception as e:
+                print(f"[AutoRenew] Aviso carga inicial: {e}", flush=True)
+
+            curr_url = page.url.lower()
+            if "segu-loginapp" in curr_url or "t3.movistar.es" in curr_url or "action=login" in curr_url:
+                print("[AutoRenew] ⚠️ La sesión web en Movistar ha caducado por completo (redirigido a pantalla de login). Se requiere pulsar '🔑 Vincular Dispositivo' en el panel web.", flush=True)
+                context.close()
+                return False
 
             jsessionid = None
             validationkey = None
@@ -211,8 +263,23 @@ def renew_web_session(phone=None):
             context.close()
 
             if jsessionid and validationkey:
+                # Validar credenciales de forma real contra la API SAPI de Movistar antes de darlas por buenas
+                import requests
+                test_sess = requests.Session()
+                test_sess.cookies.set("JSESSIONID", jsessionid, domain="micloud.movistar.es", path="/")
+                test_sess.cookies.set("validationkey", validationkey, domain="micloud.movistar.es", path="/")
+                test_url = f"https://micloud.movistar.es/sapi/media/folder/root?action=get&validationkey={validationkey}"
+                try:
+                    v_res = test_sess.get(test_url, timeout=15)
+                    if v_res.status_code != 200:
+                        print(f"[AutoRenew] ⚠️ Las credenciales obtenidas no son válidas en SAPI (HTTP {v_res.status_code}). Se requiere nuevo login manual.", flush=True)
+                        return False
+                except Exception as e:
+                    print(f"[AutoRenew] Error validando con SAPI: {e}", flush=True)
+                    return False
+
                 save_account_env({"jsessionid": jsessionid, "validationkey": validationkey}, phone)
-                print(f"[AutoRenew] ✔ Sesión web renovada automáticamente sin SMS. JSESSIONID: {jsessionid[:6]}...", flush=True)
+                print(f"[AutoRenew] ✔ Sesión web validada y renovada con éxito. JSESSIONID: {jsessionid[:6]}...", flush=True)
                 return True
             else:
                 print("[AutoRenew] La sesión persistente ha expirado; se requiere login manual.", flush=True)
@@ -221,15 +288,11 @@ def renew_web_session(phone=None):
     return False
 
 
-def save_account_env(login_result: dict, phone: str):
-    import re
-    if not phone:
-        print("Error: No se proporcionó número de teléfono para guardar credenciales.", flush=True)
+def save_account_env(login_result: dict, phone: str = None):
+    phone_clean = detect_account_phone(phone)
+    if not phone_clean:
+        print("Error: No se proporcionó ni se pudo autodetectar el número de teléfono para guardar credenciales.", flush=True)
         return
-
-    phone_clean = re.sub(r"\D", "", str(phone).strip())
-    if len(phone_clean) == 11 and phone_clean.startswith("34"):
-        phone_clean = phone_clean[2:]
 
     tokens = login_result.get("tokens", {})
     refresh_token = tokens.get("refresh_token", "")
