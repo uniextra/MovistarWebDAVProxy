@@ -1090,7 +1090,7 @@ def main():
         token_path=cfg.get("token_path"),
         phone=cfg.get("phone")
     )
-    PROXY_VERSION = "v1.0.5"
+    PROXY_VERSION = "v1.0.6"
     if api.is_native_device:
         print(f"[WebDAV] 📱 Modo Autenticación: DISPOSITIVO ANDROID NATIVO ({cfg.get('device_id')})", flush=True)
         print("[WebDAV] 🔒 Inmune a desconexiones web. Refresh Token permanente activo.", flush=True)
