@@ -43,12 +43,14 @@ def get_oauth_login_url():
         "response_type": "code",
         "client_id": OAUTH_CLIENT_ID,
         "redirect_uri": OAUTH_REDIRECT_URI,
-        "scope": "openid",
+        "scope": "openid offline_access",
         "state": state,
         "nonce": nonce,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
-        "acr_values": "2"
+        "access_type": "offline",
+        "acr_values": "2",
+        "lang": "es"
     }
     auth_url = f"{OAUTH_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
     return code_verifier, auth_url
@@ -101,7 +103,7 @@ def refresh_oauth_token(refresh_token: str):
     return res.json()
 
 
-def build_oauth_auth_header(access_token: str, refresh_token: str = "") -> str:
+def build_oauth_auth_header(access_token: str, refresh_token: str = "", msisdn: str = "") -> str:
     """
     Construye la cabecera 'Authorization: oauth <base64>' propietaria de Synchronoss/Funambol
     utilizada por la app de Android y Windows de Movistar Cloud.
@@ -113,7 +115,7 @@ def build_oauth_auth_header(access_token: str, refresh_token: str = "") -> str:
             "platform": "android",
             "expiresin": "3600",
             "lastrefreshdate": int(time.time() * 1000),
-            "msisdn": ""
+            "msisdn": msisdn or ""
         }
     }
     raw_json = json.dumps(payload, separators=(',', ':')).encode("utf-8")
@@ -144,13 +146,13 @@ def register_device(session: requests.Session, device_id: str, device_name: str,
         return False
 
 
-def sapi_login_oauth(session: requests.Session, access_token: str, refresh_token: str = "", device_id: str = "", device_name: str = "") -> dict:
+def sapi_login_oauth(session: requests.Session, access_token: str, refresh_token: str = "", device_id: str = "", device_name: str = "", msisdn: str = "") -> dict:
     """
-    Ejecuta el login nativo en Movistar Cloud SAPI (/sapi/login/oauth?action=login&responsetime=true)
+    Ejecuta el login nativo en Movistar Cloud SAPI (/sapi/login/oauth?responsetime=true)
     para inicializar la sesión en el backend y obtener validationkey y JSESSIONID.
     """
-    url = f"{SAPI_BASE_URL}/login/oauth?action=login&responsetime=true"
-    auth_header = build_oauth_auth_header(access_token, refresh_token)
+    url = f"{SAPI_BASE_URL}/login/oauth?responsetime=true"
+    auth_header = build_oauth_auth_header(access_token, refresh_token, msisdn)
     headers = {
         "Authorization": auth_header,
         "User-Agent": ANDROID_USER_AGENT,
@@ -167,19 +169,23 @@ def sapi_login_oauth(session: requests.Session, access_token: str, refresh_token
         return {"status_code": 0, "validationkey": None, "jsessionid": None, "error": str(e)}
 
     validationkey = None
-    jsessionid = session.cookies.get("JSESSIONID")
+    jsessionid = None
+
+    for c in session.cookies:
+        c_name = c.name.lower()
+        if c_name == 'jsessionid':
+            jsessionid = c.value
+        elif c_name in ('validationkey', 'validation_key', 'vk'):
+            validationkey = c.value
 
     if res.status_code == 200:
         try:
             data = res.json()
             if isinstance(data, dict):
                 inner = data.get("data", {})
-                validationkey = inner.get("validationkey") or inner.get("validationKey")
+                validationkey = inner.get("validationkey") or inner.get("validationKey") or validationkey
         except Exception:
             pass
-
-    if not validationkey:
-        validationkey = session.cookies.get("validationkey") or session.cookies.get("validationKey")
 
     return {
         "status_code": res.status_code,

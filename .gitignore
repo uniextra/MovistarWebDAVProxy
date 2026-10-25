@@ -48,7 +48,6 @@ account_*.env
 
 # Testing & Logs
 .pytest_cache/
-extracted/
 pytest-cache-files-*/
 .coverage
 htmlcov/
@@ -67,3 +66,6 @@ scratch*/
 tmp/
 /tmp/
 synobkpinfo_dump.db
+docker_app/
+*.bundle.js
+.agent/

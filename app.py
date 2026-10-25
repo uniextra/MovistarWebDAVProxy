@@ -14,7 +14,7 @@ from test_movistar_api import MovistarFilesClient, load_account_config, build_oa
 ensure_vnc_services()
 
 app = Flask(__name__)
-APP_VERSION = "v1.0.6"
+APP_VERSION = "v1.0.7"
 
 # Silenciar peticiones repetitivas de polling (/status, /health, /logs, websockets) de los logs de Docker
 class EndpointFilter(logging.Filter):
@@ -35,6 +35,22 @@ LOGIN_PHONE = None
 TOKENS_DIR = Path("/app/tokens")
 PRIMARY_ENV_PATH = TOKENS_DIR / ".env"
 FALLBACK_ENV_PATH = Path("/app/.env")
+
+def atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8"):
+    """Escribe un archivo de forma atómica usando un archivo temporal y os.replace."""
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = file_path.with_name(f"{file_path.name}.tmp.{os.getpid()}")
+    try:
+        tmp_path.write_text(content, encoding=encoding)
+        os.replace(tmp_path, file_path)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        raise
 
 def sanitize_phone(phone):
     if not phone:
@@ -125,9 +141,7 @@ def save_env_vars(jsid, vkey, phone=None):
 
     target = TOKENS_DIR / f"account_{phone_clean}.env"
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, 'w', encoding='utf-8') as f:
-            f.write("\n".join(lines) + "\n")
+        atomic_write_text(target, "\n".join(lines) + "\n", encoding='utf-8')
     except Exception:
         pass
 
@@ -171,7 +185,11 @@ def keepalive_worker():
                             "User-Agent": "MovistarCloud-KeepAlive/1.0",
                             "Authorization": build_oauth_auth_header(access_token, refresh_token)
                         })
-                        url = "https://micloud.movistar.es/sapi/system/information?action=get"
+                        if jsid:
+                            s.cookies.set("JSESSIONID", jsid, domain="micloud.movistar.es", path="/")
+                        if vk:
+                            s.cookies.set("validationkey", vk, domain="micloud.movistar.es", path="/")
+                        url = f"https://micloud.movistar.es/sapi/system/information?action=get{f'&validationkey={vk}' if vk else ''}"
                     elif jsid and vk:
                         s.cookies.set("JSESSIONID", jsid, domain="micloud.movistar.es", path="/")
                         s.cookies.set("validationkey", vk, domain="micloud.movistar.es", path="/")
@@ -185,9 +203,15 @@ def keepalive_worker():
                         app.logger.debug(f"Keep-Alive heartbeat OK para {env_path.name}")
                     elif r.status_code == 401 and refresh_token:
                         try:
-                            refresh_oauth_token(refresh_token)
-                        except Exception:
-                            pass
+                            from test_movistar_api import MovistarFilesClient
+                            client = MovistarFilesClient(
+                                jsessionid=jsid, validationkey=vk,
+                                refresh_token=refresh_token, access_token=access_token,
+                                token_path=env_path
+                            )
+                            client.refresh_device_token()
+                        except Exception as e:
+                            app.logger.debug(f"Keep-Alive refresh error: {e}")
                 except Exception:
                     pass
         except Exception as e:
@@ -355,15 +379,17 @@ def start():
         if not has_device_token and (not jsid or not vkey):
             return jsonify({"status": "error", "message": "Faltan las credenciales de sesión. Por favor, pulsa 'Vincular Dispositivo (Login SMS Oficial)' para generar tus tokens permanentes."}), 400
 
-        if jsid and vkey:
+        # Si ya existe un dispositivo registrado, NO sobreescribir con valores viejos del formulario web
+        if not has_device_token and jsid and vkey:
             save_env_vars(jsid, vkey, phone=phone)
 
         proc_env = os.environ.copy()
         proc_env.update(get_env_vars(phone))
-        if jsid:
-            proc_env["MOVISTAR_JSESSIONID"] = jsid
-        if vkey:
-            proc_env["MOVISTAR_VALIDATIONKEY"] = vkey
+        if not has_device_token:
+            if jsid:
+                proc_env["MOVISTAR_JSESSIONID"] = jsid
+            if vkey:
+                proc_env["MOVISTAR_VALIDATIONKEY"] = vkey
         proc_env["MOVISTAR_PHONE"] = phone
 
         cmd = [

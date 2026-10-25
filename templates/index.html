@@ -301,13 +301,29 @@
             terminal.innerHTML = '<div>Iniciando proxy WebDAV...</div>';
 
             try {
+                // Chequear si la cuenta tiene dispositivo nativo para no sobreescribir tokens con valores viejos de input
+                let sendJsid = jsessionidInput.value.trim();
+                let sendVkey = validationkeyInput.value.trim();
+                try {
+                    const chk = await fetch('/verify_phone', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({phone})
+                    });
+                    const cData = await chk.json();
+                    if (cData && cData.has_device_token) {
+                        sendJsid = '';
+                        sendVkey = '';
+                    }
+                } catch(e) {}
+
                 const res = await fetch('/start', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         phone: phone,
-                        jsessionid: jsessionidInput.value.trim(),
-                        validationkey: validationkeyInput.value.trim(),
+                        jsessionid: sendJsid,
+                        validationkey: sendVkey,
                         path: '/',
                         recursive: false,
                         takeout: false

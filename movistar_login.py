@@ -1,8 +1,11 @@
+import sys
 import time
 import signal
 import os
+import re
 import urllib.parse
 from pathlib import Path
+import requests
 from playwright.sync_api import sync_playwright
 
 from movistar_device_auth import (
@@ -12,6 +15,23 @@ from movistar_device_auth import (
     register_device,
     sapi_login_oauth
 )
+
+
+def atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8"):
+    """Escribe un archivo de forma atómica usando un archivo temporal y os.replace."""
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = file_path.with_name(f"{file_path.name}.tmp.{os.getpid()}")
+    try:
+        tmp_path.write_text(content, encoding=encoding)
+        os.replace(tmp_path, file_path)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        raise
 
 
 def handle_sigterm(signum, frame):
@@ -37,9 +57,12 @@ def cleanup_profile_locks(profile_dir):
         p = Path(profile_dir)
         for lock_name in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
             lock_file = p / lock_name
-            if lock_file.exists() or lock_file.is_symlink():
+            try:
+                os.remove(str(lock_file))
+            except Exception:
                 try:
-                    lock_file.unlink()
+                    if lock_file.exists() or lock_file.is_symlink():
+                        lock_file.unlink()
                 except Exception:
                     pass
     except Exception:
@@ -53,7 +76,7 @@ def perform_movistar_login(phone=None):
     except Exception:
         pass
 
-    login_url = "https://micloud.movistar.es"
+    code_verifier, login_url = get_oauth_login_url()
     print("Iniciando navegador virtual para vinculación permanente con Movistar Cloud España...", flush=True)
     print("Por favor, introduce tu número de móvil y el código SMS recibido.", flush=True)
     print("Esta ventana se cerrará automáticamente en cuanto se complete la vinculación.", flush=True)
@@ -86,23 +109,28 @@ def perform_movistar_login(phone=None):
 
         page = context.pages[0] if context.pages else context.new_page()
         
-        # Interceptar navegación y respuestas para detectar el authorization code
+        # Interceptar navegación y peticiones para detectar el authorization code
         def check_url(url):
             nonlocal auth_code
             if auth_code:
+                return
+            if not url:
                 return
             if "code=" in url:
                 parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
                 if "code" in parsed_q:
                     auth_code = parsed_q["code"][0]
-                    print(f"[OAuth] ¡Authorization Code interceptado con éxito!", flush=True)
+                    print(f"[OAuth] ¡Authorization Code interceptado con éxito en query!", flush=True)
                     return
                 parsed_f = urllib.parse.parse_qs(urllib.parse.urlparse(url).fragment)
                 if "code" in parsed_f:
                     auth_code = parsed_f["code"][0]
-                    print(f"[OAuth] ¡Authorization Code interceptado con éxito (fragment)!", flush=True)
+                    print(f"[OAuth] ¡Authorization Code interceptado con éxito en fragment!", flush=True)
+                    return
 
         page.on("framenavigated", lambda frame: check_url(frame.url))
+        page.on("request", lambda req: check_url(req.url))
+        page.on("response", lambda resp: check_url(resp.url))
         
         # Navegamos a la URL oficial de login OAuth de Telefónica con PKCE
         page.goto(login_url)
@@ -113,7 +141,7 @@ def perform_movistar_login(phone=None):
         while True:
             if time.time() - start_time > timeout_seconds:
                 print("Tiempo de espera agotado (10 min). Cerrando navegador...", flush=True)
-                browser.close()
+                context.close()
                 return None
 
             check_url(page.url)
@@ -155,13 +183,22 @@ def perform_movistar_login(phone=None):
                         print("[SAPI] Inicializando sesión oficial en SAPI...", flush=True)
                         import requests
                         sapi_sess = requests.Session()
-                        sapi_res = sapi_login_oauth(sapi_sess, acc_token, ref_token)
+                        sapi_res = sapi_login_oauth(sapi_sess, acc_token, ref_token, msisdn=phone)
                         if sapi_res.get("validationkey"):
                             validationkey = sapi_res["validationkey"]
                             print(f"[SAPI] ✔ ValidationKey obtenida: {validationkey[:6]}...", flush=True)
                         if sapi_res.get("jsessionid"):
                             jsessionid = sapi_res["jsessionid"]
                             print(f"[SAPI] ✔ JSESSIONID obtenida: {jsessionid[:6]}...", flush=True)
+
+                        # Si SAPI no devolvió validationkey directamente, extraerla también del contexto del navegador
+                        if not validationkey or not jsessionid:
+                            for c in context.cookies():
+                                c_name = c.get('name', '').lower()
+                                if c_name == 'jsessionid' and not jsessionid:
+                                    jsessionid = c['value']
+                                elif c_name in ('validationkey', 'validation_key', 'vk') and not validationkey:
+                                    validationkey = c['value']
                     break
                 except Exception as e:
                     print(f"[OAuth] Error al canjear code: {e}", flush=True)
@@ -172,7 +209,7 @@ def perform_movistar_login(phone=None):
                 break
 
             curr_url = page.url.lower()
-            is_on_login = ("segu-loginapp" in curr_url or "t3.movistar.es" in curr_url or "action=login" in curr_url)
+            is_on_login = ("segu-loginapp" in curr_url or "t3.movistar.es" in curr_url or "action=login" in curr_url or "/login" in curr_url or "oauth" in curr_url)
 
             # Si ya tenemos ambas credenciales de España Y no estamos en la pantalla de login, validar en SAPI
             if not is_on_login and jsessionid and validationkey:
@@ -196,6 +233,7 @@ def perform_movistar_login(phone=None):
             time.sleep(1)
             
         context.close()
+    cleanup_profile_locks(profile_dir)
 
     return {
         "tokens": tokens_data,
@@ -278,9 +316,10 @@ def renew_web_session(phone=None):
                 print(f"[AutoRenew] Aviso carga inicial: {e}", flush=True)
 
             curr_url = page.url.lower()
-            if "segu-loginapp" in curr_url or "t3.movistar.es" in curr_url or "action=login" in curr_url:
+            if "segu-loginapp" in curr_url or "t3.movistar.es" in curr_url or "action=login" in curr_url or "/login" in curr_url:
                 print("[AutoRenew] ⚠️ La sesión web en Movistar ha caducado por completo (redirigido a pantalla de login). Se requiere pulsar '🔑 Vincular Dispositivo' en el panel web.", flush=True)
                 context.close()
+                cleanup_profile_locks(profile_dir)
                 return False
 
             jsessionid = None
@@ -301,6 +340,7 @@ def renew_web_session(phone=None):
                     pass
 
             context.close()
+            cleanup_profile_locks(profile_dir)
 
             if jsessionid and validationkey:
                 # Validar credenciales de forma real contra la API SAPI de Movistar antes de darlas por buenas
@@ -340,19 +380,30 @@ def save_account_env(login_result: dict, phone: str = None):
     jsid = login_result.get("jsessionid", "")
     vk = login_result.get("validationkey", "")
 
-    # Reutilizar device_id si ya existía para este teléfono, o generar uno nuevo
+    # Reutilizar device_id y tokens existentes si ya existían para este teléfono
     target = Path(f"/app/tokens/account_{phone_clean}.env")
     device_id = None
+    existing_ref = ""
+    existing_acc = ""
     if target.exists():
         try:
             for line in target.read_text(encoding='utf-8').splitlines():
                 if "MOVISTAR_DEVICE_ID=" in line:
                     device_id = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif "MOVISTAR_REFRESH_TOKEN=" in line:
+                    existing_ref = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif "MOVISTAR_ACCESS_TOKEN=" in line:
+                    existing_acc = line.split("=", 1)[1].strip().strip('"').strip("'")
         except Exception:
             pass
 
     if not device_id:
         device_id = generate_device_id()
+
+    if not refresh_token and existing_ref:
+        refresh_token = existing_ref
+    if not access_token and existing_acc:
+        access_token = existing_acc
 
     device_name = f"Samsung SM-S928B (Proxy {phone_clean[-4:]})"
 
@@ -366,15 +417,14 @@ MOVISTAR_JSESSIONID="{jsid}"
 MOVISTAR_VALIDATIONKEY="{vk}"
 """
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding='utf-8')
+        atomic_write_text(target, content, encoding='utf-8')
         print(f"✔ Credenciales de dispositivo guardadas correctamente en: {target}", flush=True)
         print(f"  Device ID: {device_id} ({device_name})", flush=True)
         
         # Sincronizar también con /app/tokens/.env para máxima compatibilidad
         try:
             primary_env = Path("/app/tokens/.env")
-            primary_env.write_text(content, encoding='utf-8')
+            atomic_write_text(primary_env, content, encoding='utf-8')
         except Exception:
             pass
 
@@ -409,5 +459,7 @@ if __name__ == "__main__":
     if res and (res.get("tokens") or (res.get("jsessionid") and res.get("validationkey"))):
         save_account_env(res, phone=args.phone)
         print("\n¡Dispositivo registrado con éxito! El servicio WebDAV se iniciará automáticamente.", flush=True)
+        sys.exit(0)
     else:
         print("\nNo se pudo completar el registro del dispositivo.", flush=True)
+        sys.exit(1)
