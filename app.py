@@ -189,12 +189,12 @@ def keepalive_worker():
                             s.cookies.set("JSESSIONID", jsid, domain="micloud.movistar.es", path="/")
                         if vk:
                             s.cookies.set("validationkey", vk, domain="micloud.movistar.es", path="/")
-                        url = f"https://micloud.movistar.es/sapi/system/information?action=get{f'&validationkey={vk}' if vk else ''}"
+                        url = f"https://micloud.movistar.es/sapi/media/folder/root?action=get{f'&validationkey={vk}' if vk else ''}"
                     elif jsid and vk:
                         s.cookies.set("JSESSIONID", jsid, domain="micloud.movistar.es", path="/")
                         s.cookies.set("validationkey", vk, domain="micloud.movistar.es", path="/")
                         s.headers.update({"User-Agent": "MovistarCloud-KeepAlive/1.0"})
-                        url = f"https://micloud.movistar.es/sapi/system/information?action=get&validationkey={vk}"
+                        url = f"https://micloud.movistar.es/sapi/media/folder/root?action=get&validationkey={vk}"
                     else:
                         continue
 
@@ -677,17 +677,35 @@ def autostart_proxy():
         print("[*] No se encontraron credenciales válidas. Esperando inicio manual desde el panel web.")
 
 def background_session_renewer():
-    """Hilo en segundo plano que renueva la sesión web preventivamente cada 6 horas para que nunca caduque."""
+    """Hilo en segundo plano que renueva la sesión preventivamente cada 4 horas para mantener los tokens permanentemente frescos."""
     import time
     while True:
-        time.sleep(6 * 3600)
+        time.sleep(4 * 3600)
         try:
-            from movistar_login import renew_web_session
-            from test_movistar_api import load_account_config
+            from test_movistar_api import load_account_config, MovistarFilesClient
             cfg = load_account_config()
             target_phone = LOGIN_PHONE or cfg.get("phone")
-            print(f"[AutoRenew] Ejecutando renovación preventiva programada cada 6h (móvil: {target_phone or 'autodetectando'})...", flush=True)
-            renew_web_session(phone=target_phone)
+            
+            if cfg.get("refresh_token"):
+                print(f"[AutoRenew] 🔄 Ejecutando renovación proactiva de token de dispositivo Android (móvil: {target_phone or 'autodetectando'})...", flush=True)
+                client = MovistarFilesClient(
+                    jsessionid=cfg.get("jsessionid"),
+                    validationkey=cfg.get("validationkey"),
+                    refresh_token=cfg.get("refresh_token"),
+                    access_token=cfg.get("access_token"),
+                    device_id=cfg.get("device_id"),
+                    device_name=cfg.get("device_name"),
+                    token_path=cfg.get("token_path"),
+                    phone=target_phone
+                )
+                if client.refresh_device_token():
+                    print(f"[AutoRenew] ✔ Token de dispositivo renovado proactivamente con éxito.", flush=True)
+                else:
+                    print(f"[AutoRenew] ⚠️ No se pudo renovar token de dispositivo proactivamente.", flush=True)
+            else:
+                from movistar_login import renew_web_session
+                print(f"[AutoRenew] Ejecutando renovación web programada cada 4h (móvil: {target_phone or 'autodetectando'})...", flush=True)
+                renew_web_session(phone=target_phone)
         except Exception as e:
             print(f"[AutoRenew] Error en renovación programada: {e}", flush=True)
 
