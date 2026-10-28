@@ -1,26 +1,34 @@
 import os
 import time
 import json
+import uuid
 import base64
 import secrets
 import hashlib
 import urllib.parse
 import requests
 
-# Endpoints oficiales de Movistar Cloud España (obtenidos del cliente oficial)
+# Endpoints y credenciales oficiales de Movistar Cloud España (extraídos de brand/brand.dll v32.0.7.1)
 OAUTH_AUTHORIZE_URL = "https://apiseg.telefonica.es/openid/connect/cus/col/auth/oauth/v2/authorize"
 OAUTH_TOKEN_URL = "https://apiseg.telefonica.es/openid/connect/cus/col/auth/oauth/v2/token"
 OAUTH_CLIENT_ID = "b99e5095-7a36-42c1-83b6-6f05d0f13ea1"
 OAUTH_CLIENT_SECRET = "e22fdd6b-636a-4bfc-bb4a-aa8ed6d131d8"
 OAUTH_REDIRECT_URI = "https://micloud.movistar.es/ui/html/clientoauth.html"
 
-ANDROID_USER_AGENT = "omh android client 31.1.2026011416.0"
+# CRÍTICO: brand.dll (ClientId b99e5095-...) pertenece a la plataforma "windows" (Movistar Cloud.exe VA 0x004047c0)
+CLIENT_PLATFORM = "windows"
+ANDROID_USER_AGENT = "omh windows client 32.0.7.1"
 SAPI_BASE_URL = "https://micloud.movistar.es/sapi"
 
 
 def generate_device_id():
-    """Genera un device ID nativo Android con prefijo 'fac-' y 16 caracteres hexadecimales."""
-    return f"fac-{secrets.token_hex(8)}"
+    """
+    Genera un device ID con el formato exacto de Movistar Cloud Windows (VA 0x00489d52 - 0x00489e38):
+    'fol-' + Base64(MD5(username + '+' + MachineGuid)).
+    """
+    seed = f"PC+{uuid.uuid4()}".encode("utf-8")
+    b64_md5 = base64.b64encode(hashlib.md5(seed).digest()).decode("ascii")
+    return f"fol-{b64_md5}"
 
 
 def generate_pkce_pair():
@@ -33,8 +41,8 @@ def generate_pkce_pair():
 
 def get_oauth_login_url():
     """
-    Devuelve la tupla (code_verifier, auth_url) para iniciar el flujo de autenticación oficial
-    con PKCE de Movistar Cloud España.
+    Devuelve la tupla (code_verifier, auth_url) idéntica a OAuth2WebViewController::getLoginUrl
+    (VA 0x00465540) usando los parámetros de brand/brand.dll (scope="openid", access_type="offline").
     """
     code_verifier, code_challenge = generate_pkce_pair()
     state = secrets.token_urlsafe(16)
@@ -43,14 +51,14 @@ def get_oauth_login_url():
         "response_type": "code",
         "client_id": OAUTH_CLIENT_ID,
         "redirect_uri": OAUTH_REDIRECT_URI,
-        "scope": "openid offline_access",
-        "state": state,
+        "scope": "openid",
         "nonce": nonce,
-        "code_challenge": code_challenge,
+        "state": state,
         "code_challenge_method": "S256",
+        "code_challenge": code_challenge,
         "access_type": "offline",
-        "acr_values": "2",
-        "lang": "es"
+        "lang": "es",
+        "acr_values": "2"
     }
     auth_url = f"{OAUTH_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
     return code_verifier, auth_url
@@ -103,19 +111,26 @@ def refresh_oauth_token(refresh_token: str):
     return res.json()
 
 
-def build_oauth_auth_header(access_token: str, refresh_token: str = "", msisdn: str = "") -> str:
+def build_oauth_auth_header(
+    access_token: str,
+    refresh_token: str = "",
+    msisdn: str = "",
+    last_refresh_date: int = 0,
+    expires_in: str = "3600",
+    platform: str = CLIENT_PLATFORM
+) -> str:
     """
     Construye la cabecera 'Authorization: oauth <base64>' propietaria de Synchronoss/Funambol
-    utilizada por la app de Android y Windows de Movistar Cloud.
+    idéntica a Funambol::OAuth2JsonParser::formatOAuth2CredentialData (VA 0x004ba830) con includeMsisdn=false
+    y platform="windows" (VA 0x004047c0), que corresponde al ClientId b99e5095-... de brand/brand.dll.
     """
     payload = {
         "data": {
             "accesstoken": access_token,
+            "lastrefreshdate": int(last_refresh_date or 0),
+            "expiresin": str(expires_in or "3600"),
             "refreshtoken": refresh_token,
-            "platform": "android",
-            "expiresin": "3600",
-            "lastrefreshdate": int(time.time() * 1000),
-            "msisdn": msisdn or ""
+            "platform": platform or CLIENT_PLATFORM
         }
     }
     raw_json = json.dumps(payload, separators=(',', ':')).encode("utf-8")
@@ -123,36 +138,88 @@ def build_oauth_auth_header(access_token: str, refresh_token: str = "", msisdn: 
     return f"oauth {b64_val}"
 
 
-def register_device(session: requests.Session, device_id: str, device_name: str, user_id: str = ""):
-    """Registra el dispositivo en Movistar Cloud para persistencia a largo plazo."""
-    url = f"{SAPI_BASE_URL}/profile/device?action=add&responsetime=true"
-    if user_id:
-        url += f"&userid={user_id}"
+def parse_oauth_response_header(auth_header: str) -> dict | None:
+    """
+    Replica Funambol::OAuth2HttpAuthentication::processAuthenticationResponse (VA 0x004e5d80)
+    y Funambol::OAuth2JsonParser::parseOAuth2Credentials (VA 0x004bc1b0).
+    Inspecciona la cabecera HTTP 'Authorization' devuelta por SAPI; si comienza por 'oauth ',
+    decodifica el Base64 y extrae accesstoken, refreshtoken, expiresin y lastrefreshdate.
+    """
+    if not auth_header or not isinstance(auth_header, str):
+        return None
+    auth_header = auth_header.strip()
+    if len(auth_header) < 6 or auth_header[:5].lower() != "oauth" or auth_header[5] != " ":
+        return None
 
-    payload = {
-        "data": {
-            "carrierid": "10019",
-            "modelid": "3482",
-            "countrya2": "ES",
-            "platform": "android",
-            "name": device_name,
-            "deviceid": device_id
-        }
-    }
+    b64_part = auth_header[6:].strip()
+    if not b64_part:
+        return None
+
     try:
-        res = session.post(url, json=payload, headers={"Content-Type": "application/json;charset=UTF-8"}, timeout=20)
-        return res.status_code in (200, 201)
+        padded = b64_part + "=" * ((4 - len(b64_part) % 4) % 4)
+        decoded_bytes = base64.b64decode(padded)
+        root = json.loads(decoded_bytes.decode("utf-8"))
+        if not isinstance(root, dict) or "error" in root:
+            return None
+        inner = root.get("data") if isinstance(root.get("data"), dict) else root
+        acc = str(inner.get("accesstoken") or inner.get("access_token") or "").strip()
+        if not acc:
+            return None
+        ref = str(inner.get("refreshtoken") or inner.get("refresh_token") or "").strip()
+        exp = str(inner.get("expiresin") or inner.get("expires_in") or "3600").strip()
+        lrd_raw = inner.get("lastrefreshdate") or root.get("responsetime")
+        try:
+            lrd = int(lrd_raw) if lrd_raw is not None else int(time.time() * 1000)
+            if 0 < lrd < 100000000000:
+                lrd = lrd * 1000
+        except (ValueError, TypeError):
+            lrd = int(time.time() * 1000)
+        return {
+            "access_token": acc,
+            "refresh_token": ref,
+            "expires_in": exp,
+            "last_refresh_date": lrd
+        }
     except Exception:
-        return False
+        return None
 
 
-def sapi_login_oauth(session: requests.Session, access_token: str, refresh_token: str = "", device_id: str = "", device_name: str = "", msisdn: str = "") -> dict:
+def register_device(session: requests.Session, device_id: str, device_name: str, user_id: str = ""):
     """
-    Ejecuta el login nativo en Movistar Cloud SAPI (/sapi/login/oauth?responsetime=true)
-    para inicializar la sesión en el backend y obtener validationkey y JSESSIONID.
+    En el cliente oficial de Windows (Movistar Cloud.exe / brand.dll), no se invoca /profile/device?action=add
+    (que es exclusivo de terminales Android con carrierid=10019/modelid=3482); el dispositivo queda registrado
+    mediante las cabeceras X-deviceid y X-devicename en SAPI login.
     """
-    url = f"{SAPI_BASE_URL}/login/oauth?responsetime=true"
-    auth_header = build_oauth_auth_header(access_token, refresh_token, msisdn)
+    return True
+
+
+def sapi_login_oauth(
+    session: requests.Session,
+    access_token: str,
+    refresh_token: str = "",
+    device_id: str = "",
+    device_name: str = "",
+    msisdn: str = "",
+    last_refresh_date: int = 0,
+    expires_in: str = "3600"
+) -> dict:
+    """
+    Ejecuta el login nativo en Movistar Cloud SAPI según Funambol::OAuth2LoginHandler::performLogin
+    (VA 0x004e3630) para inicializar o renovar la sesión en el backend y obtener
+    validationkey, JSESSIONID, responsetime/lastrefreshdate (en ms) y posibles tokens OAuth rotados.
+    """
+    candidate_requests = [
+        ("GET", f"{SAPI_BASE_URL}/login/oauth?action=login&responsetime=true"),
+        ("POST", f"{SAPI_BASE_URL}/login/oauth?action=login&responsetime=true"),
+        ("POST", f"{SAPI_BASE_URL}/login?action=login&responsetime=true"),
+    ]
+    auth_header = build_oauth_auth_header(
+        access_token,
+        refresh_token,
+        last_refresh_date=last_refresh_date,
+        expires_in=expires_in,
+        platform=CLIENT_PLATFORM
+    )
     headers = {
         "Authorization": auth_header,
         "User-Agent": ANDROID_USER_AGENT,
@@ -163,13 +230,23 @@ def sapi_login_oauth(session: requests.Session, access_token: str, refresh_token
     if device_name:
         headers["X-devicename"] = device_name
 
+    res = None
     try:
-        res = session.get(url, headers=headers, timeout=20)
+        for method, url in candidate_requests:
+            if method == "POST":
+                r_try = session.post(url, headers=headers, data=b"", timeout=20)
+            else:
+                r_try = session.get(url, headers=headers, timeout=20)
+            res = r_try
+            if r_try.status_code == 200:
+                break
     except Exception as e:
-        return {"status_code": 0, "validationkey": None, "jsessionid": None, "error": str(e)}
+        return {"status_code": 0, "validationkey": None, "jsessionid": None, "refreshed_oauth": None, "last_refresh_date": last_refresh_date, "error": str(e)}
 
+    refreshed_oauth = parse_oauth_response_header(res.headers.get("Authorization", ""))
     validationkey = None
     jsessionid = None
+    resolved_lrd = int(last_refresh_date or 0)
 
     for c in session.cookies:
         c_name = c.name.lower()
@@ -182,14 +259,47 @@ def sapi_login_oauth(session: requests.Session, access_token: str, refresh_token
         try:
             data = res.json()
             if isinstance(data, dict):
+                resp_time = data.get("responsetime")
                 inner = data.get("data", {})
-                validationkey = inner.get("validationkey") or inner.get("validationKey") or validationkey
+                if isinstance(inner, dict):
+                    validationkey = inner.get("validationkey") or inner.get("validationKey") or validationkey
+                    jsessionid = inner.get("jsessionid") or inner.get("jsessionId") or inner.get("sessionid") or jsessionid
+                    body_lrd = inner.get("lastrefreshdate") or resp_time
+                    if body_lrd is not None:
+                        try:
+                            resolved_lrd = int(body_lrd)
+                            if 0 < resolved_lrd < 100000000000:
+                                resolved_lrd *= 1000
+                        except (ValueError, TypeError):
+                            pass
+                    body_acc = inner.get("access_token") or inner.get("accesstoken")
+                    if body_acc and not refreshed_oauth:
+                        refreshed_oauth = {
+                            "access_token": str(body_acc).strip(),
+                            "refresh_token": str(inner.get("refresh_token") or inner.get("refreshtoken") or refresh_token).strip(),
+                            "expires_in": str(inner.get("expires_in") or inner.get("expiresin") or expires_in or "3600").strip(),
+                            "last_refresh_date": resolved_lrd or int(time.time() * 1000)
+                        }
+                elif resp_time is not None:
+                    try:
+                        resolved_lrd = int(resp_time)
+                        if 0 < resolved_lrd < 100000000000:
+                            resolved_lrd *= 1000
+                    except (ValueError, TypeError):
+                        pass
         except Exception:
             pass
+
+    if refreshed_oauth and refreshed_oauth.get("last_refresh_date"):
+        resolved_lrd = int(refreshed_oauth["last_refresh_date"])
+    elif resolved_lrd == 0 and res.status_code == 200:
+        resolved_lrd = int(time.time() * 1000)
 
     return {
         "status_code": res.status_code,
         "validationkey": validationkey,
         "jsessionid": jsessionid,
+        "refreshed_oauth": refreshed_oauth,
+        "last_refresh_date": resolved_lrd,
         "raw": res.text
     }

@@ -14,7 +14,7 @@ from test_movistar_api import MovistarFilesClient, load_account_config, build_oa
 ensure_vnc_services()
 
 app = Flask(__name__)
-APP_VERSION = "v1.0.7"
+APP_VERSION = "v1.1.0"
 
 # Silenciar peticiones repetitivas de polling (/status, /health, /logs, websockets) de los logs de Docker
 class EndpointFilter(logging.Filter):
@@ -124,6 +124,8 @@ def save_env_vars(jsid, vkey, phone=None):
     access_token = existing.get("MOVISTAR_ACCESS_TOKEN", "")
     device_id = existing.get("MOVISTAR_DEVICE_ID", "")
     device_name = existing.get("MOVISTAR_DEVICE_NAME", "")
+    last_refresh_date = existing.get("MOVISTAR_LAST_REFRESH_DATE", "0")
+    expires_in = existing.get("MOVISTAR_EXPIRES_IN", "3600")
 
     lines = [
         f'MOVISTAR_PHONE="{phone_clean}"',
@@ -138,6 +140,10 @@ def save_env_vars(jsid, vkey, phone=None):
         lines.append(f'MOVISTAR_REFRESH_TOKEN="{refresh_token}"')
     if access_token:
         lines.append(f'MOVISTAR_ACCESS_TOKEN="{access_token}"')
+    if last_refresh_date is not None:
+        lines.append(f'MOVISTAR_LAST_REFRESH_DATE="{last_refresh_date}"')
+    if expires_in:
+        lines.append(f'MOVISTAR_EXPIRES_IN="{expires_in}"')
 
     target = TOKENS_DIR / f"account_{phone_clean}.env"
     try:
@@ -146,74 +152,53 @@ def save_env_vars(jsid, vkey, phone=None):
         pass
 
 def keepalive_worker():
-    """Hilo demonio que realiza ping periódico a Movistar Cloud con /sapi/system/information para mantener la sesión activa."""
+    """
+    Hilo demonio que realiza ping periódico a Movistar Cloud cada 5 minutos.
+    Utiliza MovistarFilesClient para enviar la cabecera exacta de Funambol (con lastrefreshdate en segundos,
+    sin msisdn) y capturar automáticamente en tránsito cualquier rotación de token en la cabecera
+    HTTP 'Authorization: oauth <base64>' devuelta por SAPI (processAuthenticationResponse).
+    """
     import time
     while True:
         time.sleep(300)  # Cada 5 minutos
         try:
-            # Buscar todos los archivos de cuentas disponibles
             env_files = []
             if TOKENS_DIR.exists():
-                env_files.extend(list(TOKENS_DIR.glob("account_*.env")))
-                env_files.extend(list(TOKENS_DIR.glob("*.env")))
+                env_files.extend(sorted(list(TOKENS_DIR.glob("account_*.env"))))
+                if not env_files:
+                    env_files.extend(sorted(list(TOKENS_DIR.glob("*.env"))))
 
             checked_keys = set()
             for env_path in env_files:
                 if not (env_path.exists() and env_path.is_file()):
                     continue
                 try:
-                    jsid, vk, access_token, refresh_token = "", "", "", ""
-                    with open(env_path, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            if "MOVISTAR_JSESSIONID=" in line:
-                                jsid = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            elif "MOVISTAR_VALIDATIONKEY=" in line:
-                                vk = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            elif "MOVISTAR_ACCESS_TOKEN=" in line:
-                                access_token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            elif "MOVISTAR_REFRESH_TOKEN=" in line:
-                                refresh_token = line.split("=", 1)[1].strip().strip('"').strip("'")
-
-                    session_key = refresh_token or vk
+                    phone_match = re.search(r"account_(\d+)\.env", env_path.name)
+                    phone_hint = phone_match.group(1) if phone_match else None
+                    cfg = load_account_config(phone=phone_hint)
+                    session_key = cfg.get("refresh_token") or cfg.get("validationkey")
                     if not session_key or session_key in checked_keys:
                         continue
                     checked_keys.add(session_key)
 
-                    s = requests.Session()
-                    if access_token and refresh_token:
-                        s.headers.update({
-                            "User-Agent": "MovistarCloud-KeepAlive/1.0",
-                            "Authorization": build_oauth_auth_header(access_token, refresh_token)
-                        })
-                        if jsid:
-                            s.cookies.set("JSESSIONID", jsid, domain="micloud.movistar.es", path="/")
-                        if vk:
-                            s.cookies.set("validationkey", vk, domain="micloud.movistar.es", path="/")
-                        url = f"https://micloud.movistar.es/sapi/media/folder/root?action=get{f'&validationkey={vk}' if vk else ''}"
-                    elif jsid and vk:
-                        s.cookies.set("JSESSIONID", jsid, domain="micloud.movistar.es", path="/")
-                        s.cookies.set("validationkey", vk, domain="micloud.movistar.es", path="/")
-                        s.headers.update({"User-Agent": "MovistarCloud-KeepAlive/1.0"})
-                        url = f"https://micloud.movistar.es/sapi/media/folder/root?action=get&validationkey={vk}"
-                    else:
-                        continue
-
-                    r = s.get(url, timeout=15)
+                    client = MovistarFilesClient(
+                        jsessionid=cfg.get("jsessionid"),
+                        validationkey=cfg.get("validationkey"),
+                        refresh_token=cfg.get("refresh_token"),
+                        access_token=cfg.get("access_token"),
+                        device_id=cfg.get("device_id"),
+                        device_name=cfg.get("device_name"),
+                        token_path=cfg.get("token_path") or env_path,
+                        phone=cfg.get("phone") or phone_hint,
+                        last_refresh_date=cfg.get("last_refresh_date", 0),
+                        expires_in=cfg.get("expires_in", "3600")
+                    )
+                    url = client._url("https://micloud.movistar.es", "/sapi/media/folder/root?action=get")
+                    r = client._request("GET", url, timeout=15)
                     if r.status_code == 200:
                         app.logger.debug(f"Keep-Alive heartbeat OK para {env_path.name}")
-                    elif r.status_code == 401 and refresh_token:
-                        try:
-                            from test_movistar_api import MovistarFilesClient
-                            client = MovistarFilesClient(
-                                jsessionid=jsid, validationkey=vk,
-                                refresh_token=refresh_token, access_token=access_token,
-                                token_path=env_path
-                            )
-                            client.refresh_device_token()
-                        except Exception as e:
-                            app.logger.debug(f"Keep-Alive refresh error: {e}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    app.logger.debug(f"Keep-Alive refresh error: {e}")
         except Exception as e:
             app.logger.debug(f"Keep-Alive ping error: {e}")
 
@@ -677,17 +662,16 @@ def autostart_proxy():
         print("[*] No se encontraron credenciales válidas. Esperando inicio manual desde el panel web.")
 
 def background_session_renewer():
-    """Hilo en segundo plano que renueva la sesión preventivamente cada 4 horas para mantener los tokens permanentemente frescos."""
+    """Hilo en segundo plano que verifica y mantiene viva la sesión cada 30 minutos sin quemar tokens válidos."""
     import time
     while True:
-        time.sleep(4 * 3600)
+        time.sleep(1800)
         try:
             from test_movistar_api import load_account_config, MovistarFilesClient
             cfg = load_account_config()
             target_phone = LOGIN_PHONE or cfg.get("phone")
             
-            if cfg.get("refresh_token"):
-                print(f"[AutoRenew] 🔄 Ejecutando renovación proactiva de token de dispositivo Android (móvil: {target_phone or 'autodetectando'})...", flush=True)
+            if cfg.get("refresh_token") or cfg.get("access_token"):
                 client = MovistarFilesClient(
                     jsessionid=cfg.get("jsessionid"),
                     validationkey=cfg.get("validationkey"),
@@ -696,15 +680,19 @@ def background_session_renewer():
                     device_id=cfg.get("device_id"),
                     device_name=cfg.get("device_name"),
                     token_path=cfg.get("token_path"),
-                    phone=target_phone
+                    phone=target_phone,
+                    last_refresh_date=cfg.get("last_refresh_date", 0),
+                    expires_in=cfg.get("expires_in", "3600")
                 )
-                if client.refresh_device_token():
-                    print(f"[AutoRenew] ✔ Token de dispositivo renovado proactivamente con éxito.", flush=True)
+                url = client._url("https://micloud.movistar.es", "/sapi/media/folder/root?action=get")
+                r = client._request("GET", url, timeout=15)
+                if r.status_code == 200:
+                    print(f"[AutoRenew] ✔ Sesión SAPI y tokens OAuth verificados/actualizados en tránsito.", flush=True)
                 else:
-                    print(f"[AutoRenew] ⚠️ No se pudo renovar token de dispositivo proactivamente.", flush=True)
+                    print(f"[AutoRenew] ⚠️ Estado de verificación SAPI: HTTP {r.status_code}", flush=True)
             else:
                 from movistar_login import renew_web_session
-                print(f"[AutoRenew] Ejecutando renovación web programada cada 4h (móvil: {target_phone or 'autodetectando'})...", flush=True)
+                print(f"[AutoRenew] Ejecutando renovación web programada (móvil: {target_phone or 'autodetectando'})...", flush=True)
                 renew_web_session(phone=target_phone)
         except Exception as e:
             print(f"[AutoRenew] Error en renovación programada: {e}", flush=True)

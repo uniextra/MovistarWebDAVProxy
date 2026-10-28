@@ -1090,10 +1090,10 @@ def main():
         token_path=cfg.get("token_path"),
         phone=cfg.get("phone")
     )
-    PROXY_VERSION = "v1.0.8"
+    PROXY_VERSION = "v1.1.0"
     if api.is_native_device:
-        print(f"[WebDAV] 📱 Modo Autenticación: DISPOSITIVO ANDROID NATIVO ({cfg.get('device_id')})", flush=True)
-        print("[WebDAV] 🔒 Inmune a desconexiones web. Refresh Token permanente activo.", flush=True)
+        print(f"[WebDAV] 💻 Modo Autenticación: CLIENTE OFICIAL WINDOWS ({cfg.get('device_id')})", flush=True)
+        print("[WebDAV] 🔒 Inmune a desconexiones web. Rotación OAuth2 en tránsito y Refresh Token permanente activos.", flush=True)
     elif cfg.get("jsessionid"):
         print("[WebDAV] 🌐 Modo Autenticación: Sesión Web (Fallback)", flush=True)
         print("[WebDAV] ℹ️ Recomendado: Para sesiones 24/7 sin caducidad, pulsa '🔑 Vincular Dispositivo (Login SMS)' en el panel web (puerto 5000).", flush=True)

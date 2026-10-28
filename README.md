@@ -34,11 +34,13 @@ Turn your unlimited Movistar Cloud storage into a transparent, secure, and remot
   * Strictly bounds heavy concurrent uploads and downloads to 3 parallel streams to operate in Movistar Cloud's optimal throughput band without API rate-limiting or socket resets, keeping control threads fluid.
 * 🔑 **Permissive Client Authentication:**
   * Accepts any username and password in your WebDAV client (Synology DSM and Duplicati require these fields); the proxy authorizes requests internally using your active account credentials.
-* 📱 **Native Device OAuth 2.0 Emulation:**
-  * Emulates an official Android mobile device (`omh android client` with dedicated `X-deviceid` and persistent `refresh_token`).
-  * **Zero session conflicts:** You can log into Movistar Cloud via web browsers on your PC or phone without ever kicking the WebDAV proxy offline.
-* 💓 **Automatic Keep-Alive & Token Refresh:**
-  * Expired access tokens are renewed silently in the background using the device `refresh_token`. For web cookie fallback sessions, an automatic daemon heartbeat runs every 5 minutes.
+* 💻 **Native Desktop OAuth 2.0 & In-Band SAPI Token Rotation (`v1.1.0`):**
+  * Emulates the official Movistar Cloud Windows desktop client (`omh windows client 32.0.7.1`, `platform="windows"`, `scope="openid"`, and `fol-<base64_md5>` `X-deviceid` matching the `brand.dll` OAuth2 client `b99e5095-7a36-42c1-83b6-6f05d0f13ea1`).
+  * **64-bit Millisecond `lastrefreshdate` Synchronization:** Preserves the exact 13-digit server timestamp (`responsetime` / `lastrefreshdate`) returned by `GET /sapi/login/oauth?action=login&responsetime=true` so the Java SAPI backend accurately tracks token validity across hours and days.
+  * **In-Band Token Rotation (`processAuthenticationResponse`):** Inspects every SAPI HTTP response for `Authorization: oauth <base64>` headers and atomically persists rotated `accesstoken`, `refreshtoken`, `lastrefreshdate`, and `validationkey` values to disk.
+  * **Zero session conflicts:** You can log into Movistar Cloud via web browsers or mobile apps without ever kicking the WebDAV proxy offline.
+* 💓 **Automatic Keep-Alive & Multi-Layer Session Recovery:**
+  * Periodically validates session health via `/sapi/system/information?action=get` and automatically re-initializes Tomcat sessions (`JSESSIONID` + `validationkey`) via `/sapi/login/oauth?action=login&responsetime=true` on `HTTP 401`, protected by cross-process `fcntl.flock` locks.
 * 🖥️ **Integrated noVNC SMS Login Assistant:**
   * Clean web dashboard on port `5000` with an embedded noVNC virtual browser for seamless one-click SMS verification; credentials and tokens are captured and saved automatically.
 * 🚀 **Autonomous Auto-Start:**
@@ -156,6 +158,15 @@ Validates:
 * Collision normalization (` (1)` suffix pruning and `.hbk` directory resolution).
 * RFC 4331 quota reporting.
 * Rejection of API error JSON payloads disguised with HTTP 200 OK status.
+
+---
+
+## 🚀 What's New in v1.1.0
+
+* **Fixed OAuth2 Platform & `client_id` Alignment (`platform="windows"`):** Aligned `Authorization: oauth <base64>` payload (`platform="windows"`, `scope="openid"`, `User-Agent: omh windows client 32.0.7.1`, `X-deviceid: fol-<base64_md5>`) with the official Windows client `brand.dll` (`b99e5095-7a36-42c1-83b6-6f05d0f13ea1`), preventing Telefónica's OAuth backend (`apiseg.telefonica.es`) from revoking tokens with `Invalid Token` upon server-side refresh.
+* **Fixed 64-bit Millisecond `lastrefreshdate` Handling (13 digits):** Replicated `Funambol::OAuth2JsonParser::formatOAuth2CredentialData` and `OAuth2LoginHandler::performLogin` (`GET /sapi/login/oauth?action=login&responsetime=true`) so `lastrefreshdate` is stored and transmitted in 13-digit Unix milliseconds instead of 10-digit seconds.
+* **Added In-Band SAPI Token Rotation Capture (`processAuthenticationResponse`):** Every SAPI HTTP response is inspected for updated `Authorization: oauth <base64>` headers and session cookies (`JSESSIONID`, `validationkey`), atomically persisting rotated credentials across all worker processes.
+* **Cross-Process Browser Profile Locking:** Added `fcntl.flock` synchronization (`/tmp/movistar_renew_web.lock` and `/tmp/movistar_refresh_token.lock`) to eliminate Chromium `SingletonLock` collisions during concurrent 401 recovery.
 
 ---
 

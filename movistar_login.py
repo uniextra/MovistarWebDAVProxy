@@ -179,11 +179,32 @@ def perform_movistar_login(phone=None):
 
                     acc_token = tokens_data.get("access_token", "")
                     ref_token = tokens_data.get("refresh_token", "")
+                    exp_in = str(tokens_data.get("expires_in") or "3600")
                     if acc_token:
                         print("[SAPI] Inicializando sesión oficial en SAPI...", flush=True)
                         import requests
                         sapi_sess = requests.Session()
-                        sapi_res = sapi_login_oauth(sapi_sess, acc_token, ref_token, msisdn=phone)
+                        sapi_res = sapi_login_oauth(
+                            sapi_sess,
+                            acc_token,
+                            ref_token,
+                            msisdn=phone,
+                            last_refresh_date=0,
+                            expires_in=exp_in
+                        )
+                        if sapi_res.get("refreshed_oauth"):
+                            ro = sapi_res["refreshed_oauth"]
+                            if ro.get("access_token"):
+                                tokens_data["access_token"] = ro["access_token"]
+                            if ro.get("refresh_token"):
+                                tokens_data["refresh_token"] = ro["refresh_token"]
+                            if ro.get("expires_in"):
+                                tokens_data["expires_in"] = ro["expires_in"]
+                            if ro.get("last_refresh_date") is not None:
+                                tokens_data["last_refresh_date"] = ro["last_refresh_date"]
+                            print("[SAPI] ✔ Tokens OAuth rotados en tránsito por SAPI capturados.", flush=True)
+                        elif sapi_res.get("last_refresh_date"):
+                            tokens_data["last_refresh_date"] = sapi_res["last_refresh_date"]
                         if sapi_res.get("validationkey"):
                             validationkey = sapi_res["validationkey"]
                             print(f"[SAPI] ✔ ValidationKey obtenida: {validationkey[:6]}...", flush=True)
@@ -297,10 +318,28 @@ def renew_web_session(phone=None):
     if not profile_dir.exists():
         return False
 
-    cleanup_profile_locks(profile_dir)
-    phone = detect_account_phone(phone)
-    print(f"[AutoRenew] 🔄 Comprobando renovación automática de sesión web (móvil: {phone or 'autodetectando'})...", flush=True)
+    lock_fd = None
     try:
+        import fcntl
+        lock_fd = open("/tmp/movistar_renew_web.lock", "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("[AutoRenew] ⏳ Otra instancia ya está renovando la sesión web. Esperando resultado...", flush=True)
+        try:
+            if lock_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+        except Exception:
+            pass
+        return False
+    except Exception:
+        lock_fd = None
+
+    try:
+        cleanup_profile_locks(profile_dir)
+        phone = detect_account_phone(phone)
+        print(f"[AutoRenew] 🔄 Comprobando renovación automática de sesión web (móvil: {phone or 'autodetectando'})...", flush=True)
         with sync_playwright() as p:
             exec_path = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
             context = p.chromium.launch_persistent_context(
@@ -365,6 +404,14 @@ def renew_web_session(phone=None):
                 print("[AutoRenew] La sesión persistente ha expirado; se requiere login manual.", flush=True)
     except Exception as e:
         print(f"[AutoRenew] Error en renovación automática: {e}", flush=True)
+    finally:
+        if lock_fd:
+            try:
+                import fcntl
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            except Exception:
+                pass
     return False
 
 
@@ -377,6 +424,8 @@ def save_account_env(login_result: dict, phone: str = None):
     tokens = login_result.get("tokens", {})
     refresh_token = tokens.get("refresh_token", "")
     access_token = tokens.get("access_token", "")
+    expires_in = str(tokens.get("expires_in") or "3600")
+    last_refresh_date = int(tokens.get("last_refresh_date") or 0)
     jsid = login_result.get("jsessionid", "")
     vk = login_result.get("validationkey", "")
 
@@ -385,6 +434,8 @@ def save_account_env(login_result: dict, phone: str = None):
     device_id = None
     existing_ref = ""
     existing_acc = ""
+    existing_lrd = 0
+    existing_exp = "3600"
     if target.exists():
         try:
             for line in target.read_text(encoding='utf-8').splitlines():
@@ -394,18 +445,29 @@ def save_account_env(login_result: dict, phone: str = None):
                     existing_ref = line.split("=", 1)[1].strip().strip('"').strip("'")
                 elif "MOVISTAR_ACCESS_TOKEN=" in line:
                     existing_acc = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif "MOVISTAR_LAST_REFRESH_DATE=" in line:
+                    try:
+                        existing_lrd = int(line.split("=", 1)[1].strip().strip('"').strip("'"))
+                    except (ValueError, TypeError):
+                        existing_lrd = 0
+                elif "MOVISTAR_EXPIRES_IN=" in line:
+                    existing_exp = line.split("=", 1)[1].strip().strip('"').strip("'") or "3600"
         except Exception:
             pass
 
-    if not device_id:
+    if not device_id or device_id.startswith("fac-"):
         device_id = generate_device_id()
 
     if not refresh_token and existing_ref:
         refresh_token = existing_ref
     if not access_token and existing_acc:
         access_token = existing_acc
+    if not last_refresh_date and existing_lrd:
+        last_refresh_date = existing_lrd
+    if not tokens.get("expires_in") and existing_exp:
+        expires_in = existing_exp
 
-    device_name = f"Samsung SM-S928B (Proxy {phone_clean[-4:]})"
+    device_name = f"DESKTOP-MOVISTAR-{phone_clean[-4:]}"
 
     content = f"""# Movistar Cloud Native Device Credentials
 MOVISTAR_PHONE="{phone_clean}"
@@ -413,6 +475,8 @@ MOVISTAR_DEVICE_ID="{device_id}"
 MOVISTAR_DEVICE_NAME="{device_name}"
 MOVISTAR_REFRESH_TOKEN="{refresh_token}"
 MOVISTAR_ACCESS_TOKEN="{access_token}"
+MOVISTAR_LAST_REFRESH_DATE="{last_refresh_date}"
+MOVISTAR_EXPIRES_IN="{expires_in}"
 MOVISTAR_JSESSIONID="{jsid}"
 MOVISTAR_VALIDATIONKEY="{vk}"
 """
@@ -435,7 +499,12 @@ MOVISTAR_VALIDATIONKEY="{vk}"
                     import requests
                     from movistar_device_auth import build_oauth_auth_header, register_device
                     reg_session = requests.Session()
-                    reg_session.headers["Authorization"] = build_oauth_auth_header(access_token, refresh_token)
+                    reg_session.headers["Authorization"] = build_oauth_auth_header(
+                        access_token,
+                        refresh_token,
+                        last_refresh_date=last_refresh_date,
+                        expires_in=expires_in
+                    )
                     reg_session.headers["X-deviceid"] = device_id
                     reg_session.headers["X-devicename"] = device_name
                     reg_ok = register_device(reg_session, device_id, device_name)

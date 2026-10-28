@@ -17,7 +17,7 @@
             <h1 class="text-2xl font-bold text-slate-900 tracking-tight">
                 Movistar WebDAV Proxy
             </h1>
-            <span class="text-xs font-mono font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-lg border border-slate-200">{{ version or 'v1.0.4' }}</span>
+            <span class="text-xs font-mono font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-lg border border-slate-200">{{ version or 'v1.1.0' }}</span>
         </div>
         <div class="text-right flex items-center space-x-3">
             <span id="proxy-status" class="px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-sm">⚪ Detenido</span>
@@ -39,10 +39,10 @@
 
                 <div id="device-info-box" class="hidden mb-4 p-3 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-900 space-y-1">
                     <div class="font-semibold flex items-center">
-                        <span class="mr-1">✔</span> Dispositivo Android Registrado:
+                        <span class="mr-1">✔</span> Cliente Oficial de Escritorio Registrado (Windows):
                     </div>
                     <div class="font-mono text-[11px] text-blue-700 break-all" id="device-id-text">Device ID: -</div>
-                    <div class="text-[11px] text-blue-600">Tokens permanentes activos. La sesión no se cerrará aunque abras la web en otro PC.</div>
+                    <div class="text-[11px] text-blue-600">Tokens permanentes OAuth2 activos. Inmune a desconexiones al iniciar sesión en otros navegadores o dispositivos.</div>
                 </div>
 
                 <!-- Opciones avanzadas (acordeón) -->
@@ -89,10 +89,6 @@
                     <div class="flex justify-between text-slate-600">
                         <span class="font-medium">Límite por Archivo SAPI:</span>
                         <span id="cluster-max-file" class="font-semibold">4 GB (4096 MB)</span>
-                    </div>
-                    <div class="flex justify-between text-slate-600">
-                        <span class="font-medium">Cluster Ingesta:</span>
-                        <span id="cluster-endpoint" class="font-mono text-[11px] text-slate-500">upload.micloud.movistar.es</span>
                     </div>
                 </div>
             </div>
@@ -273,6 +269,7 @@
                     if (data.logs.length === 0) {
                         terminal.innerHTML = '<div class="text-slate-500 italic">Esperando actividad WebDAV de Duplicati o HyperBackup...</div>';
                     } else {
+                        const isNearBottom = (terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight) < 60;
                         terminal.innerHTML = data.logs.map(line => {
                             let color = 'text-slate-300';
                             if (line.includes('✔') || line.includes('completada')) color = 'text-emerald-400 font-medium';
@@ -283,7 +280,9 @@
                             else if (line.includes('⚡')) color = 'text-yellow-300';
                             return `<div class="${color}">${line}</div>`;
                         }).join('');
-                        terminal.scrollTop = terminal.scrollHeight;
+                        if (isNearBottom) {
+                            terminal.scrollTop = terminal.scrollHeight;
+                        }
                     }
                 }
             } catch (err) {}

@@ -45,6 +45,7 @@ account_*.env
 *.zip
 *.tgz
 *.rar
+*.exe
 
 # Testing & Logs
 .pytest_cache/
