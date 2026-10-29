@@ -11,10 +11,7 @@ services:
       - "${WEBDAV_PORT:-5050}:8080"   # Endpoint WebDAV (Duplicati / Synology HyperBackup)
     volumes:
       - movistar_tokens:/app/tokens
-      - movistar_data:/data
 
 volumes:
   movistar_tokens:
     name: movistar_webdav_tokens
-  movistar_data:
-    name: movistar_webdav_data

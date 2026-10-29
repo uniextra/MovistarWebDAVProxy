@@ -74,13 +74,10 @@ services:
       - "5050:8080"      # WebDAV Endpoint (map to 5050 on host)
     volumes:
       - movistar_tokens:/app/tokens
-      - movistar_data:/data
 
 volumes:
   movistar_tokens:
     name: movistar_webdav_tokens
-  movistar_data:
-    name: movistar_webdav_data
 ```
 
 Start the service:
@@ -97,7 +94,6 @@ docker run -d \
   -p 5000:5000 \
   -p 5050:8080 \
   -v movistar_webdav_tokens:/app/tokens \
-  -v movistar_webdav_data:/data \
   uniextra/movistar-webdav-proxy:latest
 ```
 

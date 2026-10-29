@@ -19,7 +19,7 @@ WORKDIR /app
 
 COPY --from=builder /movistar-proxy /app/movistar-proxy
 
-VOLUME ["/data", "/app/tokens"]
+VOLUME ["/app/tokens"]
 
 EXPOSE 5000 8080
 
