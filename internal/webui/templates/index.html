@@ -17,7 +17,7 @@
             <h1 class="text-2xl font-bold text-slate-900 tracking-tight">
                 Movistar WebDAV Proxy
             </h1>
-            <span class="text-xs font-mono font-semibold px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg border border-emerald-200">v2.0.1 (Go)</span>
+            <span class="text-xs font-mono font-semibold px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg border border-emerald-200">v2.0.2 (Go)</span>
         </div>
         <div class="text-right flex items-center space-x-3">
             <span id="proxy-status" class="px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-sm">⚪ Comprobando...</span>
@@ -46,9 +46,14 @@
                 </div>
             </div>
 
-            <div class="pt-4 border-t border-slate-100 mt-2">
-                <button onclick="openOAuthModal()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl shadow-sm transition flex items-center justify-center space-x-2">
+            <div class="pt-4 border-t border-slate-100 mt-2 flex items-center space-x-2">
+                <button onclick="openOAuthModal()" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl shadow-sm transition flex items-center justify-center space-x-2">
                     <span>🔑 Vincular Dispositivo (Login SMS Oficial)</span>
+                </button>
+                <button id="unlinkBtn" onclick="unlinkAccount()" title="Desvincular y eliminar credenciales" class="bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 p-2.5 rounded-xl transition flex items-center justify-center shadow-sm group">
+                    <svg class="w-5 h-5 transition transform group-hover:scale-110" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                    </svg>
                 </button>
             </div>
         </div>
@@ -438,6 +443,37 @@
             } finally {
                 validateOAuthBtn.disabled = false;
                 validateOAuthBtn.textContent = "✔ Validar y Guardar Credenciales";
+            }
+        }
+
+        async function unlinkAccount() {
+            if (!confirm("¿Deseas desvincular el dispositivo y eliminar las credenciales guardadas?")) {
+                return;
+            }
+
+            try {
+                const phone = phoneInput.value.trim();
+                const res = await fetch('/unlink', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({phone})
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    phoneInput.value = '';
+                    localStorage.removeItem('mc_phone');
+                    deviceInfoBox.classList.add('hidden');
+                    const storageEl = document.getElementById('cloud-storage-used');
+                    if (storageEl) storageEl.textContent = '- / -';
+                    const maxFileEl = document.getElementById('cluster-max-file');
+                    if (maxFileEl) maxFileEl.textContent = '-';
+                    checkStatus();
+                    showToast("Dispositivo desvinculado y credenciales eliminadas.", "info", 4000);
+                } else {
+                    showToast("Error al desvincular: " + (data.message || 'Error desconocido'), "error");
+                }
+            } catch (err) {
+                showToast("Error de conexión al desvincular.", "error");
             }
         }
 

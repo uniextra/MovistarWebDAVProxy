@@ -67,6 +67,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/logs", s.handleLogs)
 	mux.HandleFunc("/start_login", s.handleStartLogin)
 	mux.HandleFunc("/complete_login", s.handleCompleteLogin)
+	mux.HandleFunc("/unlink", s.handleUnlink)
 
 	return mux
 }
@@ -84,11 +85,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "version": "v2.0.1"})
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "version": "v2.0.2"})
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"version": "v2.0.1"})
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"version": "v2.0.2"})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -307,5 +308,28 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	s.SetRunning(true)
 
 	logger.Log("[OAuth] ✔ ¡Dispositivo vinculado y guardado con éxito! Proxy WebDAV activo.")
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+}
+
+func (s *Server) handleUnlink(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]interface{}{"status": "error", "message": "Método no permitido"})
+		return
+	}
+
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	phone := config.SanitizePhone(body.Phone)
+	if phone == "" {
+		phone = s.client.GetConfig().Phone
+	}
+
+	_ = config.DeleteAccountConfig(phone)
+	s.client.SetConfig(config.AccountConfig{})
+	s.SetRunning(false)
+
+	logger.Log("[OAuth] 🗑️ Dispositivo desvinculado y credenciales eliminadas por el usuario.")
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }

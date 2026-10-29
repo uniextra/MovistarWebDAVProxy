@@ -200,3 +200,33 @@ func SaveAccountConfig(cfg AccountConfig) error {
 	}
 	return nil
 }
+
+func DeleteAccountConfig(phone string) error {
+	fileLock.Lock()
+	defer fileLock.Unlock()
+
+	phoneClean := SanitizePhone(phone)
+	var targets []string
+	if phoneClean != "" {
+		targets = append(targets,
+			filepath.Join(TokensDir, fmt.Sprintf("account_%s.env", phoneClean)),
+			filepath.Join(TokensDir, fmt.Sprintf("%s.env", phoneClean)),
+		)
+	}
+	targets = append(targets, filepath.Join(TokensDir, ".env"))
+
+	if entries, err := os.ReadDir(TokensDir); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "account_") && strings.HasSuffix(e.Name(), ".env") {
+				if phoneClean == "" || strings.Contains(e.Name(), phoneClean) {
+					targets = append(targets, filepath.Join(TokensDir, e.Name()))
+				}
+			}
+		}
+	}
+
+	for _, target := range targets {
+		_ = os.Remove(target)
+	}
+	return nil
+}
