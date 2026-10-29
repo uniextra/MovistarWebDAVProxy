@@ -308,6 +308,12 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 	c.cfg = cfg
 }
 
+func (c *Client) HasCredentials() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.RefreshToken != "" || c.cfg.AccessToken != "" || (c.cfg.JSessionID != "" && c.cfg.ValidationKey != "")
+}
+
 func (c *Client) appendValidationKey(rawURL string) string {
 	c.mu.RLock()
 	vk := c.cfg.ValidationKey
@@ -329,7 +335,7 @@ func (c *Client) appendValidationKey(rawURL string) string {
 }
 
 func (c *Client) processSAPIResponse(resp *http.Response) {
-	if resp == nil {
+	if resp == nil || resp.StatusCode >= 400 {
 		return
 	}
 
@@ -385,6 +391,10 @@ func (c *Client) RefreshSession() bool {
 	c.mu.RLock()
 	cfg := c.cfg
 	c.mu.RUnlock()
+
+	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
+		return false
+	}
 
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
 
@@ -510,7 +520,7 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		}
 		resp.Body.Close()
-		if c.RefreshSession() {
+		if c.HasCredentials() && c.RefreshSession() {
 			// Reintentar petición con nuevas credenciales
 			c.mu.RLock()
 			newCfg := c.cfg

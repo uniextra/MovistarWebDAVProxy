@@ -217,13 +217,17 @@
                 });
                 const data = await res.json();
                 if (data.status === 'ok') {
-                    if (data.has_device_token) {
+                    if (data.has_credentials || data.has_device_token) {
                         deviceInfoBox.classList.remove('hidden');
                         deviceIdText.textContent = 'Device ID: ' + (data.device_id || 'fol-Windows');
+                        loadStorageInfo(phone);
                     } else {
                         deviceInfoBox.classList.add('hidden');
+                        const storageEl = document.getElementById('cloud-storage-used');
+                        if (storageEl) storageEl.textContent = '- / -';
+                        const maxFileEl = document.getElementById('cluster-max-file');
+                        if (maxFileEl) maxFileEl.textContent = '-';
                     }
-                    loadStorageInfo(phone);
                 }
             } catch (err) {}
         }

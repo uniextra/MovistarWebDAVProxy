@@ -129,6 +129,16 @@ func (s *Server) handleVerifyPhone(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
+	if !s.client.HasCredentials() {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"status":    "unconfigured",
+			"message":   "Dispositivo no vinculado",
+			"used_str":  "-",
+			"total_str": "-",
+		})
+		return
+	}
+
 	space, err := s.client.GetStorageSpace()
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": err.Error()})
