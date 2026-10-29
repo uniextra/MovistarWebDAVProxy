@@ -15,7 +15,7 @@ import (
 	"movistar-webdav-proxy/internal/webui"
 )
 
-const AppVersion = "v2.0.0"
+const AppVersion = "v2.0.1"
 
 func main() {
 	logger.Log("=====================================================")
@@ -115,8 +115,8 @@ func runKeepAlive(ctx context.Context, client *sapi.Client) {
 				continue
 			}
 
-			info, err := client.GetSystemInfo()
-			if err == nil && info != nil {
+			space, err := client.GetStorageSpace()
+			if err == nil && space != nil {
 				logger.Log("[KeepAlive] 💓 Sesión verificada en Movistar Cloud (HTTP 200).")
 			} else {
 				logger.Log("[KeepAlive] ⚠️ Sesión requiere actualización. Intentando renovar...")

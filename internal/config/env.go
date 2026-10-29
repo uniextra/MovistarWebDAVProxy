@@ -21,6 +21,10 @@ func init() {
 		TokensDir = custom
 	} else if _, err := os.Stat("tokens"); err == nil {
 		TokensDir = "tokens"
+	} else if _, err := os.Stat("/.dockerenv"); err == nil {
+		TokensDir = "/app/tokens"
+	} else {
+		TokensDir = "tokens"
 	}
 }
 

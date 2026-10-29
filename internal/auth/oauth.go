@@ -35,12 +35,16 @@ type OAuthTokens struct {
 	Scope        string `json:"scope"`
 }
 
-type OAuthCredentialHeader struct {
+type OAuthCredentialData struct {
 	AccessToken     string `json:"accesstoken"`
 	ExpiresIn       string `json:"expiresin"`
 	LastRefreshDate int64  `json:"lastrefreshdate"`
 	Platform        string `json:"platform"`
 	RefreshToken    string `json:"refreshtoken"`
+}
+
+type OAuthCredentialHeader struct {
+	Data OAuthCredentialData `json:"data"`
 }
 
 type RotatedOAuth struct {
@@ -220,11 +224,13 @@ func BuildOAuthHeader(accessToken, refreshToken string, lastRefreshDate int64, e
 	}
 
 	cred := OAuthCredentialHeader{
-		AccessToken:     accessToken,
-		ExpiresIn:       exp,
-		LastRefreshDate: lrd,
-		Platform:        ClientPlatform,
-		RefreshToken:    refreshToken,
+		Data: OAuthCredentialData{
+			AccessToken:     accessToken,
+			ExpiresIn:       exp,
+			LastRefreshDate: lrd,
+			Platform:        ClientPlatform,
+			RefreshToken:    refreshToken,
+		},
 	}
 
 	b, _ := json.Marshal(cred)

@@ -53,6 +53,8 @@ pytest-cache-files-*/
 .coverage
 htmlcov/
 *.log
+Logs*/
+Logs */
 
 # IDEs & System files
 .vscode/

@@ -433,8 +433,11 @@ func (c *Client) RefreshSession() bool {
 			cfgCopy := c.cfg
 			c.mu.Unlock()
 
+			// Persistir inmediatamente los nuevos tokens para proteger contra RTR (Refresh Token Rotation)
+			_ = config.SaveAccountConfig(cfgCopy)
+
 			// Con nuevo access_token, inicializar SAPI
-			res := auth.SAPILoginOAuth(c.httpClient, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, c.cfg.LastRefreshDate, c.cfg.ExpiresIn)
+			res := auth.SAPILoginOAuth(c.httpClient, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
 			if res.StatusCode == http.StatusOK {
 				c.mu.Lock()
 				if res.ValidationKey != "" {
@@ -446,12 +449,22 @@ func (c *Client) RefreshSession() bool {
 				if res.LastRefreshDate > 0 {
 					c.cfg.LastRefreshDate = res.LastRefreshDate
 				}
+				if res.RefreshedOAuth != nil {
+					if res.RefreshedOAuth.AccessToken != "" {
+						c.cfg.AccessToken = res.RefreshedOAuth.AccessToken
+					}
+					if res.RefreshedOAuth.RefreshToken != "" {
+						c.cfg.RefreshToken = res.RefreshedOAuth.RefreshToken
+					}
+				}
 				cfgCopy2 := c.cfg
 				c.mu.Unlock()
 
 				_ = config.SaveAccountConfig(cfgCopy2)
 				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
 				return true
+			} else {
+				logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
 			}
 		} else if err != nil {
 			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", err)

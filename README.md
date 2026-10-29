@@ -1,4 +1,4 @@
-# Movistar Cloud WebDAV Proxy ☁️🔐 (Go Edition v2.0.0)
+# Movistar Cloud WebDAV Proxy ☁️🔐 (Go Edition v2.0.1)
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![Go Report Card](https://goreportcard.com/badge/github.com/uniextra/MovistarWebDAVProxy)](https://goreportcard.com/report/github.com/uniextra/MovistarWebDAVProxy)

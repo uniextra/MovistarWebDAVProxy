@@ -84,11 +84,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "version": "v2.0.0"})
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "version": "v2.0.1"})
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"version": "v2.0.0"})
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"version": "v2.0.1"})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -248,11 +248,24 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	devID := auth.GenerateDeviceID()
+	existingCfg := config.LoadAccountConfig(phone)
+	devID := existingCfg.DeviceID
+	if devID == "" {
+		devID = auth.GenerateDeviceID()
+	}
 	logger.Log("[OAuth] ✔ Tokens obtenidos. Inicializando sesión SAPI para dispositivo %s...", devID)
 
 	nowMS := time.Now().UnixMilli()
 	sapiRes := auth.SAPILoginOAuth(nil, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
+
+	if sapiRes.StatusCode != http.StatusOK && (sapiRes.ValidationKey == "" && sapiRes.JSessionID == "") {
+		logger.Log("[OAuth] ❌ Error inicializando sesión SAPI (HTTP %d): %v", sapiRes.StatusCode, sapiRes.Error)
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+			"status":  "error",
+			"message": fmt.Sprintf("Error iniciando sesión en Movistar Cloud (HTTP %d). Comprueba que la línea tenga el servicio activo.", sapiRes.StatusCode),
+		})
+		return
+	}
 
 	cfg := config.AccountConfig{
 		Phone:           phone,
