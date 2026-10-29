@@ -24,7 +24,17 @@ import (
 var (
 	transferSem    = make(chan struct{}, 3)
 	collisionRegex = regexp.MustCompile(` \(\d+\)(\.[^.]+)?$`)
+	folderLocks    sync.Map
 )
+
+func acquireFolderLock(cleanPath string) func() {
+	val, _ := folderLocks.LoadOrStore(cleanPath, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+	}
+}
 
 type MemoryFile struct {
 	ID        string
@@ -43,14 +53,15 @@ type CreatedFolder struct {
 }
 
 type MovistarFS struct {
-	client         *sapi.Client
-	uploadCache    map[string]*MemoryFile
-	createdFolders map[string]*CreatedFolder
-	folderCache    map[int64]*cachedFolders
-	mediaCache     map[int64]*cachedMedia
-	storageCache   *cachedStorage
-	cacheMu        sync.RWMutex
-	cacheTTL       time.Duration
+	client            *sapi.Client
+	uploadCache       map[string]*MemoryFile
+	createdFolders    map[string]*CreatedFolder
+	deletedTombstones map[string]time.Time
+	folderCache       map[int64]*cachedFolders
+	mediaCache        map[int64]*cachedMedia
+	storageCache      *cachedStorage
+	cacheMu           sync.RWMutex
+	cacheTTL          time.Duration
 }
 
 type cachedFolders struct {
@@ -70,12 +81,13 @@ type cachedStorage struct {
 
 func NewMovistarFS(client *sapi.Client) *MovistarFS {
 	return &MovistarFS{
-		client:         client,
-		uploadCache:    make(map[string]*MemoryFile),
-		createdFolders: make(map[string]*CreatedFolder),
-		folderCache:    make(map[int64]*cachedFolders),
-		mediaCache:     make(map[int64]*cachedMedia),
-		cacheTTL:       15 * time.Second,
+		client:            client,
+		uploadCache:       make(map[string]*MemoryFile),
+		createdFolders:    make(map[string]*CreatedFolder),
+		deletedTombstones: make(map[string]time.Time),
+		folderCache:       make(map[int64]*cachedFolders),
+		mediaCache:        make(map[int64]*cachedMedia),
+		cacheTTL:          15 * time.Second,
 	}
 }
 
@@ -200,6 +212,17 @@ func (mfs *MovistarFS) getMedia(folderID int64) []sapi.MediaItem {
 
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	cleanPath := path.Clean("/" + rawPath)
+
+	// Check if path is currently a tombstone (deleted within 5m)
+	mfs.cacheMu.RLock()
+	if exp, ok := mfs.deletedTombstones[cleanPath]; ok {
+		if time.Now().Before(exp) {
+			mfs.cacheMu.RUnlock()
+			return nil, nil, false, os.ErrNotExist
+		}
+	}
+	mfs.cacheMu.RUnlock()
+
 	rootID, err := mfs.client.GetRootFolderID()
 	if err != nil {
 		return nil, nil, false, err
@@ -307,6 +330,14 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 
 func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	cleanPath := path.Clean("/" + name)
+	unlock := acquireFolderLock(cleanPath)
+	defer unlock()
+
+	// Clear tombstone if re-creating
+	mfs.cacheMu.Lock()
+	delete(mfs.deletedTombstones, cleanPath)
+	mfs.cacheMu.Unlock()
+
 	parentDir := path.Dir(cleanPath)
 	folderName := path.Base(cleanPath)
 
@@ -319,7 +350,7 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 	subs := mfs.getSubfolders(parentFolder.ID)
 	for _, s := range subs {
 		if strings.EqualFold(s.Name, folderName) {
-			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar Cloud (ID: %d). Reutilizando.", folderName, s.ID)
+			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar/O2 Cloud (ID: %d). Reutilizando.", folderName, s.ID)
 			mfs.cacheMu.Lock()
 			mfs.createdFolders[cleanPath] = &CreatedFolder{Info: s, Time: time.Now()}
 			mfs.cacheMu.Unlock()
@@ -410,6 +441,7 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 		_ = mfs.client.DeleteFolder(folderInfo.ID, false)
 		mfs.cacheMu.Lock()
 		delete(mfs.createdFolders, cleanPath)
+		mfs.deletedTombstones[cleanPath] = time.Now().Add(5 * time.Minute)
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(0)
 		return nil
@@ -422,6 +454,7 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 		}
 		mfs.cacheMu.Lock()
 		delete(mfs.uploadCache, cleanPath)
+		mfs.deletedTombstones[cleanPath] = time.Now().Add(5 * time.Minute)
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(mediaInfo.FolderID)
 		return nil
@@ -602,12 +635,8 @@ func (w *WebDAVFileWriter) Close() error {
 	}
 	w.closed = true
 
-	if w.existingID != "" {
-		_ = w.mfs.client.DeleteFile(w.existingID)
-	}
-
 	sizeMB := float64(w.size) / (1024 * 1024)
-	logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar Cloud...", w.name, sizeMB)
+	logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
 
 	transferSem <- struct{}{}
 	defer func() { <-transferSem }()
@@ -629,7 +658,7 @@ func (w *WebDAVFileWriter) Close() error {
 	}
 
 	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
-	media, err := w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType)
+	media, err := w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.existingID)
 	if err != nil {
 		logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
 		return err
@@ -639,6 +668,7 @@ func (w *WebDAVFileWriter) Close() error {
 
 	w.mfs.cacheMu.Lock()
 	now := time.Now()
+	delete(w.mfs.deletedTombstones, w.path)
 	w.mfs.uploadCache[w.path] = &MemoryFile{
 		ID:       media.ID,
 		Name:     w.name,

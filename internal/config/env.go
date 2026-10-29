@@ -29,16 +29,19 @@ func init() {
 }
 
 type AccountConfig struct {
-	Phone           string `json:"phone"`
-	JSessionID      string `json:"jsessionid"`
-	ValidationKey   string `json:"validationkey"`
-	DeviceID        string `json:"device_id"`
-	DeviceName      string `json:"device_name"`
-	RefreshToken    string `json:"refresh_token"`
-	AccessToken     string `json:"access_token"`
-	LastRefreshDate int64  `json:"last_refresh_date"`
-	ExpiresIn       string `json:"expires_in"`
-	TokenPath       string `json:"token_path"`
+	Provider         string `json:"provider"`
+	Phone            string `json:"phone"`
+	JSessionID       string `json:"jsessionid"`
+	ValidationKey    string `json:"validationkey"`
+	DeviceID         string `json:"device_id"`
+	DeviceName       string `json:"device_name"`
+	RefreshToken     string `json:"refresh_token"`
+	AccessToken      string `json:"access_token"`
+	LastRefreshDate  int64  `json:"last_refresh_date"`
+	ExpiresIn        string `json:"expires_in"`
+	TokenPath        string `json:"token_path"`
+	TelegramBotToken string `json:"telegram_bot_token"`
+	TelegramChatID   string `json:"telegram_chat_id"`
 }
 
 func SanitizePhone(phone string) string {
@@ -78,6 +81,7 @@ func LoadAccountConfig(phone string) AccountConfig {
 	defer fileLock.Unlock()
 
 	cfg := AccountConfig{
+		Provider:   "movistar",
 		DeviceName: "PC Windows",
 		ExpiresIn:  "3600",
 	}
@@ -108,6 +112,14 @@ func LoadAccountConfig(phone string) AccountConfig {
 	for _, cand := range candidates {
 		if vars, err := parseEnvFile(cand); err == nil && len(vars) > 0 {
 			cfg.TokenPath = cand
+			if prov, ok := vars["MOVISTAR_PROVIDER"]; ok && strings.EqualFold(prov, "o2") {
+				cfg.Provider = "o2"
+			} else if prov, ok := vars["PROVIDER"]; ok && strings.EqualFold(prov, "o2") {
+				cfg.Provider = "o2"
+			} else {
+				cfg.Provider = "movistar"
+			}
+
 			if p, ok := vars["MOVISTAR_PHONE"]; ok && p != "" {
 				cfg.Phone = SanitizePhone(p)
 			}
@@ -131,6 +143,22 @@ func LoadAccountConfig(phone string) AccountConfig {
 				}
 			}
 
+			if tgToken, ok := vars["MOVISTAR_TELEGRAM_BOT_TOKEN"]; ok && tgToken != "" {
+				cfg.TelegramBotToken = tgToken
+			} else if tgToken, ok := vars["TELEGRAM_BOT_TOKEN"]; ok && tgToken != "" {
+				cfg.TelegramBotToken = tgToken
+			} else if envTg := os.Getenv("TELEGRAM_BOT_TOKEN"); envTg != "" {
+				cfg.TelegramBotToken = envTg
+			}
+
+			if tgChat, ok := vars["MOVISTAR_TELEGRAM_CHAT_ID"]; ok && tgChat != "" {
+				cfg.TelegramChatID = tgChat
+			} else if tgChat, ok := vars["TELEGRAM_CHAT_ID"]; ok && tgChat != "" {
+				cfg.TelegramChatID = tgChat
+			} else if envChat := os.Getenv("TELEGRAM_CHAT_ID"); envChat != "" {
+				cfg.TelegramChatID = envChat
+			}
+
 			if cfg.RefreshToken != "" || (cfg.JSessionID != "" && cfg.ValidationKey != "") {
 				return cfg
 			}
@@ -149,7 +177,13 @@ func SaveAccountConfig(cfg AccountConfig) error {
 	}
 
 	phoneClean := SanitizePhone(cfg.Phone)
+	prov := strings.ToLower(cfg.Provider)
+	if prov != "o2" {
+		prov = "movistar"
+	}
+
 	lines := []string{
+		fmt.Sprintf(`MOVISTAR_PROVIDER="%s"`, prov),
 		fmt.Sprintf(`MOVISTAR_PHONE="%s"`, phoneClean),
 		fmt.Sprintf(`MOVISTAR_JSESSIONID="%s"`, cfg.JSessionID),
 		fmt.Sprintf(`MOVISTAR_VALIDATIONKEY="%s"`, cfg.ValidationKey),
@@ -172,6 +206,12 @@ func SaveAccountConfig(cfg AccountConfig) error {
 		lines = append(lines, fmt.Sprintf(`MOVISTAR_EXPIRES_IN="%s"`, cfg.ExpiresIn))
 	} else {
 		lines = append(lines, `MOVISTAR_EXPIRES_IN="3600"`)
+	}
+	if cfg.TelegramBotToken != "" {
+		lines = append(lines, fmt.Sprintf(`MOVISTAR_TELEGRAM_BOT_TOKEN="%s"`, cfg.TelegramBotToken))
+	}
+	if cfg.TelegramChatID != "" {
+		lines = append(lines, fmt.Sprintf(`MOVISTAR_TELEGRAM_CHAT_ID="%s"`, cfg.TelegramChatID))
 	}
 
 	content := strings.Join(lines, "\n") + "\n"

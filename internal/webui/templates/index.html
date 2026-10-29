@@ -2,25 +2,43 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Movistar WebDAV Proxy (Go)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movistar & O2 WebDAV Proxy (Go)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
         .log-line { font-family: 'ui-monospace', 'SFMono-Regular', monospace; }
+        .terminal-box::-webkit-scrollbar { width: 8px; }
+        .terminal-box::-webkit-scrollbar-track { background: #0A0F1C; }
+        .terminal-box::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 4px; }
+        .terminal-box::-webkit-scrollbar-thumb:hover { background: #334155; }
     </style>
 </head>
-<body class="p-6 max-w-5xl mx-auto text-slate-800">
+<body class="p-4 sm:p-6 max-w-5xl mx-auto text-slate-800">
     <!-- Header -->
-    <header class="flex items-center justify-between mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+    <header class="flex flex-wrap items-center justify-between gap-4 mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
         <div class="flex items-center space-x-3">
-            <h1 class="text-2xl font-bold text-slate-900 tracking-tight">
-                Movistar WebDAV Proxy
-            </h1>
-            <span class="text-xs font-mono font-semibold px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg border border-emerald-200">v2.0.2 (Go)</span>
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/20 font-bold text-white text-lg">
+                ☁
+            </div>
+            <div>
+                <div class="flex items-center space-x-2">
+                    <h1 id="app-title-header" class="text-2xl font-bold text-slate-900 tracking-tight">
+                        Movistar WebDAV Proxy
+                    </h1>
+                    <span id="provider-badge" class="text-xs font-mono font-bold uppercase tracking-wider px-2 py-0.5 bg-blue-100 text-blue-800 rounded-md border border-blue-200">Movistar</span>
+                    <span class="text-xs font-mono font-semibold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-md border border-emerald-200">v2.0.2 (Go)</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-0.5">Proxy WebDAV nativo de alto rendimiento para Duplicati & HyperBackup</p>
+            </div>
         </div>
-        <div class="text-right flex items-center space-x-3">
-            <span id="proxy-status" class="px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-sm">⚪ Comprobando...</span>
+        <div class="flex items-center space-x-3">
+            <button onclick="openTelegramModal()" id="telegram-header-btn" class="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-slate-200" title="Configurar alertas Telegram">
+                <span>✈️</span>
+                <span id="telegram-status-label">Telegram</span>
+            </button>
+            <span id="proxy-status" class="px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs">⚪ Comprobando...</span>
         </div>
     </header>
 
@@ -31,10 +49,23 @@
                 <div class="mb-4">
                     <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">📱</span> Dispositivo & Cuenta</h2>
                 </div>
+
+                <!-- Provider Selector -->
+                <div class="mb-4">
+                    <label class="block text-xs font-semibold text-slate-500 mb-1.5">Proveedor de Nube</label>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button type="button" onclick="setProvider('movistar')" id="prov-btn-movistar" class="py-2 px-3 rounded-xl border border-blue-500 bg-blue-50 text-blue-700 font-semibold text-xs flex items-center justify-center space-x-1.5 transition shadow-sm">
+                            <span>🔵</span><span>Movistar Cloud</span>
+                        </button>
+                        <button type="button" onclick="setProvider('o2')" id="prov-btn-o2" class="py-2 px-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 font-semibold text-xs flex items-center justify-center space-x-1.5 transition hover:bg-slate-100">
+                            <span>🟦</span><span>O2 Cloud</span>
+                        </button>
+                    </div>
+                </div>
                 
                 <div class="mb-4">
                     <label class="block text-xs font-semibold text-slate-500 mb-1">Teléfono Móvil Asociado</label>
-                    <input type="text" id="phone" placeholder="Ej: 611223344" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                    <input type="text" id="phone" placeholder="Ej: 611223344" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono">
                 </div>
 
                 <div id="device-info-box" class="hidden mb-4 p-3 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-900 space-y-1">
@@ -42,13 +73,13 @@
                         <span class="mr-1">✔</span> Cliente Oficial de Escritorio Registrado (Windows):
                     </div>
                     <div class="font-mono text-[11px] text-blue-700 break-all" id="device-id-text">Device ID: -</div>
-                    <div class="text-[11px] text-blue-600">Tokens permanentes OAuth2 activos. Inmune a desconexiones al iniciar sesión en otros navegadores o dispositivos.</div>
+                    <div class="text-[11px] text-blue-600">Tokens permanentes OAuth2 activos. Inmune a desconexiones al iniciar sesión en otros dispositivos.</div>
                 </div>
             </div>
 
             <div class="pt-4 border-t border-slate-100 mt-2 flex items-center space-x-2">
-                <button onclick="openOAuthModal()" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl shadow-sm transition flex items-center justify-center space-x-2">
-                    <span>🔑 Vincular Dispositivo (Login SMS Oficial)</span>
+                <button onclick="openOAuthModal()" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl shadow-sm transition flex items-center justify-center space-x-2 text-sm">
+                    <span>🔑 Vincular Dispositivo (OAuth2 SMS)</span>
                 </button>
                 <button id="unlinkBtn" onclick="unlinkAccount()" title="Desvincular y eliminar credenciales" class="bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 p-2.5 rounded-xl transition flex items-center justify-center shadow-sm group">
                     <svg class="w-5 h-5 transition transform group-hover:scale-110" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -66,14 +97,14 @@
                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs space-y-1.5">
                     <div class="flex justify-between text-slate-600">
                         <span class="font-medium">Puerto WebDAV interno:</span>
-                        <span class="font-mono font-semibold">8080 (mapeado en host a 5050)</span>
+                        <span class="font-mono font-semibold">8080 (host: 5050)</span>
                     </div>
                     <div class="flex justify-between text-slate-600">
                         <span class="font-medium">Motor de Ejecución:</span>
                         <span class="font-semibold text-emerald-700">Go Nativo (Zero-Copy Streaming)</span>
                     </div>
                     <div class="flex justify-between text-slate-600">
-                        <span class="font-medium">Espacio en Movistar Cloud:</span>
+                        <span class="font-medium">Espacio en la Nube:</span>
                         <span id="cloud-storage-used" class="font-semibold text-blue-700">Consultando...</span>
                     </div>
                     <div class="flex justify-between text-slate-600">
@@ -84,10 +115,10 @@
             </div>
 
             <div class="flex space-x-3 pt-2">
-                <button id="startBtn" onclick="startProxy()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-xl shadow transition transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                <button id="startBtn" onclick="startProxy()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-xl shadow transition transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed text-sm">
                     ▶ Reanudar WebDAV
                 </button>
-                <button id="stopBtn" onclick="stopProxy()" disabled class="flex-1 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold py-3 px-4 rounded-xl shadow-sm transition transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                <button id="stopBtn" onclick="stopProxy()" disabled class="flex-1 bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold py-3 px-4 rounded-xl shadow-sm transition transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed text-sm">
                     ■ Pausar WebDAV
                 </button>
             </div>
@@ -107,23 +138,32 @@
                 <span id="copyBtnText">📋 Copiar Logs</span>
             </button>
         </div>
-        <div id="terminal" class="p-4 h-80 overflow-y-auto bg-[#0A0F1C] text-slate-300 text-sm log-line">
+        <div id="terminal" class="terminal-box p-4 h-80 overflow-y-auto bg-[#0A0F1C] text-slate-300 text-sm log-line">
             Iniciando proxy en Go...
         </div>
     </div>
 
-    <!-- Modal de Vinculación Oficial OAuth2 (Sin Chromium/VNC) -->
+    <!-- Modal de Vinculación Oficial OAuth2 -->
     <div id="oauthModal" class="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col">
             <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
                 <div>
-                    <h3 class="text-base font-bold text-slate-900">Vinculación Oficial de Movistar Cloud</h3>
+                    <h3 id="oauth-modal-title" class="text-base font-bold text-slate-900">Vinculación Oficial de Movistar Cloud</h3>
                     <p class="text-xs text-slate-500">Autenticación directa en la web segura de Telefónica sin intermediarios.</p>
                 </div>
                 <button onclick="closeOAuthModal()" class="text-slate-400 hover:text-slate-600 text-2xl font-bold p-1 leading-none">&times;</button>
             </div>
             
             <div class="p-6 space-y-5 text-sm">
+                <!-- Selector dentro de modal -->
+                <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
+                    <span class="text-slate-700 font-semibold">Proveedor seleccionado:</span>
+                    <div class="flex space-x-2">
+                        <button type="button" onclick="setProvider('movistar'); refreshOAuthLink();" id="modal-prov-movistar" class="px-3 py-1 rounded-lg font-semibold border border-blue-500 bg-blue-50 text-blue-700 transition">Movistar</button>
+                        <button type="button" onclick="setProvider('o2'); refreshOAuthLink();" id="modal-prov-o2" class="px-3 py-1 rounded-lg font-semibold border border-slate-200 bg-white text-slate-600 transition">O2 Cloud</button>
+                    </div>
+                </div>
+
                 <!-- Paso 1 -->
                 <div class="bg-blue-50 border border-blue-100 rounded-xl p-4">
                     <div class="font-bold text-blue-900 flex items-center mb-1">
@@ -134,10 +174,10 @@
                         Pulsa el botón para abrir la pantalla de autenticación en una pestaña de tu navegador (o copia el enlace).
                     </p>
                     <div class="flex space-x-2">
-                        <a id="oauthLinkBtn" href="#" target="_blank" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg text-center transition">
-                            🌐 Abrir Login de Movistar
+                        <a id="oauthLinkBtn" href="#" target="_blank" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg text-center transition text-xs">
+                            <span id="oauth-link-btn-text">🌐 Abrir Login de Movistar</span>
                         </a>
-                        <button onclick="copyOAuthUrl()" class="px-3 py-2 bg-white border border-blue-200 text-blue-700 font-semibold rounded-lg hover:bg-blue-50 transition">
+                        <button onclick="copyOAuthUrl()" class="px-3 py-2 bg-white border border-blue-200 text-blue-700 font-semibold rounded-lg hover:bg-blue-50 transition text-xs">
                             📋 Copiar Enlace
                         </button>
                     </div>
@@ -149,7 +189,7 @@
                         <span class="w-5 h-5 rounded-full bg-slate-700 text-white flex items-center justify-center text-xs mr-2">2</span>
                         Introduce tu móvil y valida el SMS
                     </div>
-                    <p class="text-xs text-slate-600">
+                    <p class="text-xs text-slate-600" id="step2-desc">
                         En la web de Telefónica, escribe tu número de teléfono y el código SMS que recibirás. Al pulsar Aceptar, el navegador te redirigirá a una página en blanco que empieza por <code>https://micloud.movistar.es/ui/html/clientoauth.html?code=...</code>.
                     </p>
                 </div>
@@ -176,6 +216,42 @@
         </div>
     </div>
 
+    <!-- Modal de Notificaciones Telegram -->
+    <div id="telegramModal" class="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 relative">
+            <button onclick="closeTelegramModal()" class="absolute top-4 right-4 text-slate-400 hover:text-slate-600 text-2xl font-bold leading-none">&times;</button>
+            <div class="flex items-center space-x-3 mb-4">
+                <div class="w-10 h-10 rounded-xl bg-sky-100 border border-sky-200 text-sky-600 flex items-center justify-center text-lg">
+                    ✈️
+                </div>
+                <div>
+                    <h3 class="text-base font-bold text-slate-900">Notificaciones Telegram</h3>
+                    <p class="text-xs text-slate-500">Alertas de expiración de sesión y estado</p>
+                </div>
+            </div>
+
+            <div class="space-y-4 text-xs">
+                <div>
+                    <label class="block font-semibold text-slate-700 mb-1">Bot Token (@BotFather)</label>
+                    <input type="password" id="tg-token-input" placeholder="Ej: 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-800 outline-none focus:border-sky-500">
+                </div>
+                <div>
+                    <label class="block font-semibold text-slate-700 mb-1">Chat ID</label>
+                    <input type="text" id="tg-chat-input" placeholder="Ej: 123456789" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-800 outline-none focus:border-sky-500">
+                </div>
+
+                <div class="flex space-x-2 pt-2">
+                    <button type="button" onclick="testTelegramAlert()" id="tg-test-btn" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-2.5 rounded-xl font-semibold transition border border-slate-200">
+                        🔔 Enviar Prueba
+                    </button>
+                    <button type="button" onclick="saveTelegramSettings()" id="tg-save-btn" class="flex-1 bg-sky-600 hover:bg-sky-500 text-white py-2.5 rounded-xl font-semibold transition shadow-sm">
+                        💾 Guardar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notifications Container -->
     <div id="toastContainer" class="fixed top-5 right-5 z-[9999] flex flex-col space-y-3 pointer-events-none max-w-sm w-full"></div>
 
@@ -193,9 +269,61 @@
         const validateOAuthBtn = document.getElementById('validateOAuthBtn');
         
         let currentAuthURL = "";
+        let currentProvider = localStorage.getItem('mc_provider') || 'movistar';
         let logInterval = null;
 
+        function setProvider(prov) {
+            currentProvider = prov;
+            localStorage.setItem('mc_provider', prov);
+            updateProviderUI();
+        }
+
+        function updateProviderUI() {
+            const badge = document.getElementById('provider-badge');
+            const title = document.getElementById('app-title-header');
+            const modalTitle = document.getElementById('oauth-modal-title');
+            const linkText = document.getElementById('oauth-link-btn-text');
+            const step2Desc = document.getElementById('step2-desc');
+            const btnM = document.getElementById('prov-btn-movistar');
+            const btnO = document.getElementById('prov-btn-o2');
+            const mBtnM = document.getElementById('modal-prov-movistar');
+            const mBtnO = document.getElementById('modal-prov-o2');
+
+            if (currentProvider === 'o2') {
+                if (badge) {
+                    badge.textContent = 'O2 Cloud';
+                    badge.className = 'text-xs font-mono font-bold uppercase tracking-wider px-2 py-0.5 bg-sky-100 text-sky-800 rounded-md border border-sky-200';
+                }
+                if (title) title.textContent = 'O2 WebDAV Proxy';
+                if (modalTitle) modalTitle.textContent = 'Vinculación Oficial de O2 Cloud';
+                if (linkText) linkText.textContent = '🌐 Abrir Login de O2 Cloud';
+                if (step2Desc) {
+                    step2Desc.innerHTML = 'En la web de Telefónica / O2, escribe tu número de teléfono y el código SMS que recibirás. Al pulsar Aceptar, el navegador te redirigirá a una página en blanco que empieza por <code>https://cloud.o2online.es/ui/html/clientoauth.html?code=...</code>.';
+                }
+                if (btnO) btnO.className = 'py-2 px-3 rounded-xl border border-sky-500 bg-sky-50 text-sky-700 font-semibold text-xs flex items-center justify-center space-x-1.5 transition shadow-sm';
+                if (btnM) btnM.className = 'py-2 px-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 font-semibold text-xs flex items-center justify-center space-x-1.5 transition hover:bg-slate-100';
+                if (mBtnO) mBtnO.className = 'px-3 py-1 rounded-lg font-semibold border border-sky-500 bg-sky-50 text-sky-700 transition';
+                if (mBtnM) mBtnM.className = 'px-3 py-1 rounded-lg font-semibold border border-slate-200 bg-white text-slate-600 transition';
+            } else {
+                if (badge) {
+                    badge.textContent = 'Movistar';
+                    badge.className = 'text-xs font-mono font-bold uppercase tracking-wider px-2 py-0.5 bg-blue-100 text-blue-800 rounded-md border border-blue-200';
+                }
+                if (title) title.textContent = 'Movistar WebDAV Proxy';
+                if (modalTitle) modalTitle.textContent = 'Vinculación Oficial de Movistar Cloud';
+                if (linkText) linkText.textContent = '🌐 Abrir Login de Movistar';
+                if (step2Desc) {
+                    step2Desc.innerHTML = 'En la web de Telefónica, escribe tu número de teléfono y el código SMS que recibirás. Al pulsar Aceptar, el navegador te redirigirá a una página en blanco que empieza por <code>https://micloud.movistar.es/ui/html/clientoauth.html?code=...</code>.';
+                }
+                if (btnM) btnM.className = 'py-2 px-3 rounded-xl border border-blue-500 bg-blue-50 text-blue-700 font-semibold text-xs flex items-center justify-center space-x-1.5 transition shadow-sm';
+                if (btnO) btnO.className = 'py-2 px-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 font-semibold text-xs flex items-center justify-center space-x-1.5 transition hover:bg-slate-100';
+                if (mBtnM) mBtnM.className = 'px-3 py-1 rounded-lg font-semibold border border-blue-500 bg-blue-50 text-blue-700 transition';
+                if (mBtnO) mBtnO.className = 'px-3 py-1 rounded-lg font-semibold border border-slate-200 bg-white text-slate-600 transition';
+            }
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
+            updateProviderUI();
             phoneInput.value = localStorage.getItem('mc_phone') || '';
             phoneInput.addEventListener('change', checkCredentials);
             checkCredentials();
@@ -217,6 +345,23 @@
                 });
                 const data = await res.json();
                 if (data.status === 'ok') {
+                    if (data.provider && (data.provider === 'movistar' || data.provider === 'o2')) {
+                        currentProvider = data.provider;
+                        localStorage.setItem('mc_provider', data.provider);
+                        updateProviderUI();
+                    }
+                    if (data.telegram_configured) {
+                        const tgLabel = document.getElementById('telegram-status-label');
+                        if (tgLabel) tgLabel.textContent = 'Telegram (Activo)';
+                    }
+                    if (data.telegram_bot_token) {
+                        const tgTok = document.getElementById('tg-token-input');
+                        if (tgTok) tgTok.value = data.telegram_bot_token;
+                    }
+                    if (data.telegram_chat_id) {
+                        const tgChat = document.getElementById('tg-chat-input');
+                        if (tgChat) tgChat.value = data.telegram_chat_id;
+                    }
                     if (data.has_credentials || data.has_device_token) {
                         deviceInfoBox.classList.remove('hidden');
                         deviceIdText.textContent = 'Device ID: ' + (data.device_id || 'fol-Windows');
@@ -257,12 +402,12 @@
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
                     statusBadge.textContent = '🟢 Activo (' + (data.phone || 'WebDAV') + ')';
-                    statusBadge.className = 'px-3.5 py-1.5 bg-emerald-100 text-emerald-700 font-semibold rounded-full text-sm';
+                    statusBadge.className = 'px-3.5 py-1.5 bg-emerald-100 text-emerald-700 font-semibold rounded-full text-xs';
                 } else {
                     startBtn.disabled = false;
                     stopBtn.disabled = true;
                     statusBadge.textContent = '⚪ Pausado';
-                    statusBadge.className = 'px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-sm';
+                    statusBadge.className = 'px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs';
                 }
             } catch (err) {}
         }
@@ -348,6 +493,23 @@
             checkStatus();
         }
 
+        async function refreshOAuthLink() {
+            const phone = phoneInput.value.trim();
+            if (!phone) return;
+            try {
+                const res = await fetch('/start_login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({phone, provider: currentProvider})
+                });
+                const data = await res.json();
+                if (data.status === 'ok' && data.auth_url) {
+                    currentAuthURL = data.auth_url;
+                    oauthLinkBtn.href = data.auth_url;
+                }
+            } catch (err) {}
+        }
+
         async function openOAuthModal() {
             const phone = phoneInput.value.trim();
             if (!phone) {
@@ -360,13 +522,14 @@
                 const res = await fetch('/start_login', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone})
+                    body: JSON.stringify({phone, provider: currentProvider})
                 });
                 const data = await res.json();
                 if (data.status === 'ok' && data.auth_url) {
                     currentAuthURL = data.auth_url;
                     oauthLinkBtn.href = data.auth_url;
                     oauthInputCode.value = "";
+                    updateProviderUI();
                     oauthModal.classList.remove('hidden');
                 } else {
                     showToast("Error generando URL de login: " + (data.message || 'Error desconocido'), "error");
@@ -430,6 +593,7 @@
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         phone: phone,
+                        provider: currentProvider,
                         code_or_url: rawVal
                     })
                 });
@@ -478,6 +642,71 @@
                 }
             } catch (err) {
                 showToast("Error de conexión al desvincular.", "error");
+            }
+        }
+
+        function openTelegramModal() {
+            document.getElementById('telegramModal').classList.remove('hidden');
+        }
+
+        function closeTelegramModal() {
+            document.getElementById('telegramModal').classList.add('hidden');
+        }
+
+        async function testTelegramAlert() {
+            const token = document.getElementById('tg-token-input').value.trim();
+            const chat = document.getElementById('tg-chat-input').value.trim();
+            const btn = document.getElementById('tg-test-btn');
+            btn.disabled = true;
+            btn.textContent = 'Enviando...';
+
+            try {
+                const res = await fetch('/test_telegram', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone: phoneInput.value.trim(), bot_token: token, chat_id: chat })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    showToast('¡Mensaje de prueba de Telegram enviado con éxito!', 'success');
+                } else {
+                    showToast(data.message || 'Error al contactar con Telegram', 'error');
+                }
+            } catch (e) {
+                showToast('Error de red contactando servidor', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔔 Enviar Prueba';
+            }
+        }
+
+        async function saveTelegramSettings() {
+            const token = document.getElementById('tg-token-input').value.trim();
+            const chat = document.getElementById('tg-chat-input').value.trim();
+            const btn = document.getElementById('tg-save-btn');
+            btn.disabled = true;
+            btn.textContent = 'Guardando...';
+
+            try {
+                const res = await fetch('/save_telegram', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone: phoneInput.value.trim(), bot_token: token, chat_id: chat })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    showToast('Ajustes de Telegram guardados.', 'success');
+                    const tgLabel = document.getElementById('telegram-status-label');
+                    if (tgLabel) tgLabel.textContent = token && chat ? 'Telegram (Activo)' : 'Telegram';
+                    closeTelegramModal();
+                } else {
+                    showToast(data.message || 'Error al guardar ajustes', 'error');
+                }
+            } catch (e) {
+                showToast('Error de red guardando ajustes', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '💾 Guardar';
             }
         }
 

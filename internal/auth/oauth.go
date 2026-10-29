@@ -27,6 +27,27 @@ const (
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
+func GetOAuthRedirectURI(provider string) string {
+	if strings.EqualFold(provider, "o2") {
+		return "https://cloud.o2online.es/ui/html/clientoauth.html"
+	}
+	return "https://micloud.movistar.es/ui/html/clientoauth.html"
+}
+
+func GetSAPIBaseURL(provider string) string {
+	if strings.EqualFold(provider, "o2") {
+		return "https://cloud.o2online.es/sapi"
+	}
+	return "https://micloud.movistar.es/sapi"
+}
+
+func GetUploadBaseURL(provider string) string {
+	if strings.EqualFold(provider, "o2") {
+		return "https://upload.cloud.o2online.es"
+	}
+	return "https://upload.micloud.movistar.es"
+}
+
 type OAuthTokens struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -85,7 +106,7 @@ func GeneratePKCE() (verifier, challenge string) {
 	return verifier, challenge
 }
 
-func BuildOAuthLoginURL() (verifier, state, authURL string) {
+func BuildOAuthLoginURL(provider string) (verifier, state, authURL string) {
 	verifier, challenge := GeneratePKCE()
 	stateB := make([]byte, 12)
 	nonceB := make([]byte, 12)
@@ -94,10 +115,12 @@ func BuildOAuthLoginURL() (verifier, state, authURL string) {
 	state = base64.RawURLEncoding.EncodeToString(stateB)
 	nonce := base64.RawURLEncoding.EncodeToString(nonceB)
 
+	redirectURI := GetOAuthRedirectURI(provider)
+
 	params := url.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", OAuthClientID)
-	params.Set("redirect_uri", OAuthRedirectURI)
+	params.Set("redirect_uri", redirectURI)
 	params.Set("scope", "openid")
 	params.Set("nonce", nonce)
 	params.Set("state", state)
@@ -126,11 +149,12 @@ func ExtractAuthCode(input string) string {
 	return cleaned
 }
 
-func ExchangeCodeForTokens(code, verifier string) (*OAuthTokens, error) {
+func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error) {
+	redirectURI := GetOAuthRedirectURI(provider)
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
-	data.Set("redirect_uri", OAuthRedirectURI)
+	data.Set("redirect_uri", redirectURI)
 	data.Set("client_id", OAuthClientID)
 	data.Set("client_secret", OAuthClientSecret)
 	if verifier != "" {
@@ -300,12 +324,18 @@ func ParseOAuthResponseHeader(headerVal string) *RotatedOAuth {
 	return nil
 }
 
-func SAPILoginOAuth(client *http.Client, accessToken, refreshToken, deviceID, deviceName string, lastRefreshDate int64, expiresIn string) SAPILoginResult {
+func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken, deviceID, deviceName string, lastRefreshDate int64, expiresIn string) SAPILoginResult {
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
 
-	targetURL := fmt.Sprintf("%s/login/oauth?action=login&responsetime=true", SAPIBaseURL)
+	endpoint := sapiBaseURL
+	if endpoint == "" {
+		endpoint = SAPIBaseURL
+	}
+	endpoint = strings.TrimSuffix(endpoint, "/")
+
+	targetURL := fmt.Sprintf("%s/login/oauth?action=login&responsetime=true", endpoint)
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
 		return SAPILoginResult{Error: err}

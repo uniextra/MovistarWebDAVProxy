@@ -229,14 +229,15 @@ func (m *MediaItem) UnmarshalJSON(data []byte) error {
 }
 
 type Client struct {
-	mu           sync.RWMutex
-	refreshMu    sync.Mutex
-	cfg          config.AccountConfig
-	httpClient   *http.Client
-	baseURL      string
-	uploadURL    string
-	maxUploadMB  int
-	rootFolderID int64
+	mu               sync.RWMutex
+	refreshMu        sync.Mutex
+	cfg              config.AccountConfig
+	httpClient       *http.Client
+	baseURL          string
+	uploadURL        string
+	maxUploadMB      int
+	rootFolderID     int64
+	OnSessionExpired func(err error)
 }
 
 func NewClient(cfg config.AccountConfig) (*Client, error) {
@@ -262,24 +263,31 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		Timeout:   0,
 	}
 
+	baseURL := auth.GetSAPIBaseURL(cfg.Provider)
+	uploadURL := auth.GetUploadBaseURL(cfg.Provider)
+
 	c := &Client{
 		cfg:         cfg,
 		httpClient:  httpClient,
-		baseURL:     auth.SAPIBaseURL,
-		uploadURL:   "https://upload.micloud.movistar.es",
+		baseURL:     baseURL,
+		uploadURL:   uploadURL,
 		maxUploadMB: 4096,
 	}
 
 	// Inyectar cookies iniciales si existen
 	if c.cfg.ValidationKey != "" || c.cfg.JSessionID != "" {
-		sapiURL, _ := url.Parse("https://micloud.movistar.es")
+		cookieDomain := "micloud.movistar.es"
+		if strings.EqualFold(cfg.Provider, "o2") {
+			cookieDomain = "cloud.o2online.es"
+		}
+		sapiURL, _ := url.Parse("https://" + cookieDomain)
 		var cookies []*http.Cookie
 		if c.cfg.ValidationKey != "" {
 			cookies = append(cookies, &http.Cookie{
 				Name:   "validationkey",
 				Value:  c.cfg.ValidationKey,
 				Path:   "/",
-				Domain: "micloud.movistar.es",
+				Domain: cookieDomain,
 			})
 		}
 		if c.cfg.JSessionID != "" {
@@ -287,7 +295,7 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 				Name:   "JSESSIONID",
 				Value:  c.cfg.JSessionID,
 				Path:   "/",
-				Domain: "micloud.movistar.es",
+				Domain: cookieDomain,
 			})
 		}
 		jar.SetCookies(sapiURL, cookies)
@@ -306,6 +314,8 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cfg = cfg
+	c.baseURL = auth.GetSAPIBaseURL(cfg.Provider)
+	c.uploadURL = auth.GetUploadBaseURL(cfg.Provider)
 }
 
 func (c *Client) HasCredentials() bool {
@@ -399,8 +409,9 @@ func (c *Client) RefreshSession() bool {
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
 
 	// 1. Intento primario: SAPILoginOAuth con access_token actual
+	sapiBase := auth.GetSAPIBaseURL(cfg.Provider)
 	if cfg.AccessToken != "" {
-		res := auth.SAPILoginOAuth(c.httpClient, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
+		res := auth.SAPILoginOAuth(c.httpClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
 		if res.StatusCode == http.StatusOK && (res.ValidationKey != "" || res.JSessionID != "") {
 			c.mu.Lock()
 			if res.ValidationKey != "" {
@@ -447,7 +458,7 @@ func (c *Client) RefreshSession() bool {
 			_ = config.SaveAccountConfig(cfgCopy)
 
 			// Con nuevo access_token, inicializar SAPI
-			res := auth.SAPILoginOAuth(c.httpClient, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
+			res := auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
 			if res.StatusCode == http.StatusOK {
 				c.mu.Lock()
 				if res.ValidationKey != "" {
@@ -482,6 +493,9 @@ func (c *Client) RefreshSession() bool {
 	}
 
 	logger.Log("[!] ⚠️ ERROR 401: No se pudo renovar la sesión automáticamente. Requiere revinculación en el panel web.")
+	if c.OnSessionExpired != nil {
+		go c.OnSessionExpired(errors.New("sesión expirada (HTTP 401)"))
+	}
 	return false
 }
 
@@ -1026,125 +1040,184 @@ func (c *Client) UpdateMedia(mediaID string, name string, folderID int64) error 
 }
 
 func (c *Client) DeleteFile(mediaID string) error {
-	u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, mediaID)
-	req, err := http.NewRequest("POST", u, bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return err
-	}
-	resp, err := c.DoRequest(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	const maxRetries = 10
+	const delay = 1500 * time.Millisecond
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, mediaID)
+		req, err := http.NewRequest("POST", u, bytes.NewReader([]byte("{}")))
+		if err != nil {
+			return err
+		}
+		resp, err := c.DoRequest(req)
+		if err != nil {
+			return err
+		}
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, string(b))
+		_ = resp.Body.Close()
+
+		bStr := string(b)
+		if strings.Contains(bStr, "MED-1017") {
+			if attempt < maxRetries {
+				logger.Log("[SAPI] ⏳ Archivo en validación asíncrona (MED-1017) durante borrado. Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
+				time.Sleep(delay)
+				continue
+			}
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
+		}
+		return nil
 	}
 	return nil
 }
 
-func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string) (*MediaItem, error) {
-	u := fmt.Sprintf("%s/sapi/upload?action=save&acceptasynchronous=true", c.uploadURL)
+func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string) (*MediaItem, error) {
+	c.mu.RLock()
+	uploadEndpoint := fmt.Sprintf("%s/sapi/upload?action=save&acceptasynchronous=true", c.uploadURL)
+	c.mu.RUnlock()
+
 	nowRFC := time.Now().UTC().Format("20060102T150405Z")
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
 
+	metaData := map[string]interface{}{
+		"name":             fileName,
+		"size":             size,
+		"modificationdate": nowRFC,
+		"creationdate":     nowRFC,
+		"contenttype":      mimeType,
+		"folderid":         folderID,
+	}
+	if existingMediaID != "" {
+		metaData["id"] = existingMediaID
+		logger.Log("[SAPI] 📝 Sobrescritura in-place para ID existente: %s (%s)", existingMediaID, fileName)
+	}
+
 	meta := map[string]interface{}{
-		"data": map[string]interface{}{
-			"name":             fileName,
-			"size":             size,
-			"modificationdate": nowRFC,
-			"creationdate":     nowRFC,
-			"contenttype":      mimeType,
-			"folderid":         folderID,
-		},
+		"data": metaData,
 	}
 	metaBytes, _ := json.Marshal(meta)
 
-	pr, pw := io.Pipe()
-	mpw := multipart.NewWriter(pw)
+	const maxRetries = 14
+	const retryDelay = 1500 * time.Millisecond
 
-	go func() {
-		defer pw.Close()
-		defer mpw.Close()
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if seeker, ok := reader.(io.ReadSeeker); ok {
+			_, _ = seeker.Seek(0, io.SeekStart)
+		}
 
-		// 1. Part: data
-		partData, err := mpw.CreateFormField("data")
+		pr, pw := io.Pipe()
+		mpw := multipart.NewWriter(pw)
+
+		go func() {
+			defer pw.Close()
+			defer mpw.Close()
+
+			// 1. Part: data
+			partData, err := mpw.CreateFormField("data")
+			if err != nil {
+				return
+			}
+			if _, err := partData.Write(metaBytes); err != nil {
+				return
+			}
+
+			// 2. Part: file
+			partFile, err := mpw.CreateFormFile("file", fileName)
+			if err != nil {
+				return
+			}
+			if _, err := io.Copy(partFile, reader); err != nil {
+				return
+			}
+		}()
+
+		req, err := http.NewRequest("POST", uploadEndpoint, pr)
 		if err != nil {
-			return
+			_ = pr.Close()
+			return nil, err
 		}
-		if _, err := partData.Write(metaBytes); err != nil {
-			return
-		}
+		req.Header.Set("Content-Type", mpw.FormDataContentType())
 
-		// 2. Part: file
-		partFile, err := mpw.CreateFormFile("file", fileName)
+		resp, err := c.DoRequest(req)
 		if err != nil {
-			return
+			return nil, err
 		}
-		if _, err := io.Copy(partFile, reader); err != nil {
-			return
-		}
-	}()
 
-	req, err := http.NewRequest("POST", u, pr)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", mpw.FormDataContentType())
-
-	resp, err := c.DoRequest(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upload failed (%d): %s", resp.StatusCode, string(b))
+		_ = resp.Body.Close()
+		bStr := string(b)
+
+		// MED-1017 check: Media is being validated asynchronously (~4-10s)
+		if strings.Contains(bStr, "MED-1017") || strings.Contains(strings.ToLower(bStr), "media not validated") {
+			if attempt < maxRetries {
+				logger.Log("[SAPI] ⏳ Servidor validando media asíncronamente (MED-1017). Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
+				time.Sleep(retryDelay)
+				continue
+			}
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+			return nil, fmt.Errorf("upload failed (%d): %s", resp.StatusCode, bStr)
+		}
+
+		var res struct {
+			ID    interface{} `json:"id"`
+			URL   string      `json:"url"`
+			Name  string      `json:"name"`
+			Error *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+			Data struct {
+				ID   interface{} `json:"id"`
+				URL  string      `json:"url"`
+				Name string      `json:"name"`
+			} `json:"data"`
+		}
+
+		_ = json.Unmarshal(b, &res)
+
+		if res.Error != nil && res.Error.Code == "MED-1017" && attempt < maxRetries {
+			logger.Log("[SAPI] ⏳ Servidor validando asíncronamente (MED-1017 en error body). Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		finalID := parseFlexibleID(res.ID)
+		if finalID == "" {
+			finalID = parseFlexibleID(res.Data.ID)
+		}
+		finalURL := res.URL
+		if finalURL == "" {
+			finalURL = res.Data.URL
+		}
+		cloudName := res.Name
+		if cloudName == "" {
+			cloudName = res.Data.Name
+		}
+
+		// Corregir sufijo ' (1)' si la nube lo añadió
+		if finalID != "" && cloudName != "" && cloudName != fileName && strings.Contains(cloudName, " (") {
+			_ = c.UpdateMedia(finalID, fileName, folderID)
+		}
+
+		return &MediaItem{
+			ID:               finalID,
+			Name:             fileName,
+			Size:             size,
+			URL:              finalURL,
+			FolderID:         folderID,
+			CreationDate:     FlexDate(nowRFC),
+			ModificationDate: FlexDate(nowRFC),
+		}, nil
 	}
 
-	var res struct {
-		ID   interface{} `json:"id"`
-		URL  string      `json:"url"`
-		Name string      `json:"name"`
-		Data struct {
-			ID   interface{} `json:"id"`
-			URL  string      `json:"url"`
-			Name string      `json:"name"`
-		} `json:"data"`
-	}
-
-	_ = json.NewDecoder(resp.Body).Decode(&res)
-	finalID := parseFlexibleID(res.ID)
-	if finalID == "" {
-		finalID = parseFlexibleID(res.Data.ID)
-	}
-	finalURL := res.URL
-	if finalURL == "" {
-		finalURL = res.Data.URL
-	}
-	cloudName := res.Name
-	if cloudName == "" {
-		cloudName = res.Data.Name
-	}
-
-	// Corregir sufijo ' (1)' si la nube lo añadió
-	if finalID != "" && cloudName != "" && cloudName != fileName && strings.Contains(cloudName, " (") {
-		_ = c.UpdateMedia(finalID, fileName, folderID)
-	}
-
-	return &MediaItem{
-		ID:               finalID,
-		Name:             fileName,
-		Size:             size,
-		URL:              finalURL,
-		FolderID:         folderID,
-		CreationDate:     FlexDate(nowRFC),
-		ModificationDate: FlexDate(nowRFC),
-	}, nil
+	return nil, errors.New("subida fallida tras agotar reintentos de validación MED-1017")
+}
 }
 
 func (c *Client) DownloadFileStream(item MediaItem) (io.ReadCloser, error) {
