@@ -16,11 +16,15 @@ Turn your unlimited Movistar Cloud storage into a transparent, secure, and remot
 > The original Python + Chromium/noVNC implementation is preserved in the [`legacy-python`](https://github.com/uniextra/MovistarWebDAVProxy/tree/legacy-python) branch.  
 > Version 2.0.0 is a complete ground-up rewrite in native Go, reducing container image size from **~1.34 GB down to ~20 MB** and RAM usage from **~150 MB down to ~6.5 MB**.
 
+<p align="center">
+  <img src="screenshot.png" alt="Movistar & O2 Cloud WebDAV Proxy Web Dashboard" width="850">
+</p>
+
 ---
 
 ## 🌟 Key Features
 
-* 🚀 **Ultra-Lightweight & Efficient (Native Go v2.0.0):**
+* 🚀 **Ultra-Lightweight & Efficient (Native Go):**
   * Standalone compiled binary running inside an Alpine scratch container (`~20 MB` image size).
   * Consumes only **~6.5 MB of RAM** under normal operation (down from 150 MB in Python).
   * Completely removes Chromium, Xvfb, Fluxbox, and noVNC dependencies.
