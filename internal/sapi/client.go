@@ -1218,7 +1218,6 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 
 	return nil, errors.New("subida fallida tras agotar reintentos de validación MED-1017")
 }
-}
 
 func (c *Client) DownloadFileStream(item MediaItem) (io.ReadCloser, error) {
 	return c.DownloadFileStreamRange(item, 0)

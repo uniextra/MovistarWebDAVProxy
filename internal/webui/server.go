@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -447,10 +448,6 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 	s.notifier.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
 
 	logger.Log("[Telegram] ⚙️ Credenciales de Telegram actualizadas para %s.", phone)
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
-}
-
-	logger.Log("[OAuth] ✔ ¡Dispositivo vinculado y guardado con éxito! Proxy WebDAV activo.")
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
