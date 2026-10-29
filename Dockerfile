@@ -1,38 +1,26 @@
-FROM python:3.11-slim
+# Etapa 1: Compilador Go
+FROM golang:1.22-alpine AS builder
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV DISPLAY=:99
-ENV PYTHONUNBUFFERED=1
+WORKDIR /src
 
-# Instalar dependencias para escritorio virtual (Xvfb, VNC, noVNC), herramientas y Playwright
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb \
-    x11vnc \
-    novnc \
-    websockify \
-    fluxbox \
-    procps \
-    chromium \
-    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
-    libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
-    libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
-    && rm -rf /var/lib/apt/lists/*
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /movistar-proxy ./cmd/server
+
+# Etapa 2: Imagen Mínima Final (~20 MB)
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir playwright
-
-COPY . /app/
-
-# Script de arranque: garantizar terminaciones LF y permisos de ejecución
-RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
+COPY --from=builder /movistar-proxy /app/movistar-proxy
 
 VOLUME ["/data", "/app/tokens"]
 
-# 5000: Web App, 8084: noVNC, 8080: WebDAV Proxy
-EXPOSE 5000 8084 8080
+EXPOSE 5000 8080
 
-ENTRYPOINT ["/app/start.sh"]
-CMD ["python", "/app/app.py"]
+ENTRYPOINT ["/app/movistar-proxy"]
