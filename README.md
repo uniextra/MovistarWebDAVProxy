@@ -7,14 +7,9 @@
 [![Image Size](https://img.shields.io/badge/Image%20Size-~20%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![RAM Usage](https://img.shields.io/badge/RAM%20Usage-~6.5%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 
-A high-performance, ultra-lightweight standalone WebDAV proxy written entirely in **Go** that seamlessly translates standard WebDAV backup requests (**Synology HyperBackup**, **Duplicati**, **rclone**, etc.) into the proprietary **Movistar Cloud Spain (Files)** API in real-time.
+Proxy WebDAV nativo de alto rendimiento escrito íntegramente en **Go** que traduce peticiones estándar WebDAV (**Synology HyperBackup**, **Duplicati**, **Rclone**, mapeo de discos en **Windows / macOS / Linux**) a la API oficial de **Movistar Cloud España** y **O2 Cloud** en tiempo real y sin intermediarios.
 
-Turn your unlimited Movistar Cloud storage into a transparent, secure, and remote destination for your server, NAS, and personal backups.
-
-> [!NOTE]
-> **Migrating from Python (v1.x)?**  
-> The original Python + Chromium/noVNC implementation is preserved in the [`legacy-python`](https://github.com/uniextra/MovistarWebDAVProxy/tree/legacy-python) branch.  
-> Version 2.0.0 is a complete ground-up rewrite in native Go, reducing container image size from **~1.34 GB down to ~20 MB** and RAM usage from **~150 MB down to ~6.5 MB**.
+Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparente y segura para tus servidores, ordenadores y copias de seguridad de NAS.
 
 <p align="center">
   <img src="screenshot.png" alt="Movistar & O2 Cloud WebDAV Proxy Web Dashboard" width="850">
@@ -22,47 +17,36 @@ Turn your unlimited Movistar Cloud storage into a transparent, secure, and remot
 
 ---
 
-## 🌟 Key Features
+## 📑 Índice de Contenidos
 
-* 🚀 **Ultra-Lightweight & Efficient (Native Go):**
-  * Standalone compiled binary running inside an Alpine scratch container (`~20 MB` image size).
-  * Consumes only **~6.5 MB of RAM** under normal operation (down from 150 MB in Python).
-  * Completely removes Chromium, Xvfb, Fluxbox, and noVNC dependencies.
-* 🔄 **Full WebDAV Method Translation (RFC 4918):**
-  * `PROPFIND` (automatic server-side pagination overcoming Movistar's default 200-item limit).
-  * `PUT` (disk-buffered streaming upload supporting files of any size without RAM exhaustion).
-  * `GET` & `HEAD` (streaming downloads with chunk decoding, HTTP `Range` request support, and partial content `206 Partial Content`).
-  * `MKCOL` (folder creation with instant ID resolution and nested directory support for `.hbk` archives).
-  * `DELETE` (clean pruning of files and collections).
-  * `MOVE` & `COPY` (atomic server-side renaming/moving with pre-delete overwrite protection to avoid ` (1)` duplicates).
-  * `LOCK` & `UNLOCK` (in-memory lock manager).
-* 📊 **RFC 4331 Storage Quota Support:**
-  * Reports virtual quota (`quota-available-bytes`) and usage so that Synology DSM and backup wizards pass pre-flight checks without *"Insufficient storage"* errors.
-* 🛡️ **Eventual Consistency & Collision Resilience:**
-  * Hides Movistar CDN indexing propagation delays via an intelligent transient metadata cache.
-  * Deletes superseded cloud files prior to overwriting to prevent Movistar from generating ` (1)` duplicate suffix collisions.
-  * On-the-fly filename normalization ensuring backup software always receives canonical file paths.
-* 🚦 **Concurrency Semaphore (Max 3 Transfers):**
-  * Strictly bounds heavy concurrent uploads and downloads to 3 parallel streams to operate in Movistar Cloud's optimal throughput band without API rate-limiting or socket resets.
-* 🔑 **Permissive Client Authentication:**
-  * Accepts any username and password in your WebDAV client (Synology DSM and Duplicati require these fields); the proxy authorizes requests internally using your active account credentials.
-* 💻 **Official Windows Desktop Client OAuth 2.0 Protocol:**
-  * Emulates the official Movistar Cloud Windows desktop client (`omh windows client 32.0.7.1`, `platform="windows"`, `scope="openid"`, and `fol-<base64_md5>` `X-deviceid` matching the `brand.dll` OAuth2 client `b99e5095-7a36-42c1-83b6-6f05d0f13ea1`).
-  * **64-bit Millisecond `lastrefreshdate` Synchronization:** Preserves the exact 13-digit server timestamp (`responsetime` / `lastrefreshdate`) returned by `GET /sapi/login/oauth?action=login&responsetime=true`.
-  * **In-Band Token Rotation (`processAuthenticationResponse`):** Inspects SAPI HTTP response headers for updated `Authorization: oauth <base64>` tokens and atomically persists rotated credentials.
-  * **Zero session conflicts:** You can log into Movistar Cloud via web browsers or mobile apps without kicking the WebDAV proxy offline.
-* 📱 **Native Browser-Based OAuth2 PKCE Linking:**
-  * When linking a new device, the web panel generates an official Telefónica authorization URL with PKCE security. Open it directly in your own browser, complete the SMS verification, and paste the resulting redirect URL into the modal. The proxy exchanges tokens and initializes SAPI without requiring a browser inside the container!
-* 💓 **Automatic Keep-Alive Worker:**
-  * Periodically validates session health via `/sapi/system/information?action=get` and automatically refreshes tokens and Tomcat sessions (`JSESSIONID` + `validationkey`) upon `HTTP 401`.
+1. [🌟 Características Principales](#-características-principales)
+2. [🐳 Despliegue con Docker](#-despliegue-con-docker)
+3. [🔑 Vinculación Inicial (Emparejamiento SMS)](#-vinculación-inicial-emparejamiento-sms)
+4. [💻 Mapear como Unidad de Red (Windows, macOS, Linux)](#-mapear-como-unidad-de-red-windows-macos-linux)
+5. [⚙️ Clientes de Copia de Seguridad (HyperBackup, Duplicati)](#️-clientes-de-copia-de-seguridad-hyperbackup-duplicati)
+6. [🧹 Filtro Inteligente de Basura del SO (v2.0.5)](#-filtro-inteligente-de-basura-del-so-v205)
+7. [📚 Documentación Detallada](#-documentación-detallada)
+8. [📄 Licencia](#-licencia)
 
 ---
 
-## 🐳 Docker Deployment
+## 🌟 Características Principales
 
-### Option 1: Docker Compose (Recommended)
+* 🚀 **Extremadamente Ligero y Eficiente (Go Nativo):** Binario estático compilado en contenedor Docker de solo **~20 MB** con consumo de memoria de apenas **~6.5 MB de RAM**.
+* 🔄 **Traducción Completa de WebDAV (RFC 4918):** Soporta `PROPFIND` (paginación automática de miles de archivos), `PUT` (streaming directo a disco sin saturar RAM), `GET`/`HEAD` (con soporte para peticiones `Range` y streaming por chunks), `MKCOL`, `DELETE`, `MOVE`, `COPY` y bloqueos `LOCK`/`UNLOCK`.
+* 📊 **Cuotas Virtuales RFC 4331:** Informa del espacio disponible para que asistentes como Synology DSM o Duplicati no fallen por chequeos de espacio insuficiente.
+* 🚦 **Semáforo de Concurrencia (3 Transfers Máximo):** Optimiza las subidas y descargas masivas al ancho de banda óptimo de Telefónica previniendo bloqueos por *rate-limit*.
+* 📱 **Autenticación Oficial Windows + OAuth2 PKCE:** Emula el cliente de escritorio oficial (`omh windows client`) con sincronización milimétrica de timestamps y soporte para verificación SMS oficial desde el navegador.
+* 🛡️ **Protección contra Colisiones:** Previene la creación de duplicados automáticos como ` (1)` al actualizar o mover archivos.
+* 🧹 **Absorbedor de Basura de SO (*DevNull Absorber*):** Filtra y neutraliza automáticamente archivos innecesarios de Windows, macOS y Linux.
 
-Create a `docker-compose.yml` file:
+---
+
+## 🐳 Despliegue con Docker
+
+### Opción 1: Docker Compose (Recomendado)
+
+Crea un archivo `docker-compose.yml`:
 
 ```yaml
 version: '3.8'
@@ -73,8 +57,8 @@ services:
     container_name: movistar-webdav-proxy
     restart: unless-stopped
     ports:
-      - "5000:5000"      # Web Management UI & logs
-      - "5050:8080"      # WebDAV Endpoint (map to 5050 on host)
+      - "5000:5000"      # Panel Web de Gestión y Logs
+      - "5050:8080"      # Endpoint WebDAV (puerto 5050 en el host)
     volumes:
       - movistar_tokens:/app/tokens
 
@@ -83,12 +67,12 @@ volumes:
     name: movistar_webdav_tokens
 ```
 
-Start the service:
+Inicia el servicio:
 ```bash
 docker compose up -d
 ```
 
-### Option 2: Docker CLI
+### Opción 2: Docker CLI
 
 ```bash
 docker run -d \
@@ -102,54 +86,60 @@ docker run -d \
 
 ---
 
-## 🔑 Initial Setup & Authentication (Device Pairing)
+## 🔑 Vinculación Inicial (Emparejamiento SMS)
 
-1. Open your web browser and navigate to the management dashboard: `http://YOUR_SERVER_IP:5000`.
-2. Click on **"Vincular Dispositivo (Login SMS Oficial)"**.
-3. A modal will display the official Telefónica login URL. Click **"Abrir Página de Login en Nueva Pestaña"** to open it in your browser.
-4. Enter your Movistar mobile number and the SMS code you receive.
-5. After login, your browser will redirect to a Movistar URL (e.g. `https://micloud.movistar.es/ui/html/clientoauth.html?code=...`).
-6. Copy that URL and paste it into the field in the proxy modal, then click **"Completar Vinculación"**.
-7. The proxy will exchange the OAuth2 authorization code with PKCE, register your device, obtain initial session tokens, and start the WebDAV server on port `8080` (or `5050` based on your host port mapping).
-
----
-
-## ⚙️ Backup Client Configuration
-
-### 1. Synology HyperBackup Setup
-
-In DSM HyperBackup wizard:
-
-1. Select **WebDAV** as the backup destination.
-2. Fill in the connection settings:
-   * **Server address:** `http://YOUR_DOCKER_HOST_IP:5050`
-   * **Username:** `admin` (or any string)
-   * **Password:** `admin` (or any string)
-   * **Folder:** Select or enter a dedicated folder for HyperBackup (e.g. `HyperBackup_NAS`).
-   * **Directory:** Repository name (e.g. `Server_Backup.hbk`).
-3. Complete the wizard. The backup task will report **Online** and is ready for scheduled or on-demand backups.
-
-> [!IMPORTANT]
-> **Best Practice:** Keep separate folders in Movistar Cloud for Duplicati and HyperBackup (e.g. `/Duplicati_Server/` and `/HyperBackup_NAS/`) so that each application manages its indices in complete isolation.
+1. Abre tu navegador y entra al panel de control: `http://IP_DE_TU_SERVIDOR:5000`.
+2. Haz clic en **"Vincular Dispositivo (OAuth2 SMS)"**.
+3. Selecciona tu proveedor (**Movistar Cloud** u **O2 Cloud**) e introduce tu número de teléfono móvil.
+4. Pulsa en **"Abrir Página de Login en Nueva Pestaña"** para acceder al portal oficial de Telefónica y escribe el código SMS recibido.
+5. Copia la URL final redirigida en tu navegador (ej: `https://micloud.movistar.es/...code=...`), pégala en el panel y pulsa **"Completar Vinculación"**.
+6. ¡Listo! El servidor WebDAV quedará activo y escuchando en el puerto `5050`.
 
 ---
 
-### 2. Duplicati Setup
+## 💻 Mapear como Unidad de Red (Windows, macOS, Linux)
 
-In the Duplicati destination setup wizard:
+Puedes montar la nube como si fuera un disco duro o carpeta compartida local:
 
-| Setting | Value |
-| :--- | :--- |
-| **Storage Type** | `WebDAV` |
-| **Server** | Your server IP (e.g. `192.168.1.100`) |
-| **Port** | `5050` (or the host port mapped to `8080`) |
-| **Path on server** | Target folder name (e.g. `Backup_Duplicati` or `/Backup_Duplicati/`) |
-| **Integrated connection (SSL)** | Disabled (unless using an external HTTPS reverse proxy) |
-| **Username** | Any value (e.g. `admin`) |
-| **Password** | Any value (e.g. `admin`) |
+| Sistema Operativo | Método Rápido | Ruta / Comando |
+| :--- | :--- | :--- |
+| **🪟 Windows** | PowerShell / CMD | `net use M: http://TU_IP:5050 /user:admin admin /persistent:yes` |
+| **🍏 macOS** | Finder (`Cmd + K`) | `http://TU_IP:5050` (Usuario: `admin` / Clave: `admin`) |
+| **🐧 Linux** | GNOME Nautilus / `davfs2` | `dav://TU_IP:5050/` o `mount -t davfs http://TU_IP:5050 /mnt/cloud` |
+
+👉 **Para instrucciones paso a paso, ajustes del registro de Windows (límite de 50MB de Microsoft) y montaje con Rclone, consulta la [Guía Completa de Mapeo de Red](docs/network-drive.md).**
 
 ---
 
-## 📄 License
+## ⚙️ Clientes de Copia de Seguridad (HyperBackup, Duplicati)
 
-This project is licensed under the [MIT License](LICENSE).
+El proxy está optimizado para actuar como repositorio remoto de copias automáticas:
+
+* **Synology HyperBackup:** Destino `WebDAV` > `http://TU_IP:5050` > Usuario/Clave `admin` > Carpeta `HyperBackup_NAS` > Repositorio `Copia.hbk`.
+* **Duplicati:** Tipo de almacenamiento `WebDAV` > Servidor `TU_IP`, puerto `5050` > Carpeta `Duplicati_Server`.
+* **Rclone:** Remoto tipo `webdav` con soporte de `--transfers 3` y comandos `sync` / `copy`.
+
+👉 **Instrucciones detalladas y capturas en la [Guía de Clientes de Backup](docs/backup-clients.md).**
+
+---
+
+## 🧹 Filtro Inteligente de Basura del SO (v2.0.5)
+
+Al conectar la unidad en red, los sistemas operativos intentan generar archivos de indexación y metadatos que ensucian la nube. A partir de la versión **v2.0.5**, el proxy integra un absorbedor en memoria (*DevNull Absorber*) que responde con éxito al SO pero evita que se suban a la nube:
+
+* **Windows:** `desktop.ini`, `autorun.inf`, `thumbs.db`, carpetas `$RECYCLE.BIN` y `System Volume Information`.
+* **macOS:** `.DS_Store`, AppleDouble `._*`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`.
+* **Linux:** Carpetas `.Trash-*` y `.directory` de KDE.
+
+---
+
+## 📚 Documentación Detallada
+
+* [📖 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)
+* [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone](docs/backup-clients.md)
+
+---
+
+## 📄 Licencia
+
+Este proyecto está bajo licencia [MIT](LICENSE).
