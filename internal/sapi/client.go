@@ -442,8 +442,8 @@ func (c *Client) RefreshSession() bool {
 
 	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es
 	if cfg.RefreshToken != "" {
-		logger.Log("[OAuth] 🔄 Canjeando refresh_token en apiseg.telefonica.es...")
-		tokens, err := auth.RefreshOAuthToken(cfg.RefreshToken)
+		logger.Log("[OAuth] 🔄 Canjeando refresh_token en apiseg.telefonica.es (%s)...", cfg.Provider)
+		tokens, err := auth.RefreshOAuthToken(cfg.RefreshToken, cfg.Provider)
 		if err == nil && tokens != nil && tokens.AccessToken != "" {
 			c.mu.Lock()
 			c.cfg.AccessToken = tokens.AccessToken

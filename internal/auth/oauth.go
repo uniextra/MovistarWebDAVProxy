@@ -27,6 +27,34 @@ const (
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
+func GetOAuthAuthorizeURL(provider string) string {
+	if strings.EqualFold(provider, "o2") {
+		return "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/authorize"
+	}
+	return OAuthAuthorizeURL
+}
+
+func GetOAuthTokenURL(provider string) string {
+	if strings.EqualFold(provider, "o2") {
+		return "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/token"
+	}
+	return OAuthTokenURL
+}
+
+func GetOAuthClientID(provider string) string {
+	if strings.EqualFold(provider, "o2") {
+		return "21ce2068-4966-45dc-8b7f-a4a25a3a462f"
+	}
+	return OAuthClientID
+}
+
+func GetOAuthClientSecret(provider string) string {
+	if strings.EqualFold(provider, "o2") {
+		return "aa892341-04b1-4fd5-be41-db60d4e900e7"
+	}
+	return OAuthClientSecret
+}
+
 func GetOAuthRedirectURI(provider string) string {
 	if strings.EqualFold(provider, "o2") {
 		return "https://cloud.o2online.es/ui/html/clientoauth.html"
@@ -116,10 +144,12 @@ func BuildOAuthLoginURL(provider string) (verifier, state, authURL string) {
 	nonce := base64.RawURLEncoding.EncodeToString(nonceB)
 
 	redirectURI := GetOAuthRedirectURI(provider)
+	clientID := GetOAuthClientID(provider)
+	authorizeURL := GetOAuthAuthorizeURL(provider)
 
 	params := url.Values{}
 	params.Set("response_type", "code")
-	params.Set("client_id", OAuthClientID)
+	params.Set("client_id", clientID)
 	params.Set("redirect_uri", redirectURI)
 	params.Set("scope", "openid")
 	params.Set("nonce", nonce)
@@ -130,7 +160,7 @@ func BuildOAuthLoginURL(provider string) (verifier, state, authURL string) {
 	params.Set("lang", "es")
 	params.Set("acr_values", "2")
 
-	authURL = fmt.Sprintf("%s?%s", OAuthAuthorizeURL, params.Encode())
+	authURL = fmt.Sprintf("%s?%s", authorizeURL, params.Encode())
 	return verifier, state, authURL
 }
 
@@ -151,22 +181,26 @@ func ExtractAuthCode(input string) string {
 
 func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error) {
 	redirectURI := GetOAuthRedirectURI(provider)
+	tokenURL := GetOAuthTokenURL(provider)
+	clientID := GetOAuthClientID(provider)
+	clientSecret := GetOAuthClientSecret(provider)
+
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
 	data.Set("redirect_uri", redirectURI)
-	data.Set("client_id", OAuthClientID)
-	data.Set("client_secret", OAuthClientSecret)
+	data.Set("client_id", clientID)
+	data.Set("client_secret", clientSecret)
 	if verifier != "" {
 		data.Set("code_verifier", verifier)
 	}
 
-	req, err := http.NewRequest("POST", OAuthTokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
 
-	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", OAuthClientID, OAuthClientSecret)))
+	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	req.Header.Set("User-Agent", DesktopUserAgent)
@@ -194,19 +228,23 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	return &tokens, nil
 }
 
-func RefreshOAuthToken(refreshToken string) (*OAuthTokens, error) {
+func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
+	tokenURL := GetOAuthTokenURL(provider)
+	clientID := GetOAuthClientID(provider)
+	clientSecret := GetOAuthClientSecret(provider)
+
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
-	data.Set("client_id", OAuthClientID)
-	data.Set("client_secret", OAuthClientSecret)
+	data.Set("client_id", clientID)
+	data.Set("client_secret", clientSecret)
 
-	req, err := http.NewRequest("POST", OAuthTokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
 
-	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", OAuthClientID, OAuthClientSecret)))
+	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	req.Header.Set("User-Agent", DesktopUserAgent)
