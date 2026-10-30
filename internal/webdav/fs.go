@@ -27,6 +27,65 @@ var (
 	folderLocks    sync.Map
 )
 
+// isOSJunk comprueba si el nombre de archivo o carpeta corresponde a metadatos automáticos
+// generados por Windows, macOS o Linux al mapear unidades de red o carpetas compartidas.
+func isOSJunk(name string) bool {
+	base := strings.ToLower(path.Base(name))
+	base = strings.TrimSpace(base)
+
+	// Windows: metadatos de carpeta, miniaturas, papelera y volumen
+	switch base {
+	case "desktop.ini",
+		"autorun.inf",
+		"autorun.ini",
+		"thumbs.db",
+		"ehthumbs.db",
+		"ehthumbs_vista.db",
+		"$recycle.bin",
+		"recycled",
+		"recycler",
+		"system volume information":
+		return true
+	}
+
+	// macOS: configuración de vista, indexación Spotlight, papelera, eventos y AppleShare
+	switch base {
+	case ".ds_store",
+		".spotlight-v100",
+		".trashes",
+		".fseventsd",
+		".temporaryitems",
+		".documentrevisions-v100",
+		".apdisk",
+		".volumeicon.icns":
+		return true
+	}
+
+	// macOS AppleDouble: bifurcaciones de recursos y atributos extendidos (._*)
+	if strings.HasPrefix(base, "._") {
+		return true
+	}
+
+	// Linux: papelera (.Trash-1000) y configuración de directorios KDE (.directory)
+	if strings.HasPrefix(base, ".trash-") || base == ".directory" {
+		return true
+	}
+
+	return false
+}
+
+// isOSJunkPath comprueba si la ruta completa o alguno de sus componentes coincide con archivos o carpetas basura de SO.
+func isOSJunkPath(rawPath string) bool {
+	clean := path.Clean("/" + rawPath)
+	parts := strings.Split(strings.Trim(clean, "/"), "/")
+	for _, part := range parts {
+		if part != "" && isOSJunk(part) {
+			return true
+		}
+	}
+	return false
+}
+
 func acquireFolderLock(cleanPath string) func() {
 	val, _ := folderLocks.LoadOrStore(cleanPath, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
@@ -213,6 +272,11 @@ func (mfs *MovistarFS) getMedia(folderID int64) []sapi.MediaItem {
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	cleanPath := path.Clean("/" + rawPath)
 
+	// Archivos y rutas basura de SO (desktop.ini, .DS_Store, etc.)
+	if isOSJunkPath(cleanPath) {
+		return nil, nil, false, os.ErrNotExist
+	}
+
 	// Check if path is currently a tombstone (deleted within 5m)
 	mfs.cacheMu.RLock()
 	if exp, ok := mfs.deletedTombstones[cleanPath]; ok {
@@ -330,6 +394,13 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 
 func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	cleanPath := path.Clean("/" + name)
+
+	// Si es una carpeta de sistema o metadatos de SO ($RECYCLE.BIN, .Trashes, etc.), absorber silenciosamente
+	if isOSJunkPath(cleanPath) {
+		logger.Log("[WebDAV] 🧹 Ignorada creación de carpeta del sistema: '%s'", cleanPath)
+		return nil
+	}
+
 	unlock := acquireFolderLock(cleanPath)
 	defer unlock()
 
@@ -379,8 +450,14 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 
 	// Manejo de escritura (flag os.O_RDWR o os.O_WRONLY o os.O_CREATE)
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE) != 0 {
-		parentDir := path.Dir(cleanPath)
 		fileName := path.Base(cleanPath)
+
+		// Absorber archivos de sistema (desktop.ini, .DS_Store, etc.) sin subir a la nube
+		if isOSJunkPath(cleanPath) {
+			return NewDevNullFileWriter(cleanPath, fileName), nil
+		}
+
+		parentDir := path.Dir(cleanPath)
 
 		parentFolder, _, isFolder, err := mfs.resolvePath(parentDir)
 		if err != nil || !isFolder || parentFolder == nil {
@@ -431,6 +508,10 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 
 func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 	cleanPath := path.Clean("/" + name)
+	if isOSJunkPath(cleanPath) {
+		return nil
+	}
+
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
 		return nil // WebDAV idempotencia
@@ -466,6 +547,11 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) error {
 	oldClean := path.Clean("/" + oldName)
 	newClean := path.Clean("/" + newName)
+
+	if isOSJunkPath(oldClean) || isOSJunkPath(newClean) {
+		return nil
+	}
+
 	newParentDir := path.Dir(newClean)
 	newBaseName := path.Base(newClean)
 
@@ -892,7 +978,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 		seen := make(map[string]bool)
 
 		for _, s := range subs {
-			if !seen[s.Name] {
+			if !seen[s.Name] && !isOSJunk(s.Name) {
 				seen[s.Name] = true
 				list = append(list, &VirtualFileInfo{name: s.Name, size: 0, mode: os.ModeDir | 0755, modTime: parseTime(s.ModificationDate), isDir: true})
 			}
@@ -905,7 +991,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			if cleanName != "" && !seen[cleanName] {
 				name = cleanName
 			}
-			if !seen[name] {
+			if !seen[name] && !isOSJunk(name) {
 				seen[name] = true
 				list = append(list, &VirtualFileInfo{name: name, size: m.Size, mode: 0644, modTime: parseTime(m.ModificationDate), isDir: false})
 			}
@@ -913,7 +999,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 
 		d.mfs.cacheMu.RLock()
 		for _, mem := range d.mfs.uploadCache {
-			if mem.FolderID == d.folderID && !seen[mem.Name] {
+			if mem.FolderID == d.folderID && !seen[mem.Name] && !isOSJunk(mem.Name) {
 				seen[mem.Name] = true
 				list = append(list, &VirtualFileInfo{name: mem.Name, size: mem.Size, mode: 0644, modTime: mem.ModTime, isDir: false})
 			}
@@ -945,12 +1031,50 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 	return batch, nil
 }
 
+// DevNullFileWriter implementa webdav.File actuando como un agujero negro (/dev/null)
+// para absorber escrituras de archivos basura del sistema operativo sin subirlos a la nube
+// ni devolver errores al cliente WebDAV (Windows Explorer, macOS Finder, Linux).
+type DevNullFileWriter struct {
+	path   string
+	name   string
+	size   int64
+	closed bool
+}
+
+func NewDevNullFileWriter(path, name string) *DevNullFileWriter {
+	return &DevNullFileWriter{
+		path: path,
+		name: name,
+	}
+}
+
+func (d *DevNullFileWriter) Write(p []byte) (n int, err error) {
+	d.size += int64(len(p))
+	return len(p), nil
+}
+
+func (d *DevNullFileWriter) Close() error {
+	if !d.closed {
+		d.closed = true
+		logger.Log("[WebDAV] 🧹 Ignorado archivo del sistema: '%s' (%d bytes absorbidos)", d.name, d.size)
+	}
+	return nil
+}
+
+func (d *DevNullFileWriter) Read(p []byte) (n int, err error) { return 0, io.EOF }
+func (d *DevNullFileWriter) Seek(offset int64, whence int) (int64, error) { return 0, nil }
+func (d *DevNullFileWriter) Readdir(count int) ([]os.FileInfo, error) { return nil, fs.ErrInvalid }
+func (d *DevNullFileWriter) Stat() (os.FileInfo, error) {
+	return &VirtualFileInfo{name: d.name, size: d.size, mode: 0644, modTime: time.Now()}, nil
+}
+
 // Compile-time interface checks
 var (
 	_ webdav.File         = (*WebDAVFileWriter)(nil)
 	_ webdav.File         = (*WebDAVFileReader)(nil)
 	_ webdav.File         = (*WebDAVMemoryReader)(nil)
 	_ webdav.File         = (*WebDAVDirReader)(nil)
+	_ webdav.File         = (*DevNullFileWriter)(nil)
 	_ webdav.FileSystem   = (*MovistarFS)(nil)
 	_ webdav.ContentTyper = (*VirtualFileInfo)(nil)
 )
