@@ -78,6 +78,10 @@ Si deseas el máximo rendimiento con caché en disco y soporte para archivos de 
    rclone mount movistar: M: --vfs-cache-mode full --vfs-cache-max-size 20G
    ```
 
+> [!WARNING]
+> **Límite de 4 GB por archivo en Movistar / O2 Cloud:**  
+> La API de Telefónica no admite archivos individuales mayores a 4 GB (4096 MB). Si necesitas almacenar archivos gigantes (por ejemplo imágenes ISO de más de 4 GB), puedes configurar un remoto secundario tipo [`chunker`](https://rclone.org/chunker/) sobre tu remoto `movistar:` con un tamaño de bloque de 2 GB (`chunk_size = 2G`) para fragmentarlos de forma transparente.
+
 ---
 
 ## 🍏 2. macOS

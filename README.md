@@ -25,8 +25,9 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 4. [💻 Mapear como Unidad de Red (Windows, macOS, Linux)](#-mapear-como-unidad-de-red-windows-macos-linux)
 5. [⚙️ Clientes de Copia de Seguridad (HyperBackup, Duplicati)](#️-clientes-de-copia-de-seguridad-hyperbackup-duplicati)
 6. [🧹 Filtro Inteligente de Basura del SO (v2.0.5)](#-filtro-inteligente-de-basura-del-so-v205)
-7. [📚 Documentación Detallada](#-documentación-detallada)
-8. [📄 Licencia](#-licencia)
+7. [⚠️ Limitaciones Conocidas de Movistar / O2 Cloud](#️-limitaciones-conocidas-de-movistar--o2-cloud)
+8. [📚 Documentación Detallada](#-documentación-detallada)
+9. [📄 Licencia](#-licencia)
 
 ---
 
@@ -130,6 +131,26 @@ Al conectar la unidad en red, los sistemas operativos intentan generar archivos 
 * **Windows:** `desktop.ini`, `autorun.inf`, `thumbs.db`, carpetas `$RECYCLE.BIN` y `System Volume Information`.
 * **macOS:** `.DS_Store`, AppleDouble `._*`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`.
 * **Linux:** Carpetas `.Trash-*` y `.directory` de KDE.
+
+---
+
+## ⚠️ Limitaciones Conocidas de Movistar / O2 Cloud
+
+Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la infraestructura de Telefónica (SAPI) impone ciertas limitaciones técnicas que es importante tener en cuenta:
+
+1. **📦 Límite de tamaño máximo por archivo individual (4 GB):**
+   * La API SAPI de Movistar/O2 Cloud rechaza la subida de cualquier archivo individual que supere los **4 GB (4096 MB)**.
+   * **¿Cómo afecta a las copias de seguridad?**
+     * **Duplicati:** No se ve afectado. Trabaja por defecto dividiendo las copias en volúmenes pequeños de 50 MB (configurables hasta 1 o 2 GB).
+     * **Synology HyperBackup:** No se ve afectado. El formato de repositorio `.hbk` fragmenta los datos en bloques pequeños.
+     * **Mapeo directo / Rclone:** Si intentas arrastrar manualmente un archivo mayor de 4 GB (como una imagen ISO de gran tamaño o un disco virtual), la subida fallará. Para archivos gigantes con Rclone, se recomienda utilizar el overlay [`rclone chunker`](https://rclone.org/chunker/) configurado con trozos de 2 GB.
+
+2. **🚦 Límite de conexiones concurrentes:**
+   * La API aplica restricciones de tasa (*rate-limiting*) si se satura con decenas de peticiones paralelas simultáneas.
+   * El proxy gestiona esto automáticamente mediante un **semáforo de concurrencia** que limita a **3 transferencias simultáneas** para operar siempre en el ancho de banda óptimo sin provocar bloqueos ni errores `HTTP 429`.
+
+3. **🔤 Caracteres reservados en nombres de archivo:**
+   * Evita el uso de caracteres especiales no compatibles con URLs o APIs REST (`\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en los nombres de archivos o directorios.
 
 ---
 
