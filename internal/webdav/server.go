@@ -75,7 +75,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Aceptar cualquier Basic Auth eliminando la cabecera para que sea procesada
 	r.Header.Del("Authorization")
 
-	// 2. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
+	// 2. Rechazar PUT a colecciones (rutas terminadas en /) según RFC 4918 §9.7.1
+	if method == "PUT" && strings.HasSuffix(urlPath, "/") {
+		http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 3. Informar al cliente Windows que es un servidor WebDAV oficial
+	if method == "OPTIONS" {
+		w.Header().Set("MS-Author-Via", "DAV")
+	}
+
+	// 4. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
 	if method == "GET" || method == "HEAD" {
 		ext := filepath.Ext(urlPath)
 		ct := mime.TypeByExtension(ext)

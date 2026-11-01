@@ -15,7 +15,7 @@ import (
 	"movistar-webdav-proxy/internal/webui"
 )
 
-const AppVersion = "v2.0.5"
+const AppVersion = "v2.0.6"
 
 func main() {
 	logger.Log("=====================================================")

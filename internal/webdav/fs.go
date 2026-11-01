@@ -296,8 +296,17 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 		return &sapi.FolderItem{ID: rootID, Name: "/", Magic: true}, nil, true, nil
 	}
 
-	// 1. Check uploadCache
+	// 1. Check createdFolders con verificación de TTL (60s)
 	mfs.cacheMu.RLock()
+	if cf, ok := mfs.createdFolders[cleanPath]; ok {
+		if time.Since(cf.Time) < 60*time.Second {
+			info := cf.Info
+			mfs.cacheMu.RUnlock()
+			return &info, nil, true, nil
+		}
+	}
+
+	// 2. Check uploadCache
 	if mem, ok := mfs.uploadCache[cleanPath]; ok {
 		mfs.cacheMu.RUnlock()
 		mi := &sapi.MediaItem{
@@ -309,14 +318,6 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 		}
 		return nil, mi, false, nil
-	}
-	// 2. Check createdFolders con verificación de TTL (60s)
-	if cf, ok := mfs.createdFolders[cleanPath]; ok {
-		if time.Since(cf.Time) < 60*time.Second {
-			info := cf.Info
-			mfs.cacheMu.RUnlock()
-			return &info, nil, true, nil
-		}
 	}
 	mfs.cacheMu.RUnlock()
 
@@ -404,9 +405,10 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 	unlock := acquireFolderLock(cleanPath)
 	defer unlock()
 
-	// Clear tombstone if re-creating
+	// Clear tombstone AND clear any conflicting uploadCache entry if re-creating
 	mfs.cacheMu.Lock()
 	delete(mfs.deletedTombstones, cleanPath)
+	delete(mfs.uploadCache, cleanPath)
 	mfs.cacheMu.Unlock()
 
 	parentDir := path.Dir(cleanPath)
@@ -423,6 +425,7 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		if strings.EqualFold(s.Name, folderName) {
 			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar/O2 Cloud (ID: %d). Reutilizando.", folderName, s.ID)
 			mfs.cacheMu.Lock()
+			delete(mfs.uploadCache, cleanPath)
 			mfs.createdFolders[cleanPath] = &CreatedFolder{Info: s, Time: time.Now()}
 			mfs.cacheMu.Unlock()
 			return nil
@@ -438,6 +441,7 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 
 	logger.Log("[WebDAV] ✔ Carpeta creada: '%s' (ID: %d)", folderName, created.ID)
 	mfs.cacheMu.Lock()
+	delete(mfs.uploadCache, cleanPath)
 	mfs.createdFolders[cleanPath] = &CreatedFolder{Info: *created, Time: time.Now()}
 	mfs.cacheMu.Unlock()
 	mfs.InvalidateCache(parentFolder.ID)
@@ -464,9 +468,18 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 			return nil, os.ErrNotExist
 		}
 
+		// En WebDAV RFC 4918 (Sección 9.7.1), un PUT sobre una colección existente
+		// DEBE ser rechazado con 405 Method Not Allowed (retornando os.ErrInvalid).
+		// Esto es crítico para Windows Explorer: al arrastrar carpetas, hace MKCOL y luego un PUT de 0 bytes;
+		// si se acepta el PUT, crea un archivo plano en lugar de mantener la carpeta, rompiendo la copia de sus hijos.
+		existingFolder, mediaInfo, isF, err := mfs.resolvePath(cleanPath)
+		if err == nil && isF && existingFolder != nil {
+			logger.Log("[WebDAV] ℹ️ Rechazado PUT sobre carpeta existente: '%s' (RFC 4918 405 Method Not Allowed)", cleanPath)
+			return nil, os.ErrInvalid
+		}
+
 		// Chequear si ya existe un archivo con ese nombre para borrarlo antes y no crear sufijo ' (1)'
 		var existingID string
-		_, mediaInfo, isF, err := mfs.resolvePath(cleanPath)
 		if err == nil && !isF && mediaInfo != nil {
 			existingID = mediaInfo.ID
 		}
