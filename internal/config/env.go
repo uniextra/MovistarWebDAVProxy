@@ -11,6 +11,8 @@ import (
 	"sync"
 )
 
+const Version = "v2.0.7"
+
 var (
 	TokensDir = "/app/tokens"
 	fileLock  sync.Mutex

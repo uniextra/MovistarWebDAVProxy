@@ -75,10 +75,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Aceptar cualquier Basic Auth eliminando la cabecera para que sea procesada
 	r.Header.Del("Authorization")
 
-	// 2. Rechazar PUT a colecciones (rutas terminadas en /) según RFC 4918 §9.7.1
-	if method == "PUT" && strings.HasSuffix(urlPath, "/") {
-		http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
-		return
+	// 2. Rechazar PUT a colecciones según RFC 4918 §9.7.1
+	// Nota: Si se envía PUT sobre una carpeta (con o sin /), DEBE responder 405 Method Not Allowed.
+	// golang.org/x/net/webdav devolvería 404 si falla OpenFile, por lo que lo interceptamos aquí.
+	if method == "PUT" {
+		if strings.HasSuffix(urlPath, "/") {
+			http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
+			return
+		}
+		if folder, _, isFolder, err := s.fs.resolvePath(urlPath); err == nil && isFolder && folder != nil {
+			logger.Log("[WebDAV] ℹ️ Rechazado PUT sobre carpeta existente: '%s' (RFC 4918 405 Method Not Allowed)", urlPath)
+			http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
+			return
+		}
 	}
 
 	// 3. Informar al cliente Windows que es un servidor WebDAV oficial
