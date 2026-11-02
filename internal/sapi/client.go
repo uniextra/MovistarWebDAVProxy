@@ -548,40 +548,47 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 		if req.Body != nil && req.GetBody == nil {
 			return resp, nil
 		}
-		resp.Body.Close()
-		if c.HasCredentials() && c.RefreshSession() {
-			// Reintentar petición con nuevas credenciales
-			c.mu.RLock()
-			newCfg := c.cfg
-			c.mu.RUnlock()
+		if c.HasCredentials() {
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if c.RefreshSession() {
+				// Reintentar petición con nuevas credenciales
+				c.mu.RLock()
+				newCfg := c.cfg
+				c.mu.RUnlock()
 
-			var retryBody io.Reader
-			if req.GetBody != nil {
-				rb, err := req.GetBody()
+				var retryBody io.Reader
+				if req.GetBody != nil {
+					rb, err := req.GetBody()
+					if err != nil {
+						resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+						return resp, err
+					}
+					retryBody = rb
+				}
+
+				newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
 				if err != nil {
+					resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 					return resp, err
 				}
-				retryBody = rb
-			}
+				newReq.Header = req.Header.Clone()
+				newReq.Header.Set("Authorization", auth.BuildOAuthHeader(newCfg.AccessToken, newCfg.RefreshToken, newCfg.LastRefreshDate, newCfg.ExpiresIn))
+				newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
 
-			newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
-			if err != nil {
-				return resp, err
+				resp2, err2 := c.httpClient.Do(newReq)
+				if err2 == nil {
+					c.processSAPIResponse(resp2)
+					return resp2, nil
+				}
+				var urlErr *url.Error
+				if errors.As(err2, &urlErr) && urlErr.Err != nil {
+					return resp2, fmt.Errorf("SAPI retry failed (%s %s): %w", newReq.Method, newReq.URL.Path, urlErr.Err)
+				}
+				return resp2, err2
 			}
-			newReq.Header = req.Header.Clone()
-			newReq.Header.Set("Authorization", auth.BuildOAuthHeader(newCfg.AccessToken, newCfg.RefreshToken, newCfg.LastRefreshDate, newCfg.ExpiresIn))
-			newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
-
-			resp2, err2 := c.httpClient.Do(newReq)
-			if err2 == nil {
-				c.processSAPIResponse(resp2)
-				return resp2, nil
-			}
-			var urlErr *url.Error
-			if errors.As(err2, &urlErr) && urlErr.Err != nil {
-				return resp2, fmt.Errorf("SAPI retry failed (%s %s): %w", newReq.Method, newReq.URL.Path, urlErr.Err)
-			}
-			return resp2, err2
+			// Restaurar cuerpo legible si RefreshSession falló para evitar "http: read on closed response body"
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
 
@@ -599,6 +606,14 @@ func (c *Client) GetSystemInfo() (map[string]interface{}, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, errors.New("sesión SAPI no autorizada (HTTP 401): vincula la cuenta en el panel web")
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("get system info failed (HTTP %d): %s", resp.StatusCode, string(b))
+	}
 
 	var data map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
@@ -622,6 +637,13 @@ func (c *Client) GetStorageSpace() (*StorageSpace, error) {
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, errors.New("sesión SAPI no autorizada (HTTP 401): vincula la cuenta en el panel web")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get storage space failed (HTTP %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var root struct {
@@ -699,6 +721,14 @@ func (c *Client) GetRootFolderID() (int64, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return 0, errors.New("sesión SAPI no autorizada (HTTP 401): vincula la cuenta en el panel web")
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return 0, fmt.Errorf("get root folder failed (HTTP %d): %s", resp.StatusCode, string(b))
+	}
 
 	var root struct {
 		Data struct {

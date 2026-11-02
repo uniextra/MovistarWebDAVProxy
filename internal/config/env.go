@@ -33,6 +33,8 @@ var (
 func init() {
 	if custom := os.Getenv("TOKENS_DIR"); custom != "" {
 		TokensDir = custom
+	} else if _, err := os.Stat("/app/tokens"); err == nil {
+		TokensDir = "/app/tokens"
 	} else if _, err := os.Stat("tokens"); err == nil {
 		TokensDir = "tokens"
 	} else if _, err := os.Stat("/.dockerenv"); err == nil {
@@ -218,10 +220,15 @@ func LoadAccountConfig(phone string) AccountConfig {
 		)
 	}
 
-	// Buscar cualquier account_*.env (priorizando ficheros por cuenta sobre .env genérico)
+	// Buscar cualquier *.env en TokensDir (priorizando account_*.env sobre otros .env)
 	if entries, err := os.ReadDir(TokensDir); err == nil {
 		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), "account_") && strings.HasSuffix(e.Name(), ".env") {
+			if !e.IsDir() && strings.HasPrefix(e.Name(), "account_") && strings.HasSuffix(e.Name(), ".env") {
+				candidates = append(candidates, filepath.Join(TokensDir, e.Name()))
+			}
+		}
+		for _, e := range entries {
+			if !e.IsDir() && !strings.HasPrefix(e.Name(), "account_") && strings.HasSuffix(e.Name(), ".env") && e.Name() != ".env" {
 				candidates = append(candidates, filepath.Join(TokensDir, e.Name()))
 			}
 		}
@@ -229,6 +236,7 @@ func LoadAccountConfig(phone string) AccountConfig {
 
 	candidates = append(candidates,
 		filepath.Join(TokensDir, ".env"),
+		".env",
 	)
 
 	for _, cand := range candidates {
@@ -281,7 +289,7 @@ func LoadAccountConfig(phone string) AccountConfig {
 				cfg.TelegramChatID = envChat
 			}
 
-			if cfg.RefreshToken != "" || (cfg.JSessionID != "" && cfg.ValidationKey != "") {
+			if cfg.RefreshToken != "" || cfg.AccessToken != "" || (cfg.JSessionID != "" && cfg.ValidationKey != "") {
 				return cfg
 			}
 		}
