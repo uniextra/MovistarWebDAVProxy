@@ -474,7 +474,7 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	nowMS := time.Now().UnixMilli()
 	sapiRes := auth.SAPILoginOAuth(nil, sapiBase, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
 
-	if sapiRes.StatusCode != http.StatusOK && (sapiRes.ValidationKey == "" && sapiRes.JSessionID == "") {
+	if sapiRes.StatusCode != http.StatusOK || (sapiRes.ValidationKey == "" && sapiRes.JSessionID == "") {
 		logger.Log("[OAuth] ❌ Error inicializando sesión SAPI (HTTP %d): %v", sapiRes.StatusCode, sapiRes.Error)
 		provLabel := "Movistar Cloud"
 		if provider == "o2" {
@@ -527,6 +527,9 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	s.loginMu.Unlock()
 
 	s.client.SetConfig(cfg)
+	if s.webdavServer != nil {
+		s.webdavServer.InvalidateCache()
+	}
 	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
 		s.notifier.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
 	}
@@ -640,6 +643,9 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.client.SetConfig(cfg)
+	if s.webdavServer != nil {
+		s.webdavServer.InvalidateCache()
+	}
 	s.notifier.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
 
 	logger.Log("[Telegram] ⚙️ Credenciales de Telegram actualizadas para %s.", logger.Mask(phone))

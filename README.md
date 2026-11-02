@@ -24,7 +24,7 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 3. [🔑 Vinculación Inicial (Emparejamiento SMS)](#-vinculación-inicial-emparejamiento-sms)
 4. [💻 Mapear como Unidad de Red (Windows, macOS, Linux)](#-mapear-como-unidad-de-red-windows-macos-linux)
 5. [⚙️ Clientes de Copia de Seguridad (HyperBackup, Duplicati)](#️-clientes-de-copia-de-seguridad-hyperbackup-duplicati)
-6. [🧹 Filtro Inteligente de Basura del SO (v2.0.5)](#-filtro-inteligente-de-basura-del-so-v205)
+6. [🧹 Filtro Inteligente de Basura del SO (v2.1.0)](#-filtro-inteligente-de-basura-del-so-v210)
 7. [⚠️ Limitaciones Conocidas de Movistar / O2 Cloud](#️-limitaciones-conocidas-de-movistar--o2-cloud)
 8. [📚 Documentación Detallada](#-documentación-detallada)
 9. [📄 Licencia](#-licencia)

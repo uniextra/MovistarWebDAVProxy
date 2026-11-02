@@ -316,6 +316,7 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 	c.cfg = cfg
 	c.baseURL = auth.GetSAPIBaseURL(cfg.Provider)
 	c.uploadURL = auth.GetUploadBaseURL(cfg.Provider)
+	c.rootFolderID = 0
 }
 
 func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
@@ -1112,6 +1113,7 @@ func (c *Client) DeleteFile(mediaID string) error {
 				time.Sleep(delay)
 				continue
 			}
+			return fmt.Errorf("delete file failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -1119,7 +1121,7 @@ func (c *Client) DeleteFile(mediaID string) error {
 		}
 		return nil
 	}
-	return nil
+	return errors.New("delete file failed tras agotar reintentos")
 }
 
 func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string) (*MediaItem, error) {
@@ -1162,24 +1164,35 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		mpw := multipart.NewWriter(pw)
 
 		go func() {
-			defer pw.Close()
-			defer mpw.Close()
+			var writeErr error
+			defer func() {
+				_ = mpw.Close()
+				if writeErr != nil {
+					_ = pw.CloseWithError(writeErr)
+				} else {
+					_ = pw.Close()
+				}
+			}()
 
 			// 1. Part: data
 			partData, err := mpw.CreateFormField("data")
 			if err != nil {
+				writeErr = err
 				return
 			}
 			if _, err := partData.Write(metaBytes); err != nil {
+				writeErr = err
 				return
 			}
 
 			// 2. Part: file
 			partFile, err := mpw.CreateFormFile("file", fileName)
 			if err != nil {
+				writeErr = err
 				return
 			}
 			if _, err := io.Copy(partFile, reader); err != nil {
+				writeErr = err
 				return
 			}
 		}()
@@ -1192,6 +1205,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		req.Header.Set("Content-Type", mpw.FormDataContentType())
 
 		resp, err := c.DoRequest(req)
+		_ = pr.Close()
 		if err != nil {
 			return nil, err
 		}
@@ -1207,6 +1221,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				time.Sleep(retryDelay)
 				continue
 			}
+			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
@@ -1230,16 +1245,26 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 
 		_ = json.Unmarshal(b, &res)
 
-		if res.Error != nil && res.Error.Code == "MED-1017" && attempt < maxRetries {
-			logger.Log("[SAPI] ⏳ Servidor validando asíncronamente (MED-1017 en error body). Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
-			time.Sleep(retryDelay)
-			continue
+		if res.Error != nil && res.Error.Code == "MED-1017" {
+			if attempt < maxRetries {
+				logger.Log("[SAPI] ⏳ Servidor validando asíncronamente (MED-1017 en error body). Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
+				time.Sleep(retryDelay)
+				continue
+			}
+			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
 		finalID := parseFlexibleID(res.ID)
 		if finalID == "" {
 			finalID = parseFlexibleID(res.Data.ID)
 		}
+		if finalID == "" {
+			if res.Error != nil && res.Error.Message != "" {
+				return nil, fmt.Errorf("upload failed: SAPI error %s: %s", res.Error.Code, res.Error.Message)
+			}
+			return nil, errors.New("subida fallida tras agotar reintentos de validación MED-1017 (ID vacío)")
+		}
+
 		finalURL := res.URL
 		if finalURL == "" {
 			finalURL = res.Data.URL

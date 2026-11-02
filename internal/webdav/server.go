@@ -64,6 +64,12 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 	return s
 }
 
+func (s *Server) InvalidateCache() {
+	if s.fs != nil {
+		s.fs.InvalidateCache(0)
+	}
+}
+
 func (s *Server) IsRunning() bool {
 	return s.running.Load()
 }

@@ -627,6 +627,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		err := mfs.client.UpdateFolder(oldFolder.ID, newBaseName, parentFolder.ID)
 		mfs.cacheMu.Lock()
 		delete(mfs.createdFolders, oldClean)
+		delete(mfs.deletedTombstones, newClean)
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(0)
 		return err
@@ -646,6 +647,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 			}
 		}
 		mfs.cacheMu.Lock()
+		delete(mfs.deletedTombstones, newClean)
 		if mem, ok := mfs.uploadCache[oldClean]; ok {
 			delete(mfs.uploadCache, oldClean)
 			mem.Name = newBaseName
@@ -794,6 +796,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	if w.tmpFile != nil {
 		n, err = w.tmpFile.Write(p)
 		if err != nil {
+			w.failed = true
 			w.cleanupTemp()
 			w.releaseBufferSem()
 		}
@@ -802,11 +805,13 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	if w.buf.Len()+len(p) > 10*1024*1024 {
 		tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_upload_*")
 		if err != nil {
+			w.failed = true
 			w.releaseBufferSem()
 			return 0, err
 		}
 		w.tmpFile = tmp
 		if _, err := tmp.Write(w.buf.Bytes()); err != nil {
+			w.failed = true
 			w.cleanupTemp()
 			w.releaseBufferSem()
 			return 0, err
@@ -814,12 +819,17 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 		w.buf = nil
 		n, err = tmp.Write(p)
 		if err != nil {
+			w.failed = true
 			w.cleanupTemp()
 			w.releaseBufferSem()
 		}
 		return n, err
 	}
-	return w.buf.Write(p)
+	n, err = w.buf.Write(p)
+	if err != nil {
+		w.failed = true
+	}
+	return n, err
 }
 
 func (w *WebDAVFileWriter) MarkUploadExceeded() {
@@ -838,6 +848,11 @@ func (w *WebDAVFileWriter) Close() error {
 	if w.failed {
 		w.cleanupTemp()
 		return ErrUploadTooLarge
+	}
+
+	if w.tmpFile == nil && w.buf == nil {
+		w.cleanupTemp()
+		return errors.New("upload buffer corrupted or closed after failure")
 	}
 
 	sizeMB := float64(w.size) / (1024 * 1024)
@@ -931,24 +946,35 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 	}
 
 	r.streamMu.Lock()
-	if r.stream == nil {
+	st := r.stream
+	pos := r.pos
+	r.streamMu.Unlock()
+
+	if st == nil {
 		sizeMB := float64(r.item.Size) / (1024 * 1024)
-		if r.pos > 0 {
-			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", r.pos, r.item.Name, sizeMB)
+		if pos > 0 {
+			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", pos, r.item.Name, sizeMB)
 		} else {
 			logger.Log("[WebDAV] ⬇ Descargando: '%s' (%.2f MB) desde Movistar Cloud...", r.item.Name, sizeMB)
 		}
 		transferSem <- struct{}{}
-		st, err := r.mfs.client.DownloadFileStreamRange(r.item, r.pos)
+		rawStream, err := r.mfs.client.DownloadFileStreamRange(r.item, pos)
 		if err != nil {
 			<-transferSem
-			r.streamMu.Unlock()
 			return 0, err
 		}
-		r.stream = &semaphoreReleaseReader{stream: st}
+		semStream := &semaphoreReleaseReader{stream: rawStream}
+
+		r.streamMu.Lock()
+		if r.stream != nil {
+			_ = semStream.Close()
+			st = r.stream
+		} else {
+			r.stream = semStream
+			st = semStream
+		}
+		r.streamMu.Unlock()
 	}
-	st := r.stream
-	r.streamMu.Unlock()
 
 	n, err = st.Read(p)
 	if n > 0 {

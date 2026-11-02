@@ -422,7 +422,8 @@
                         terminal.innerHTML = '<div class="text-slate-500 italic">Esperando actividad WebDAV de Duplicati o HyperBackup...</div>';
                     } else {
                         const isNearBottom = (terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight) < 60;
-                        terminal.innerHTML = data.logs.map(line => {
+                        const frag = document.createDocumentFragment();
+                        data.logs.forEach(line => {
                             let color = 'text-slate-300';
                             if (line.includes('✔') || line.includes('completada')) color = 'text-emerald-400 font-medium';
                             else if (line.includes('⬆') || line.includes('PUT')) color = 'text-blue-400';
@@ -430,8 +431,12 @@
                             else if (line.includes('🗑') || line.includes('DELETE')) color = 'text-amber-400';
                             else if (line.includes('❌') || line.includes('Error')) color = 'text-rose-400 font-semibold';
                             else if (line.includes('⚡')) color = 'text-yellow-300';
-                            return `<div class="${color}">${line}</div>`;
-                        }).join('');
+                            const div = document.createElement('div');
+                            div.className = color;
+                            div.textContent = line;
+                            frag.appendChild(div);
+                        });
+                        terminal.replaceChildren(frag);
                         if (isNearBottom) {
                             terminal.scrollTop = terminal.scrollHeight;
                         }
