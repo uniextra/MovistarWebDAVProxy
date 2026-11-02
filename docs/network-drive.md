@@ -38,7 +38,7 @@ net use M: /delete
    ```
    *(Si usas HTTPS con un proxy inverso tipo Nginx/Traefik: `https://tudominio.com/`)*
 5. Marca la casilla **Conectar con otras credenciales** y haz clic en **Finalizar**.
-6. Cuando Windows pida usuario y contraseña, introduce cualquier valor (por ejemplo usuario `admin` y contraseña `admin`) y marca *Recordar mis credenciales*.
+6. Cuando Windows pida usuario y contraseña, introduce las credenciales configuradas en `WEBDAV_USER` y `WEBDAV_PASSWORD` y marca *Recordar mis credenciales*.
 
 ---
 
