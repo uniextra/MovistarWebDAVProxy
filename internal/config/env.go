@@ -2,6 +2,11 @@ package config
 
 import (
 	"bufio"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +16,11 @@ import (
 	"sync"
 )
 
-const Version = "v2.1.0"
+const (
+	Version          = "v2.1.0"
+	encryptedPrefix  = "enc:v1:"
+	tokensEncryptEnv = "TOKENS_ENCRYPTION_KEY"
+)
 
 var (
 	TokensDir      = "/app/tokens"
@@ -82,6 +91,76 @@ func sanitizeEnvValue(val string) (string, error) {
 	return escaped, nil
 }
 
+func getEncryptionKey() ([]byte, bool) {
+	rawKey := strings.TrimSpace(os.Getenv(tokensEncryptEnv))
+	if rawKey == "" {
+		return nil, false
+	}
+	sum := sha256.Sum256([]byte(rawKey))
+	return sum[:], true
+}
+
+func encryptValueIfNeeded(plain string) (string, error) {
+	if plain == "" {
+		return "", nil
+	}
+	key, enabled := getEncryptionKey()
+	if !enabled {
+		return plain, nil
+	}
+	if strings.HasPrefix(plain, encryptedPrefix) {
+		return plain, nil
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := gcm.Seal(nonce, nonce, []byte(plain), nil)
+	return encryptedPrefix + base64.StdEncoding.EncodeToString(sealed), nil
+}
+
+func decryptValueIfNeeded(val string) string {
+	if !strings.HasPrefix(val, encryptedPrefix) {
+		return val
+	}
+	key, enabled := getEncryptionKey()
+	if !enabled {
+		return ""
+	}
+	rawB64 := strings.TrimPrefix(val, encryptedPrefix)
+	data, err := base64.StdEncoding.DecodeString(rawB64)
+	if err != nil {
+		return ""
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return ""
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return ""
+	}
+	if len(data) < gcm.NonceSize() {
+		return ""
+	}
+	nonce := data[:gcm.NonceSize()]
+	ciphertext := data[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return ""
+	}
+	return string(plain)
+}
+
 func unescapeEnvValue(v string) string {
 	v = strings.TrimSpace(v)
 	if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
@@ -94,7 +173,7 @@ func unescapeEnvValue(v string) string {
 	} else {
 		v = strings.Trim(v, `"'`)
 	}
-	return v
+	return decryptValueIfNeeded(v)
 }
 
 func parseEnvFile(path string) (map[string]string, error) {
@@ -241,6 +320,16 @@ func SaveAccountConfig(cfg AccountConfig) error {
 		lines = append(lines, fmt.Sprintf(`%s="%s"`, key, esc))
 		return nil
 	}
+	addSecretLine := func(key, val string) error {
+		if _, err := sanitizeEnvValue(val); err != nil {
+			return fmt.Errorf("campo %s: %w", key, err)
+		}
+		enc, err := encryptValueIfNeeded(val)
+		if err != nil {
+			return fmt.Errorf("campo %s (cifrado): %w", key, err)
+		}
+		return addLine(key, enc)
+	}
 
 	if err := addLine("MOVISTAR_PROVIDER", prov); err != nil {
 		return err
@@ -248,10 +337,10 @@ func SaveAccountConfig(cfg AccountConfig) error {
 	if err := addLine("MOVISTAR_PHONE", phoneClean); err != nil {
 		return err
 	}
-	if err := addLine("MOVISTAR_JSESSIONID", cfg.JSessionID); err != nil {
+	if err := addSecretLine("MOVISTAR_JSESSIONID", cfg.JSessionID); err != nil {
 		return err
 	}
-	if err := addLine("MOVISTAR_VALIDATIONKEY", cfg.ValidationKey); err != nil {
+	if err := addSecretLine("MOVISTAR_VALIDATIONKEY", cfg.ValidationKey); err != nil {
 		return err
 	}
 	if cfg.DeviceID != "" {
@@ -265,12 +354,12 @@ func SaveAccountConfig(cfg AccountConfig) error {
 		}
 	}
 	if cfg.RefreshToken != "" {
-		if err := addLine("MOVISTAR_REFRESH_TOKEN", cfg.RefreshToken); err != nil {
+		if err := addSecretLine("MOVISTAR_REFRESH_TOKEN", cfg.RefreshToken); err != nil {
 			return err
 		}
 	}
 	if cfg.AccessToken != "" {
-		if err := addLine("MOVISTAR_ACCESS_TOKEN", cfg.AccessToken); err != nil {
+		if err := addSecretLine("MOVISTAR_ACCESS_TOKEN", cfg.AccessToken); err != nil {
 			return err
 		}
 	}
@@ -283,7 +372,7 @@ func SaveAccountConfig(cfg AccountConfig) error {
 		lines = append(lines, `MOVISTAR_EXPIRES_IN="3600"`)
 	}
 	if cfg.TelegramBotToken != "" {
-		if err := addLine("MOVISTAR_TELEGRAM_BOT_TOKEN", cfg.TelegramBotToken); err != nil {
+		if err := addSecretLine("MOVISTAR_TELEGRAM_BOT_TOKEN", cfg.TelegramBotToken); err != nil {
 			return err
 		}
 	}

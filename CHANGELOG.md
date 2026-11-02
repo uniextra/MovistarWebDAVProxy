@@ -16,6 +16,7 @@ Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan
 - **Persistencia y Enmascarado de Credenciales (`internal/config`, `internal/logger`, `internal/notifier`):**
   - Validación de formato de `bot_token` y `chat_id` de Telegram, rechazo de caracteres de control/saltos de línea (`\n`, `\r`, `\x00`) y escapado seguro de comillas en los archivos `.env`.
   - Archivo único por cuenta (`account_<phone>.env`) con permisos `0600` sobre directorio `0700` y limpieza automática de `.env` duplicados legacy para proteger la rotación de tokens (RTR).
+  - Cifrado en reposo opcional con AES-256-GCM mediante la variable de entorno `TOKENS_ENCRYPTION_KEY` (`enc:v1:...`), manteniendo retrocompatibilidad con archivos existentes en texto plano.
   - Enmascarado de números de teléfono, `device_id` y tokens en logs (`logger.Mask`), y sanitización de errores `*url.Error` en el cliente de Telegram y SAPI.
 - **Flujo OAuth2 Endurecido (`internal/auth`, `internal/webui`):**
   - Validación en tiempo constante del parámetro `state` OAuth2 (cuando se proporciona la URL de redirección), caducidad de sesiones de login pendientes a los 10 minutos y límite de memoria acotado.

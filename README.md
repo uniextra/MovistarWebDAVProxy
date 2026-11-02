@@ -119,6 +119,7 @@ docker run -d \
 | `PORT` | `5000` | Puerto interno del servidor del Panel Web. |
 | `WEBDAV_PORT` | `8080` | Puerto interno del servidor WebDAV. |
 | `TOKENS_DIR` | `/app/tokens` | Directorio donde se almacenan las credenciales OAuth2 (`0700`). |
+| `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave opcional para cifrar en reposo (AES-256-GCM) los tokens guardados en disco. |
 | `MAX_UPLOAD_MB` | `4096` | Tamaño máximo permitido por archivo en subidas `PUT` (en MB). |
 | `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores a 10 MB. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |

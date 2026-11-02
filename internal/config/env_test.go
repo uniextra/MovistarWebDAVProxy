@@ -193,3 +193,59 @@ func TestExtractClientIP(t *testing.T) {
 		t.Errorf("ExtractClientIP IPv6 = %q, want 2001:db8::1", got)
 	}
 }
+
+func TestTokensEncryptionKey_AESGCM(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := TokensDir
+	TokensDir = tmpDir
+	defer func() { TokensDir = origTokensDir }()
+
+	t.Setenv("TOKENS_ENCRYPTION_KEY", "mi-clave-maestra-super-secreta-2026")
+
+	cfg := AccountConfig{
+		Provider:         "movistar",
+		Phone:            "699887766",
+		JSessionID:       "plain-jsession-secret",
+		ValidationKey:    "plain-valkey-secret",
+		RefreshToken:     "plain-refresh-token-secret",
+		AccessToken:      "plain-access-token-secret",
+		TelegramBotToken: "11223344:AABBCCDDEEFF_secret",
+		TelegramChatID:   "12345678",
+	}
+
+	if err := SaveAccountConfig(cfg); err != nil {
+		t.Fatalf("SaveAccountConfig with encryption failed: %v", err)
+	}
+
+	envFile := filepath.Join(tmpDir, "account_699887766.env")
+	rawBytes, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("failed reading encrypted env file: %v", err)
+	}
+	rawStr := string(rawBytes)
+
+	// Verificar que ningún secreto aparece en texto plano en el disco y que usan prefijo enc:v1:
+	for _, secret := range []string{"plain-jsession-secret", "plain-valkey-secret", "plain-refresh-token-secret", "plain-access-token-secret", "11223344:AABBCCDDEEFF_secret"} {
+		if strings.Contains(rawStr, secret) {
+			t.Errorf("plaintext secret %q leaked on disk when TOKENS_ENCRYPTION_KEY is set:\n%s", secret, rawStr)
+		}
+	}
+	if !strings.Contains(rawStr, `MOVISTAR_REFRESH_TOKEN="enc:v1:`) {
+		t.Errorf("expected enc:v1: prefix in saved file, got:\n%s", rawStr)
+	}
+
+	// Verificar que LoadAccountConfig descifra correctamente con la clave correcta
+	loaded := LoadAccountConfig("699887766")
+	if loaded.RefreshToken != cfg.RefreshToken || loaded.AccessToken != cfg.AccessToken ||
+		loaded.ValidationKey != cfg.ValidationKey || loaded.JSessionID != cfg.JSessionID ||
+		loaded.TelegramBotToken != cfg.TelegramBotToken {
+		t.Errorf("decrypted config mismatch: got %+v", loaded)
+	}
+
+	// Verificar que con una clave incorrecta NO se descifran los secretos
+	t.Setenv("TOKENS_ENCRYPTION_KEY", "clave-incorrecta")
+	wrongLoaded := LoadAccountConfig("699887766")
+	if wrongLoaded.RefreshToken != "" || wrongLoaded.AccessToken != "" {
+		t.Errorf("expected empty tokens when decryption key is wrong, got: %+v", wrongLoaded)
+	}
+}
