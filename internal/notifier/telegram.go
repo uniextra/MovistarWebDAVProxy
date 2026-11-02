@@ -3,9 +3,11 @@ package notifier
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +21,9 @@ type TelegramNotifier struct {
 	client   *http.Client
 	mu       sync.Mutex
 
-	lastNotificationAt time.Time
-	lastError          string
+	lastNotificationAt   time.Time
+	lastSessionExpiredAt time.Time
+	lastError            string
 }
 
 func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
@@ -54,6 +57,21 @@ func (t *TelegramNotifier) Status() (bool, string, string) {
 	return t.botToken != "" && t.chatID != "", lastAt, t.lastError
 }
 
+func sanitizeTransportError(err error, token string) string {
+	if err == nil {
+		return ""
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+	msg := err.Error()
+	if token != "" {
+		msg = strings.ReplaceAll(msg, token, logger.Mask(token))
+	}
+	return msg
+}
+
 func (t *TelegramNotifier) SendMessage(text string) error {
 	t.mu.Lock()
 	token := t.botToken
@@ -80,28 +98,30 @@ func (t *TelegramNotifier) SendMessage(text string) error {
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return err
+		return fmt.Errorf("error preparando petición a Telegram")
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := t.client.Do(req)
 	if err != nil {
+		safeErr := sanitizeTransportError(err, token)
 		t.mu.Lock()
-		t.lastError = fmt.Sprintf("Error de red: %v", err)
+		t.lastError = fmt.Sprintf("Error de red: %s", safeErr)
 		t.mu.Unlock()
-		logger.Log("[Telegram] ❌ Error conectando con Telegram: %v", err)
-		return err
+		logger.Log("[Telegram] ❌ Error conectando con Telegram: %s", safeErr)
+		return fmt.Errorf("error de red contactando con Telegram: %s", safeErr)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		errMsg := fmt.Sprintf("Telegram respondió HTTP %d: %s", resp.StatusCode, string(respBody))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		safeBody := strings.ReplaceAll(string(respBody), token, logger.Mask(token))
+		errMsg := fmt.Sprintf("Telegram respondió HTTP %d: %s", resp.StatusCode, safeBody)
 		t.mu.Lock()
 		t.lastError = errMsg
 		t.mu.Unlock()
 		logger.Log("[Telegram] ❌ %s", errMsg)
-		return fmt.Errorf("%s", errMsg)
+		return fmt.Errorf("Telegram respondió HTTP %d", resp.StatusCode)
 	}
 
 	t.mu.Lock()
@@ -109,11 +129,19 @@ func (t *TelegramNotifier) SendMessage(text string) error {
 	t.lastError = ""
 	t.mu.Unlock()
 
-	logger.Log("[Telegram] ✉️ Notificación enviada con éxito a chat %s.", chatID)
+	logger.Log("[Telegram] ✉️ Notificación enviada con éxito a chat %s.", logger.Mask(chatID))
 	return nil
 }
 
 func (t *TelegramNotifier) SendSessionExpiredAlert(provider, phone, details string) error {
+	t.mu.Lock()
+	if !t.lastSessionExpiredAt.IsZero() && time.Since(t.lastSessionExpiredAt) < time.Hour {
+		t.mu.Unlock()
+		return nil
+	}
+	t.lastSessionExpiredAt = time.Now()
+	t.mu.Unlock()
+
 	providerName := "Movistar Cloud"
 	if strings.EqualFold(provider, "o2") {
 		providerName = "O2 Cloud"
@@ -125,7 +153,7 @@ func (t *TelegramNotifier) SendSessionExpiredAlert(provider, phone, details stri
 			"Detalle: %s\n"+
 			"Hora: %s\n\n"+
 			"Por favor, abre el panel Web para revincular tu dispositivo.",
-		providerName, phone, details, time.Now().Format("2006-01-02 15:04:05"),
+		providerName, logger.Mask(phone), details, time.Now().Format("2006-01-02 15:04:05"),
 	)
 	return t.SendMessage(msg)
 }
