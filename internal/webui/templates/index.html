@@ -354,9 +354,10 @@
                         const tgLabel = document.getElementById('telegram-status-label');
                         if (tgLabel) tgLabel.textContent = 'Telegram (Activo)';
                     }
-                    if (data.telegram_bot_token) {
-                        const tgTok = document.getElementById('tg-token-input');
-                        if (tgTok) tgTok.value = data.telegram_bot_token;
+                    const tgTok = document.getElementById('tg-token-input');
+                    if (tgTok) {
+                        tgTok.value = '';
+                        tgTok.placeholder = data.telegram_token_masked ? `Configurado (${data.telegram_token_masked}) — deja vacío para mantener` : '123456789:ABCdefGHIjklMNOpqrsTUVwxyz';
                     }
                     if (data.telegram_chat_id) {
                         const tgChat = document.getElementById('tg-chat-input');
@@ -484,12 +485,12 @@
         }
 
         async function startProxy() {
-            await fetch('/start', {method: 'POST'});
+            await fetch('/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
             checkStatus();
         }
 
         async function stopProxy() {
-            await fetch('/stop', {method: 'POST'});
+            await fetch('/stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
             checkStatus();
         }
 
