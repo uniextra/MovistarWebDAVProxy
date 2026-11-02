@@ -318,6 +318,17 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 	c.uploadURL = auth.GetUploadBaseURL(cfg.Provider)
 }
 
+func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if baseURL != "" {
+		c.baseURL = strings.TrimSuffix(baseURL, "/")
+	}
+	if uploadURL != "" {
+		c.uploadURL = strings.TrimSuffix(uploadURL, "/")
+	}
+}
+
 func (c *Client) HasCredentials() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -524,6 +535,10 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && urlErr.Err != nil {
+			return nil, fmt.Errorf("SAPI request failed (%s %s): %w", req.Method, req.URL.Path, urlErr.Err)
+		}
 		return nil, err
 	}
 
@@ -561,6 +576,10 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 			if err2 == nil {
 				c.processSAPIResponse(resp2)
 				return resp2, nil
+			}
+			var urlErr *url.Error
+			if errors.As(err2, &urlErr) && urlErr.Err != nil {
+				return resp2, fmt.Errorf("SAPI retry failed (%s %s): %w", newReq.Method, newReq.URL.Path, urlErr.Err)
 			}
 			return resp2, err2
 		}
@@ -600,7 +619,7 @@ func (c *Client) GetStorageSpace() (*StorageSpace, error) {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -774,7 +793,7 @@ func (c *Client) ListAllSubfolders(parentID int64) ([]FolderItem, error) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			return nil, fmt.Errorf("list subfolders failed (HTTP %d, parentid=%d): %s", resp.StatusCode, parentID, string(b))
 		}
@@ -841,7 +860,7 @@ func (c *Client) ListAllMediaInFolder(folderID int64) ([]MediaItem, error) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			return nil, fmt.Errorf("list media failed (HTTP %d, folderid=%d): %s", resp.StatusCode, folderID, string(b))
 		}
@@ -904,7 +923,7 @@ func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("create folder failed (%d): %s", resp.StatusCode, string(b))
 	}
 
@@ -974,7 +993,7 @@ func (c *Client) UpdateFolder(folderID int64, name string, parentID int64) error
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("update folder failed (%d): %s", resp.StatusCode, string(b))
 	}
 	return nil
@@ -1004,7 +1023,7 @@ func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("delete folder failed (%d): %s", resp.StatusCode, string(b))
 	}
 	return nil
@@ -1033,7 +1052,7 @@ func (c *Client) UpdateMedia(mediaID string, name string, folderID int64) error 
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("update media failed (%d): %s", resp.StatusCode, string(b))
 	}
 	return nil
@@ -1053,7 +1072,7 @@ func (c *Client) DeleteFile(mediaID string) error {
 		if err != nil {
 			return err
 		}
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 
 		bStr := string(b)
@@ -1147,7 +1166,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, err
 		}
 
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 		bStr := string(b)
 
@@ -1229,7 +1248,14 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 		dlURL = fmt.Sprintf("%s/media/content?id=%s", c.baseURL, item.ID)
 	}
 	if !strings.HasPrefix(dlURL, "http") {
-		dlURL = fmt.Sprintf("https://micloud.movistar.es%s", dlURL)
+		c.mu.RLock()
+		base := c.baseURL
+		c.mu.RUnlock()
+		if u, err := url.Parse(base); err == nil && u.Scheme != "" && u.Host != "" {
+			dlURL = fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, dlURL)
+		} else {
+			dlURL = fmt.Sprintf("https://micloud.movistar.es%s", dlURL)
+		}
 	}
 
 	req, err := http.NewRequest("GET", dlURL, nil)
@@ -1253,7 +1279,7 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(ct, "application/json") || strings.Contains(ct, "text/javascript") {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		return nil, fmt.Errorf("cloud returned error JSON instead of file: %s", string(b))
 	}

@@ -3,6 +3,7 @@ package webdav
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"mime"
@@ -22,10 +23,37 @@ import (
 )
 
 var (
-	transferSem    = make(chan struct{}, 3)
-	collisionRegex = regexp.MustCompile(` \(\d+\)(\.[^.]+)?$`)
-	folderLocks    sync.Map
+	transferSem       = make(chan struct{}, 3)
+	uploadBufferSem   = make(chan struct{}, 3)
+	collisionRegex    = regexp.MustCompile(` \(\d+\)(\.[^.]+)?$`)
+	folderLocks       sync.Map
+	ErrUploadTooLarge = errors.New("file exceeds maximum allowed upload size")
 )
+
+// GetMaxUploadMB devuelve el límite máximo de subida en MB (por defecto 4096 MB).
+func GetMaxUploadMB() int64 {
+	if env := strings.TrimSpace(os.Getenv("MAX_UPLOAD_MB")); env != "" {
+		if val, err := strconv.ParseInt(env, 10, 64); err == nil && val > 0 {
+			return val
+		}
+	}
+	return 4096
+}
+
+// GetMaxUploadBytes devuelve el límite máximo de subida en bytes.
+func GetMaxUploadBytes() int64 {
+	return GetMaxUploadMB() * 1024 * 1024
+}
+
+func getUploadTempDir() string {
+	if dir := strings.TrimSpace(os.Getenv("WEBDAV_TMPDIR")); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(os.Getenv("TMPDIR")); dir != "" {
+		return dir
+	}
+	return ""
+}
 
 // isOSJunk comprueba si el nombre de archivo o carpeta corresponde a metadatos automáticos
 // generados por Windows, macOS o Linux al mapear unidades de red o carpetas compartidas.
@@ -713,6 +741,8 @@ type WebDAVFileWriter struct {
 	tmpFile        *os.File
 	size           int64
 	closed         bool
+	semAcquired    bool
+	failed         bool
 }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
@@ -726,24 +756,76 @@ func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int6
 	}
 }
 
+func (w *WebDAVFileWriter) releaseBufferSem() {
+	if w.semAcquired {
+		w.semAcquired = false
+		<-uploadBufferSem
+	}
+}
+
+func (w *WebDAVFileWriter) cleanupTemp() {
+	if w.tmpFile != nil {
+		name := w.tmpFile.Name()
+		_ = w.tmpFile.Close()
+		_ = os.Remove(name)
+		w.tmpFile = nil
+	}
+}
+
 func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
+	if w.failed {
+		return 0, ErrUploadTooLarge
+	}
+	if !w.semAcquired {
+		uploadBufferSem <- struct{}{}
+		w.semAcquired = true
+	}
+
+	maxBytes := GetMaxUploadBytes()
+	if maxBytes > 0 && w.size+int64(len(p)) > maxBytes {
+		w.failed = true
+		w.cleanupTemp()
+		w.releaseBufferSem()
+		logger.Log("[WebDAV] ❌ Subida abortada por superar límite de %d MB: '%s'", GetMaxUploadMB(), w.name)
+		return 0, ErrUploadTooLarge
+	}
+
 	w.size += int64(len(p))
 	if w.tmpFile != nil {
-		return w.tmpFile.Write(p)
+		n, err = w.tmpFile.Write(p)
+		if err != nil {
+			w.cleanupTemp()
+			w.releaseBufferSem()
+		}
+		return n, err
 	}
 	if w.buf.Len()+len(p) > 10*1024*1024 {
-		tmp, err := os.CreateTemp("", "webdav_upload_*")
+		tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_upload_*")
 		if err != nil {
+			w.releaseBufferSem()
 			return 0, err
 		}
 		w.tmpFile = tmp
 		if _, err := tmp.Write(w.buf.Bytes()); err != nil {
+			w.cleanupTemp()
+			w.releaseBufferSem()
 			return 0, err
 		}
 		w.buf = nil
-		return tmp.Write(p)
+		n, err = tmp.Write(p)
+		if err != nil {
+			w.cleanupTemp()
+			w.releaseBufferSem()
+		}
+		return n, err
 	}
 	return w.buf.Write(p)
+}
+
+func (w *WebDAVFileWriter) MarkUploadExceeded() {
+	w.failed = true
+	w.cleanupTemp()
+	w.releaseBufferSem()
 }
 
 func (w *WebDAVFileWriter) Close() error {
@@ -751,6 +833,12 @@ func (w *WebDAVFileWriter) Close() error {
 		return nil
 	}
 	w.closed = true
+	defer w.releaseBufferSem()
+
+	if w.failed {
+		w.cleanupTemp()
+		return ErrUploadTooLarge
+	}
 
 	sizeMB := float64(w.size) / (1024 * 1024)
 	logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
@@ -762,8 +850,7 @@ func (w *WebDAVFileWriter) Close() error {
 	var cachedContent []byte
 
 	if w.tmpFile != nil {
-		defer os.Remove(w.tmpFile.Name())
-		defer w.tmpFile.Close()
+		defer w.cleanupTemp()
 		_, _ = w.tmpFile.Seek(0, io.SeekStart)
 		reader = w.tmpFile
 	} else {

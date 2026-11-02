@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -25,6 +26,14 @@ const (
 	ClientPlatform    = "windows"
 	DesktopUserAgent  = "omh windows client 32.0.7.1"
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
+)
+
+var (
+	authCodeQueryRegex = regexp.MustCompile(`code=([A-Za-z0-9\-_.~]+)`)
+	validAuthCodeRegex = regexp.MustCompile(`^[A-Za-z0-9\-_.~]{1,512}$`)
+	stateQueryRegex    = regexp.MustCompile(`state=([A-Za-z0-9\-_.~%]+)`)
+	oauthHTTPClient    = &http.Client{Timeout: 30 * time.Second}
+	sapiLoginClient    = &http.Client{Timeout: 20 * time.Second}
 )
 
 func GetOAuthAuthorizeURL(provider string) string {
@@ -43,14 +52,26 @@ func GetOAuthTokenURL(provider string) string {
 
 func GetOAuthClientID(provider string) string {
 	if strings.EqualFold(provider, "o2") {
+		if env := strings.TrimSpace(os.Getenv("OAUTH_CLIENT_ID_O2")); env != "" {
+			return env
+		}
 		return "21ce2068-4966-45dc-8b7f-a4a25a3a462f"
+	}
+	if env := strings.TrimSpace(os.Getenv("OAUTH_CLIENT_ID_MOVISTAR")); env != "" {
+		return env
 	}
 	return OAuthClientID
 }
 
 func GetOAuthClientSecret(provider string) string {
 	if strings.EqualFold(provider, "o2") {
+		if env := strings.TrimSpace(os.Getenv("OAUTH_CLIENT_SECRET_O2")); env != "" {
+			return env
+		}
 		return "aa892341-04b1-4fd5-be41-db60d4e900e7"
+	}
+	if env := strings.TrimSpace(os.Getenv("OAUTH_CLIENT_SECRET_MOVISTAR")); env != "" {
+		return env
 	}
 	return OAuthClientSecret
 }
@@ -113,9 +134,15 @@ type SAPILoginResult struct {
 	Error           error
 }
 
+func mustRandRead(b []byte) {
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand.Read failed: " + err.Error())
+	}
+}
+
 func GenerateDeviceID() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	mustRandRead(b)
 	seed := fmt.Sprintf("PC+%x", b)
 	h := md5.Sum([]byte(seed))
 	b64 := base64.StdEncoding.EncodeToString(h[:])
@@ -124,7 +151,7 @@ func GenerateDeviceID() string {
 
 func GeneratePKCE() (verifier, challenge string) {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	mustRandRead(b)
 	verifier = base64.RawURLEncoding.EncodeToString(b)
 	if len(verifier) > 64 {
 		verifier = verifier[:64]
@@ -138,8 +165,8 @@ func BuildOAuthLoginURL(provider string) (verifier, state, authURL string) {
 	verifier, challenge := GeneratePKCE()
 	stateB := make([]byte, 12)
 	nonceB := make([]byte, 12)
-	_, _ = rand.Read(stateB)
-	_, _ = rand.Read(nonceB)
+	mustRandRead(stateB)
+	mustRandRead(nonceB)
 	state = base64.RawURLEncoding.EncodeToString(stateB)
 	nonce := base64.RawURLEncoding.EncodeToString(nonceB)
 
@@ -166,17 +193,45 @@ func BuildOAuthLoginURL(provider string) (verifier, state, authURL string) {
 
 func ExtractAuthCode(input string) string {
 	cleaned := strings.TrimSpace(input)
+	if cleaned == "" {
+		return ""
+	}
+	var candidate string
 	if strings.Contains(cleaned, "code=") {
 		if u, err := url.Parse(cleaned); err == nil && u.Query().Get("code") != "" {
-			return u.Query().Get("code")
+			candidate = u.Query().Get("code")
+		} else if m := authCodeQueryRegex.FindStringSubmatch(cleaned); len(m) > 1 {
+			candidate = m[1]
 		}
-		re := regexp.MustCompile(`code=([a-zA-Z0-9\-_]+)`)
-		m := re.FindStringSubmatch(cleaned)
-		if len(m) > 1 {
-			return m[1]
+	} else {
+		candidate = cleaned
+	}
+
+	if !validAuthCodeRegex.MatchString(candidate) {
+		return ""
+	}
+	return candidate
+}
+
+// ExtractState extrae el parámetro state si la entrada es una URL de redirección OAuth.
+func ExtractState(input string) (string, bool) {
+	cleaned := strings.TrimSpace(input)
+	if !strings.Contains(cleaned, "state=") && !strings.HasPrefix(strings.ToLower(cleaned), "http") {
+		return "", false
+	}
+	if u, err := url.Parse(cleaned); err == nil {
+		if q := u.Query(); q.Has("state") {
+			return q.Get("state"), true
 		}
 	}
-	return cleaned
+	if m := stateQueryRegex.FindStringSubmatch(cleaned); len(m) > 1 {
+		unesc, err := url.QueryUnescape(m[1])
+		if err == nil {
+			return unesc, true
+		}
+		return m[1], true
+	}
+	return "", true
 }
 
 func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error) {
@@ -205,20 +260,19 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	req.Header.Set("User-Agent", DesktopUserAgent)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OAuth token exchange failed (%d): %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("OAuth token exchange failed (HTTP %d)", resp.StatusCode)
 	}
 
 	var tokens OAuthTokens
@@ -249,20 +303,19 @@ func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	req.Header.Set("User-Agent", DesktopUserAgent)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OAuth token refresh failed (%d): %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("OAuth token refresh failed (HTTP %d)", resp.StatusCode)
 	}
 
 	var tokens OAuthTokens
@@ -323,7 +376,14 @@ func ParseOAuthResponseHeader(headerVal string) *RotatedOAuth {
 	getString := func(m map[string]interface{}, keys ...string) string {
 		for _, k := range keys {
 			if v, ok := m[k]; ok && v != nil {
-				return fmt.Sprintf("%v", v)
+				switch val := v.(type) {
+				case float64:
+					return fmt.Sprintf("%.0f", val)
+				case json.Number:
+					return val.String()
+				default:
+					return fmt.Sprintf("%v", val)
+				}
 			}
 		}
 		return ""
@@ -364,7 +424,7 @@ func ParseOAuthResponseHeader(headerVal string) *RotatedOAuth {
 
 func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken, deviceID, deviceName string, lastRefreshDate int64, expiresIn string) SAPILoginResult {
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second}
+		client = sapiLoginClient
 	}
 
 	endpoint := sapiBaseURL
@@ -396,7 +456,7 @@ func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken,
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return SAPILoginResult{StatusCode: resp.StatusCode, Error: err}
 	}

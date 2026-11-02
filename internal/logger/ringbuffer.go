@@ -3,6 +3,7 @@ package logger
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -66,3 +67,32 @@ func GetLogs() []string {
 func ClearLogs() {
 	DefaultLogger.Clear()
 }
+
+// Mask enmascara teléfonos (ej. "612345789" -> "6****789") o tokens/secretos ("1234…abcd").
+func Mask(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	n := len(s)
+	if n == 9 && isDigits(s) {
+		return s[:1] + "****" + s[n-3:]
+	}
+	if n <= 6 {
+		return "****"
+	}
+	if n <= 12 {
+		return s[:2] + "****" + s[n-2:]
+	}
+	return s[:4] + "…" + s[n-4:]
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+

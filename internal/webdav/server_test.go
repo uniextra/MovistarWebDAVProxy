@@ -1,0 +1,246 @@
+package webdav
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"movistar-webdav-proxy/internal/config"
+	"movistar-webdav-proxy/internal/sapi"
+)
+
+func newMockSAPIServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		action := r.URL.Query().Get("action")
+
+		switch {
+		case path == "/sapi/media" && action == "get-storage-space":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"used":    104857600, // 100 MB
+					"quota":   0,
+					"nolimit": true,
+				},
+			})
+		case path == "/sapi/media/folder/root" && action == "get":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"folders": []map[string]interface{}{
+						{"id": 100, "name": "Root", "parentid": 0, "magic": true},
+					},
+				},
+			})
+		case path == "/sapi/media/folder" && action == "list":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"folders": []map[string]interface{}{
+						{"id": 200, "name": "Backups", "parentid": 100, "creationdate": "20260101T000000Z", "modificationdate": "20260101T000000Z"},
+					},
+				},
+			})
+		case path == "/sapi/media" && action == "get":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"media": []map[string]interface{}{
+						{"id": "555", "name": "hello.txt", "size": 11, "folderid": 100, "url": "/sapi/media/content?id=555", "creationdate": "20260101T000000Z", "modificationdate": "20260101T000000Z"},
+					},
+				},
+			})
+		case path == "/sapi/media/content":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("hello world"))
+		case path == "/sapi/upload" && action == "save":
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"id":   "777",
+					"name": "uploaded.bin",
+					"url":  "/sapi/media/content?id=777",
+				},
+			})
+		case path == "/sapi/media" && action == "softdelete":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	}))
+}
+
+func setupTestWebDAVServer(t *testing.T, authCfg config.AuthConfig) (*Server, func()) {
+	t.Helper()
+	mockSAPI := newMockSAPIServer(t)
+	client, err := sapi.NewClient(config.AccountConfig{
+		Provider:      "movistar",
+		Phone:         "612345678",
+		AccessToken:   "test-access",
+		RefreshToken:  "test-refresh",
+		ValidationKey: "test-vk",
+	})
+	if err != nil {
+		mockSAPI.Close()
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(mockSAPI.URL+"/sapi", mockSAPI.URL)
+	srv := NewServerWithAuth(client, authCfg)
+	return srv, mockSAPI.Close
+}
+
+func TestWebDAV_BasicAuthAndRateLimit(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{
+		Username: "davuser",
+		Password: "davpass",
+	})
+	defer cleanup()
+
+	// 1. Petición sin credenciales -> 401 con WWW-Authenticate
+	req := httptest.NewRequest("PROPFIND", "/", nil)
+	req.RemoteAddr = "198.51.100.25:12345"
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Header().Get("WWW-Authenticate"), `Basic realm="Movistar WebDAV"`) {
+		t.Errorf("missing or invalid WWW-Authenticate header: %q", rec.Header().Get("WWW-Authenticate"))
+	}
+
+	// 2. OPTIONS sin credenciales se permite para descubrimiento de Windows WebClient
+	optReq := httptest.NewRequest("OPTIONS", "/", nil)
+	optReq.RemoteAddr = "198.51.100.25:12345"
+	optRec := httptest.NewRecorder()
+	srv.ServeHTTP(optRec, optReq)
+	if optRec.Code != http.StatusOK {
+		t.Errorf("expected OPTIONS without auth to return 200, got %d", optRec.Code)
+	}
+	if optRec.Header().Get("MS-Author-Via") != "DAV" {
+		t.Errorf("expected MS-Author-Via: DAV header")
+	}
+
+	// 3. Petición con credenciales válidas -> 207 Multi-Status
+	authReq := httptest.NewRequest("PROPFIND", "/", nil)
+	authReq.Header.Set("Depth", "0")
+	authReq.SetBasicAuth("davuser", "davpass")
+	authReq.RemoteAddr = "198.51.100.25:12345"
+	authRec := httptest.NewRecorder()
+	srv.ServeHTTP(authRec, authReq)
+	if authRec.Code != http.StatusMultiStatus {
+		t.Fatalf("expected 207 Multi-Status with valid auth, got %d", authRec.Code)
+	}
+
+	// 4. Exceder rate-limit de fallos (10 intentos fallidos -> 429)
+	attackerIP := "[2001:db8::99]:54321"
+	for i := 0; i < 10; i++ {
+		badReq := httptest.NewRequest("PROPFIND", "/", nil)
+		badReq.SetBasicAuth("davuser", "wrongpass")
+		badReq.RemoteAddr = attackerIP
+		badRec := httptest.NewRecorder()
+		srv.ServeHTTP(badRec, badReq)
+		if badRec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d", i+1, badRec.Code)
+		}
+	}
+
+	blockedReq := httptest.NewRequest("PROPFIND", "/", nil)
+	blockedReq.SetBasicAuth("davuser", "davpass") // Incluso con clave correcta una vez bloqueado
+	blockedReq.RemoteAddr = attackerIP
+	blockedRec := httptest.NewRecorder()
+	srv.ServeHTTP(blockedRec, blockedReq)
+	if blockedRec.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 Too Many Requests after 10 failures, got %d", blockedRec.Code)
+	}
+}
+
+func TestWebDAV_RejectPUTOnCollectionAndQuotaRewrite(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+
+	// 1. PUT con barra final -> 405 Method Not Allowed
+	reqSlash := httptest.NewRequest("PUT", "/Backups/", strings.NewReader("data"))
+	recSlash := httptest.NewRecorder()
+	srv.ServeHTTP(recSlash, reqSlash)
+	if recSlash.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on PUT /Backups/, got %d", recSlash.Code)
+	}
+
+	// 2. PUT sobre carpeta existente sin barra final -> 405 Method Not Allowed
+	reqFolder := httptest.NewRequest("PUT", "/Backups", strings.NewReader("data"))
+	recFolder := httptest.NewRecorder()
+	srv.ServeHTTP(recFolder, reqFolder)
+	if recFolder.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 on PUT /Backups (existing folder), got %d", recFolder.Code)
+	}
+
+	// 3. PROPFIND solicitando cuotas RFC 4331 -> debe inyectar quota-available-bytes y quota-used-bytes sin 404 vacío
+	propfindBody := `<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:quota-available-bytes/>
+    <D:quota-used-bytes/>
+  </D:prop>
+</D:propfind>`
+	propReq := httptest.NewRequest("PROPFIND", "/", strings.NewReader(propfindBody))
+	propReq.Header.Set("Depth", "0")
+	propReq.Header.Set("Content-Type", "application/xml")
+	propRec := httptest.NewRecorder()
+	srv.ServeHTTP(propRec, propReq)
+
+	if propRec.Code != http.StatusMultiStatus {
+		t.Fatalf("expected 207 on PROPFIND, got %d", propRec.Code)
+	}
+	xmlOut := propRec.Body.String()
+	if !strings.Contains(xmlOut, "quota-available-bytes>") || !strings.Contains(xmlOut, "<D:quota-used-bytes>104857600</D:quota-used-bytes>") {
+		t.Errorf("expected RFC 4331 quota tags in PROPFIND response, got:\n%s", xmlOut)
+	}
+	if strings.Contains(xmlOut, "404 Not Found") {
+		t.Errorf("expected empty 404 propstat to be stripped from PROPFIND response, got:\n%s", xmlOut)
+	}
+}
+
+func TestWebDAV_UploadMaxBytesAndOperations(t *testing.T) {
+	t.Setenv("MAX_UPLOAD_MB", "1") // 1 MB límite para el test
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+
+	// 1. Subida dentro del límite (100 KB) -> 201 Created
+	smallPayload := bytes.Repeat([]byte("A"), 100*1024)
+	putReq := httptest.NewRequest("PUT", "/uploaded.bin", bytes.NewReader(smallPayload))
+	putRec := httptest.NewRecorder()
+	srv.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusCreated && putRec.Code != http.StatusNoContent && putRec.Code != http.StatusOK {
+		t.Fatalf("expected PUT success (201/204), got %d", putRec.Code)
+	}
+
+	// 2. Subida que supera 1 MB sin Content-Length conocido (streaming chunked) -> 413 Request Entity Too Large
+	largePayload := bytes.Repeat([]byte("B"), 1024*1024+512)
+	streamReq := httptest.NewRequest("PUT", "/too_big_stream.bin", io.NopCloser(bytes.NewReader(largePayload)))
+	streamReq.ContentLength = -1
+	streamRec := httptest.NewRecorder()
+	srv.ServeHTTP(streamRec, streamReq)
+	if streamRec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 Request Entity Too Large on streaming oversize PUT, got %d", streamRec.Code)
+	}
+
+	// 3. Descarga GET de archivo existente -> 200 OK con contenido "hello world"
+	getReq := httptest.NewRequest("GET", "/hello.txt", nil)
+	getRec := httptest.NewRecorder()
+	srv.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK || getRec.Body.String() != "hello world" {
+		t.Errorf("unexpected GET response: code=%d body=%q", getRec.Code, getRec.Body.String())
+	}
+
+	// 4. DELETE de archivo existente -> 204 No Content
+	delReq := httptest.NewRequest("DELETE", "/hello.txt", nil)
+	delRec := httptest.NewRecorder()
+	srv.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusNoContent && delRec.Code != http.StatusOK {
+		t.Errorf("expected DELETE 204/200, got %d", delRec.Code)
+	}
+}

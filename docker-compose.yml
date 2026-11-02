@@ -1,13 +1,21 @@
-version: '3.8'
-
 services:
   movistar-webdav-proxy:
-    image: uniextra/movistar-webdav-proxy:latest
+    image: uniextra/movistar-webdav-proxy:v2.1.0
     container_name: movistar-webdav-proxy
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - WEBDAV_USER=${WEBDAV_USER:-}
+      - WEBDAV_PASSWORD=${WEBDAV_PASSWORD:-}
+      - WEBUI_USER=${WEBUI_USER:-}
+      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-}
     ports:
-      - "${WEB_PORT:-5000}:5000"      # Panel Web de gestión y logs
-      - "${WEBDAV_PORT:-5050}:8080"   # Endpoint WebDAV (Duplicati / Synology HyperBackup)
+      - "${BIND_IP:-0.0.0.0}:${WEB_PORT:-5000}:5000"      # Panel Web de gestión y logs (usa BIND_IP=127.0.0.1 para acceso solo local)
+      - "${BIND_IP:-0.0.0.0}:${WEBDAV_PORT:-5050}:8080"   # Endpoint WebDAV (Duplicati / Synology HyperBackup)
     volumes:
       - movistar_tokens:/app/tokens
 

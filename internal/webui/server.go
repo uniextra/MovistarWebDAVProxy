@@ -1,10 +1,13 @@
 package webui
 
 import (
+	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,12 +24,21 @@ import (
 //go:embed templates/index.html
 var indexHTML []byte
 
+const (
+	maxBodyBytes    = 1 << 20 // 1 MB
+	loginStateTTL   = 10 * time.Minute
+	maxPendingLogin = 50
+	panelCSP        = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+)
+
 type Server struct {
 	client       *sapi.Client
 	webdavServer *webdav.Server
 	notifier     *notifier.TelegramNotifier
 	loginMu      sync.Mutex
 	loginState   map[string]*pendingLogin
+	authCfg      config.AuthConfig
+	rateLimiter  *config.AuthRateLimiter
 }
 
 type pendingLogin struct {
@@ -37,12 +49,18 @@ type pendingLogin struct {
 }
 
 func NewServer(client *sapi.Client, webdavServer *webdav.Server) *Server {
+	return NewServerWithAuth(client, webdavServer, config.LoadWebUIAuthConfig())
+}
+
+func NewServerWithAuth(client *sapi.Client, webdavServer *webdav.Server, authCfg config.AuthConfig) *Server {
 	tg := notifier.NewTelegramNotifier("", "")
 	s := &Server{
 		client:       client,
 		webdavServer: webdavServer,
 		notifier:     tg,
 		loginState:   make(map[string]*pendingLogin),
+		authCfg:      authCfg,
+		rateLimiter:  config.NewAuthRateLimiter(10, time.Minute),
 	}
 
 	if client != nil {
@@ -88,7 +106,98 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/test_telegram", s.handleTestTelegram)
 	mux.HandleFunc("/save_telegram", s.handleSaveTelegram)
 
-	return mux
+	return s.securityMiddleware(mux)
+}
+
+func (s *Server) securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", panelCSP)
+
+		// /health siempre accesible sin autenticación para healthchecks de Docker
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if s.authCfg.IsEnabled() {
+			clientIP := config.ExtractClientIP(r)
+			if s.rateLimiter.IsBlocked(clientIP) {
+				logger.Log("[WebUI] 🚫 IP bloqueada temporalmente por fallos de autenticación: %s", clientIP)
+				http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
+				return
+			}
+			user, pass, ok := r.BasicAuth()
+			if !ok || !s.authCfg.Validate(user, pass) {
+				if ok {
+					s.rateLimiter.RecordFailure(clientIP)
+					logger.Log("[WebUI] 🔒 Intento de acceso fallido al panel desde %s (usuario: %s)", clientIP, logger.Mask(user))
+				}
+				w.Header().Set("WWW-Authenticate", `Basic realm="Movistar WebDAV Panel"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			s.rateLimiter.Reset(clientIP)
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func validateSameOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return equalHost(u.Host, r.Host)
+}
+
+func equalHost(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	ha, pa, errA := net.SplitHostPort(a)
+	hb, pb, errB := net.SplitHostPort(b)
+	if errA == nil && errB == nil {
+		return strings.EqualFold(ha, hb) && pa == pb
+	}
+	return false
+}
+
+func requirePost(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]interface{}{"status": "error", "message": "Método no permitido"})
+		return false
+	}
+	if !validateSameOrigin(r) {
+		jsonResponse(w, http.StatusForbidden, map[string]interface{}{"status": "error", "message": "Origen no permitido (CSRF)"})
+		return false
+	}
+	return true
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool {
+	if !requirePost(w, r) {
+		return false
+	}
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if !strings.HasPrefix(ct, "application/json") {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Se requiere Content-Type: application/json"})
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(dst); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Cuerpo JSON inválido o demasiado grande"})
+		return false
+	}
+	return true
 }
 
 func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
@@ -98,6 +207,10 @@ func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(indexHTML)
@@ -119,7 +232,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"status": status,
-		"phone":  cfg.Phone,
+		"phone":  logger.Mask(cfg.Phone),
 	})
 }
 
@@ -127,7 +240,9 @@ func (s *Server) handleVerifyPhone(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Phone string `json:"phone"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
 	phone := config.SanitizePhone(body.Phone)
 	if phone == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Teléfono inválido"})
@@ -143,15 +258,15 @@ func (s *Server) handleVerifyPhone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"status":              "ok",
-		"phone":               phone,
-		"provider":            cfg.Provider,
-		"has_credentials":     hasCredentials,
-		"has_device_token":    hasDeviceToken,
-		"device_id":           cfg.DeviceID,
-		"telegram_configured": cfg.TelegramBotToken != "" && cfg.TelegramChatID != "",
-		"telegram_bot_token":  cfg.TelegramBotToken,
-		"telegram_chat_id":    cfg.TelegramChatID,
+		"status":                "ok",
+		"phone":                 phone,
+		"provider":              cfg.Provider,
+		"has_credentials":       hasCredentials,
+		"has_device_token":      hasDeviceToken,
+		"device_id":             logger.Mask(cfg.DeviceID),
+		"telegram_configured":   cfg.TelegramBotToken != "" && cfg.TelegramChatID != "",
+		"telegram_token_masked": logger.Mask(cfg.TelegramBotToken),
+		"telegram_chat_id":      cfg.TelegramChatID,
 	})
 }
 
@@ -168,7 +283,8 @@ func (s *Server) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
 
 	space, err := s.client.GetStorageSpace()
 	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": err.Error()})
+		logger.Log("[WebUI] ⚠️ Error consultando espacio en almacenamiento: %v", err)
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "Error al consultar el espacio de almacenamiento en Movistar/O2 Cloud"})
 		return
 	}
 
@@ -198,17 +314,23 @@ func (s *Server) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
 		"used_str":           usedStr,
 		"total_str":          totalStr,
 		"nolimit":            space.NoLimit,
-		"max_upload_size_mb": 4096,
+		"max_upload_size_mb": webdav.GetMaxUploadMB(),
 	})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	if !requirePost(w, r) {
+		return
+	}
 	s.SetRunning(true)
 	logger.Log("[WebDAV] ▶ Proxy reanudado por el usuario.")
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if !requirePost(w, r) {
+		return
+	}
 	s.SetRunning(false)
 	logger.Log("[WebDAV] ■ Proxy pausado por el usuario.")
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
@@ -221,12 +343,35 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) cleanupExpiredLoginsLocked(now time.Time) {
+	for k, v := range s.loginState {
+		if now.Sub(v.Time) > loginStateTTL {
+			delete(s.loginState, k)
+		}
+	}
+	if len(s.loginState) >= maxPendingLogin {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range s.loginState {
+			if oldestKey == "" || v.Time.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.Time
+			}
+		}
+		if oldestKey != "" {
+			delete(s.loginState, oldestKey)
+		}
+	}
+}
+
 func (s *Server) handleStartLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Phone    string `json:"phone"`
 		Provider string `json:"provider"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
 	phone := config.SanitizePhone(body.Phone)
 	if phone == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Introduce un teléfono válido"})
@@ -240,16 +385,18 @@ func (s *Server) handleStartLogin(w http.ResponseWriter, r *http.Request) {
 
 	verifier, state, authURL := auth.BuildOAuthLoginURL(provider)
 
+	now := time.Now()
 	s.loginMu.Lock()
+	s.cleanupExpiredLoginsLocked(now)
 	s.loginState[phone] = &pendingLogin{
 		Provider: provider,
 		Verifier: verifier,
 		State:    state,
-		Time:     time.Now(),
+		Time:     now,
 	}
 	s.loginMu.Unlock()
 
-	logger.Log("[OAuth] 🔑 URL de autorización generada para %s (Proveedor: %s)", phone, provider)
+	logger.Log("[OAuth] 🔑 URL de autorización generada para %s (Proveedor: %s)", logger.Mask(phone), provider)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"status":   "ok",
 		"auth_url": authURL,
@@ -263,7 +410,9 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		CodeOrURL string `json:"code_or_url"`
 		Provider  string `json:"provider"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
 	phone := config.SanitizePhone(body.Phone)
 	rawCode := body.CodeOrURL
 
@@ -272,17 +421,29 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now()
 	s.loginMu.Lock()
+	s.cleanupExpiredLoginsLocked(now)
 	pending, ok := s.loginState[phone]
 	s.loginMu.Unlock()
 
-	var verifier string
-	provider := strings.ToLower(strings.TrimSpace(body.Provider))
-	if ok && pending != nil {
-		verifier = pending.Verifier
-		if provider == "" {
-			provider = pending.Provider
+	if !ok || pending == nil || now.Sub(pending.Time) > loginStateTTL {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "La sesión de vinculación ha expirado o no se ha iniciado. Abre de nuevo el enlace de login."})
+		return
+	}
+
+	// Si el usuario pegó la URL completa o incluye state=, validar state en tiempo constante
+	if returnedState, hasStateInInput := auth.ExtractState(rawCode); hasStateInInput && returnedState != "" {
+		if subtle.ConstantTimeCompare([]byte(returnedState), []byte(pending.State)) != 1 {
+			jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "El parámetro state de seguridad no coincide. Inicia de nuevo la vinculación."})
+			return
 		}
+	}
+
+	verifier := pending.Verifier
+	provider := strings.ToLower(strings.TrimSpace(body.Provider))
+	if provider == "" {
+		provider = pending.Provider
 	}
 	if provider != "o2" {
 		provider = "movistar"
@@ -290,15 +451,15 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 
 	code := auth.ExtractAuthCode(rawCode)
 	if code == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "No se encontró el código de autorización"})
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "No se encontró un código de autorización válido"})
 		return
 	}
 
-	logger.Log("[OAuth] 🔄 Canjeando código para %s en apiseg.telefonica.es (%s)...", phone, provider)
+	logger.Log("[OAuth] 🔄 Canjeando código para %s en apiseg.telefonica.es (%s)...", logger.Mask(phone), provider)
 	tokens, err := auth.ExchangeCodeForTokens(code, verifier, provider)
 	if err != nil {
-		logger.Log("[OAuth] ❌ Error en canje: %v", err)
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": err.Error()})
+		logger.Log("[OAuth] ❌ Error en canje para %s: %v", logger.Mask(phone), err)
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "No se pudo canjear el código de autorización. Comprueba que no haya caducado."})
 		return
 	}
 
@@ -307,7 +468,7 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	if devID == "" {
 		devID = auth.GenerateDeviceID()
 	}
-	logger.Log("[OAuth] ✔ Tokens obtenidos. Inicializando sesión SAPI para dispositivo %s (%s)...", devID, provider)
+	logger.Log("[OAuth] ✔ Tokens obtenidos. Inicializando sesión SAPI para dispositivo %s (%s)...", logger.Mask(devID), provider)
 
 	sapiBase := auth.GetSAPIBaseURL(provider)
 	nowMS := time.Now().UnixMilli()
@@ -371,7 +532,7 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.SetRunning(true)
 
-	logger.Log("[OAuth] ✔ ¡Dispositivo vinculado y guardado con éxito para %s (%s)! Proxy WebDAV activo.", phone, provider)
+	logger.Log("[OAuth] ✔ ¡Dispositivo vinculado y guardado con éxito para %s (%s)! Proxy WebDAV activo.", logger.Mask(phone), provider)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider": provider})
 }
 
@@ -381,14 +542,16 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		BotToken string `json:"bot_token"`
 		ChatID   string `json:"chat_id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
 
 	botToken := strings.TrimSpace(body.BotToken)
 	chatID := strings.TrimSpace(body.ChatID)
 
 	phone := config.SanitizePhone(body.Phone)
 	cfg := config.LoadAccountConfig(phone)
-	if botToken == "" {
+	if botToken == "" || strings.Contains(botToken, "…") || strings.Contains(botToken, "****") {
 		botToken = cfg.TelegramBotToken
 	}
 	if chatID == "" {
@@ -399,6 +562,13 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
 			"message": "Token de bot o Chat ID no configurados",
+		})
+		return
+	}
+	if !config.ValidateBotToken(botToken) || !config.ValidateChatID(chatID) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+			"status":  "error",
+			"message": "Formato de Token de bot o Chat ID inválido",
 		})
 		return
 	}
@@ -421,7 +591,9 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 		BotToken string `json:"bot_token"`
 		ChatID   string `json:"chat_id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
 
 	phone := config.SanitizePhone(body.Phone)
 	if phone == "" {
@@ -433,13 +605,36 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := config.LoadAccountConfig(phone)
-	cfg.TelegramBotToken = strings.TrimSpace(body.BotToken)
-	cfg.TelegramChatID = strings.TrimSpace(body.ChatID)
+	newToken := strings.TrimSpace(body.BotToken)
+	newChatID := strings.TrimSpace(body.ChatID)
+
+	// Si el usuario deja el token vacío o envía el valor enmascarado mientras mantiene un chat_id, conservar el token actual
+	if (newToken == "" || strings.Contains(newToken, "…") || strings.Contains(newToken, "****")) && newChatID != "" && cfg.TelegramBotToken != "" {
+		newToken = cfg.TelegramBotToken
+	}
+
+	if !config.ValidateBotToken(newToken) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+			"status":  "error",
+			"message": "Formato de Token de Telegram inválido (esperado: 123456:ABC-DEF...)",
+		})
+		return
+	}
+	if !config.ValidateChatID(newChatID) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+			"status":  "error",
+			"message": "Formato de Chat ID inválido (esperado: ID numérico o @canal)",
+		})
+		return
+	}
+
+	cfg.TelegramBotToken = newToken
+	cfg.TelegramChatID = newChatID
 
 	if err := config.SaveAccountConfig(cfg); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
-			"message": err.Error(),
+			"message": "Error guardando configuración de Telegram",
 		})
 		return
 	}
@@ -447,20 +642,17 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 	s.client.SetConfig(cfg)
 	s.notifier.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
 
-	logger.Log("[Telegram] ⚙️ Credenciales de Telegram actualizadas para %s.", phone)
+	logger.Log("[Telegram] ⚙️ Credenciales de Telegram actualizadas para %s.", logger.Mask(phone))
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
 func (s *Server) handleUnlink(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonResponse(w, http.StatusMethodNotAllowed, map[string]interface{}{"status": "error", "message": "Método no permitido"})
-		return
-	}
-
 	var body struct {
 		Phone string `json:"phone"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
 	phone := config.SanitizePhone(body.Phone)
 	if phone == "" {
 		phone = s.client.GetConfig().Phone

@@ -50,16 +50,25 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 Crea un archivo `docker-compose.yml`:
 
 ```yaml
-version: '3.8'
-
 services:
   movistar-webdav-proxy:
-    image: uniextra/movistar-webdav-proxy:latest
+    image: uniextra/movistar-webdav-proxy:v2.1.0
     container_name: movistar-webdav-proxy
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - WEBDAV_USER=admin
+      - WEBDAV_PASSWORD=TuPasswordSeguroAqui
+      # Opcional: credenciales distintas para el panel web (si no se definen, usa las de WebDAV)
+      # - WEBUI_USER=admin
+      # - WEBUI_PASSWORD=OtroPasswordSeguro
     ports:
-      - "5000:5000"      # Panel Web de Gestión y Logs
-      - "5050:8080"      # Endpoint WebDAV (puerto 5050 en el host)
+      - "${BIND_IP:-0.0.0.0}:5000:5000"   # Panel Web de Gestión y Logs (usa BIND_IP=127.0.0.1 para solo localhost)
+      - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV (puerto 5050 en el host)
     volumes:
       - movistar_tokens:/app/tokens
 
@@ -79,11 +88,43 @@ docker compose up -d
 docker run -d \
   --name movistar-webdav-proxy \
   --restart unless-stopped \
+  -e WEBDAV_USER=admin \
+  -e WEBDAV_PASSWORD=TuPasswordSeguroAqui \
   -p 5000:5000 \
   -p 5050:8080 \
   -v movistar_webdav_tokens:/app/tokens \
-  uniextra/movistar-webdav-proxy:latest
+  uniextra/movistar-webdav-proxy:v2.1.0
 ```
+
+---
+
+## 🔒 Seguridad y Variables de Entorno
+
+### Recomendaciones de Seguridad
+* **Autenticación HTTP Basic (`WEBDAV_USER` / `WEBDAV_PASSWORD`):** A partir de `v2.1.0`, tanto el servidor WebDAV como el panel web validan usuario y contraseña en tiempo constante con protección contra fuerza bruta (rate-limit por IP tras 10 fallos/minuto). Si actualizas un contenedor existente sin estas variables definidas, el servicio arrancará en modo retrocompatible emitiendo un aviso (`[WARNING]`), salvo que actives `REQUIRE_AUTH=true`.
+* **No exponer directamente a Internet:** Si necesitas acceder desde fuera de tu red local, coloca siempre un proxy inverso con **TLS/HTTPS** delante (Caddy, Nginx, Traefik o túnel VPN/WireGuard/Tailscale).
+* **Contenedor sin privilegios (`non-root`):** La imagen oficial ejecuta el servidor bajo el usuario sin privilegios `app` (`UID 10001`). En actualizaciones sobre volúmenes existentes, el entrypoint migra automáticamente los permisos de `/app/tokens` antes de soltar privilegios.
+
+### Tabla de Variables de Entorno
+
+| Variable | Por defecto | Descripción |
+| :--- | :--- | :--- |
+| `WEBDAV_USER` | *(vacío)* | Usuario para clientes WebDAV (y para el panel web si `WEBUI_USER` no se define). |
+| `WEBDAV_PASSWORD` | *(vacío)* | Contraseña en texto plano para clientes WebDAV. |
+| `WEBDAV_PASSWORD_HASH` | *(vacío)* | Alternativa a `WEBDAV_PASSWORD`: hash SHA-256 en hexadecimal (ej. `sha256:e3b0c44...`). |
+| `WEBUI_USER` | `WEBDAV_USER` | Usuario específico para el panel de control web (`:5000`). |
+| `WEBUI_PASSWORD` | `WEBDAV_PASSWORD` | Contraseña específica para el panel de control web. |
+| `REQUIRE_AUTH` | `false` | Si es `true`, el servidor aborta el arranque si no se han configurado credenciales. |
+| `AUTH_DISABLED` | `false` | Si es `true`, desactiva explícitamente la autenticación. |
+| `PORT` | `5000` | Puerto interno del servidor del Panel Web. |
+| `WEBDAV_PORT` | `8080` | Puerto interno del servidor WebDAV. |
+| `TOKENS_DIR` | `/app/tokens` | Directorio donde se almacenan las credenciales OAuth2 (`0700`). |
+| `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave opcional para cifrar en reposo (AES-256-GCM) los tokens guardados en disco. |
+| `MAX_UPLOAD_MB` | `4096` | Tamaño máximo permitido por archivo en subidas `PUT` (en MB). |
+| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores a 10 MB. |
+| `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
+
+> **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.
 
 ---
 
