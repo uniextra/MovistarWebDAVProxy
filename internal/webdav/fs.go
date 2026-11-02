@@ -1098,6 +1098,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 	if !d.loaded {
 		var list []os.FileInfo
 		subs := d.mfs.getSubfolders(d.folderID)
+		media := d.mfs.getMedia(d.folderID)
 		seen := make(map[string]bool)
 		now := time.Now()
 
@@ -1113,7 +1114,6 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			}
 		}
 
-		media := d.mfs.getMedia(d.folderID)
 		for _, m := range media {
 			childPath := path.Clean(path.Join(d.path, m.Name))
 			if exp, isTomb := d.mfs.deletedTombstones[childPath]; isTomb && now.Before(exp) {

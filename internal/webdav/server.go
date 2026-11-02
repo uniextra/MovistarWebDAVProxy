@@ -115,7 +115,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			user, pass, ok := r.BasicAuth()
 			if !ok || !s.authCfg.Validate(user, pass) {
-				if ok {
+				if ok && (user != "" || pass != "") {
 					s.rateLimiter.RecordFailure(clientIP)
 					logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s)", clientIP, logger.Mask(user))
 				}

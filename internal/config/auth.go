@@ -73,12 +73,25 @@ func (a AuthConfig) IsEnabled() bool {
 }
 
 // Validate comprueba usuario y contraseña en tiempo constante usando SHA-256.
+// Soporta prefijos de dominio de Windows WebClient (ej. "PC\usuario" o ".\usuario").
 func (a AuthConfig) Validate(user, pass string) bool {
 	if !a.IsEnabled() {
 		return true
 	}
 
-	userHash := sha256.Sum256([]byte(user))
+	cleanUser := user
+	if !strings.Contains(a.Username, `\`) {
+		if idx := strings.LastIndex(cleanUser, `\`); idx != -1 {
+			cleanUser = cleanUser[idx+1:]
+		}
+	}
+	if !strings.Contains(a.Username, "@") {
+		if idx := strings.Index(cleanUser, "@"); idx != -1 {
+			cleanUser = cleanUser[:idx]
+		}
+	}
+
+	userHash := sha256.Sum256([]byte(cleanUser))
 	expectedUserHash := sha256.Sum256([]byte(a.Username))
 	userMatch := subtle.ConstantTimeCompare(userHash[:], expectedUserHash[:]) == 1
 

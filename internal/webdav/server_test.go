@@ -124,15 +124,18 @@ func TestWebDAV_BasicAuthAndRateLimit(t *testing.T) {
 		t.Errorf("expected MS-Author-Via: DAV header")
 	}
 
-	// 3. Petición con credenciales válidas -> 207 Multi-Status
+	// 3. Petición con credenciales válidas (Depth: 1 -> ejercita Readdir con caché fría) -> 207 Multi-Status
 	authReq := httptest.NewRequest("PROPFIND", "/", nil)
-	authReq.Header.Set("Depth", "0")
-	authReq.SetBasicAuth("davuser", "davpass")
+	authReq.Header.Set("Depth", "1")
+	authReq.SetBasicAuth("DESKTOP-PC\\davuser", "davpass")
 	authReq.RemoteAddr = "198.51.100.25:12345"
 	authRec := httptest.NewRecorder()
 	srv.ServeHTTP(authRec, authReq)
 	if authRec.Code != http.StatusMultiStatus {
-		t.Fatalf("expected 207 Multi-Status with valid auth, got %d", authRec.Code)
+		t.Fatalf("expected 207 Multi-Status with valid domain\\user auth, got %d", authRec.Code)
+	}
+	if !strings.Contains(authRec.Body.String(), "hello.txt") || !strings.Contains(authRec.Body.String(), "Backups") {
+		t.Errorf("expected PROPFIND Depth:1 to list folder contents without deadlock, got:\n%s", authRec.Body.String())
 	}
 
 	// 4. Exceder rate-limit de fallos (10 intentos fallidos -> 429)
