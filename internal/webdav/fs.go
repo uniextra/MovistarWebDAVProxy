@@ -84,6 +84,16 @@ func GetMaxUploadBytes() int64 {
 	return GetMaxUploadMB() * 1024 * 1024
 }
 
+// GetUploadRAMBufferMaxBytes devuelve el tamaño máximo de buffer en RAM antes de hacer spool a disco (por defecto 32 MB).
+func GetUploadRAMBufferMaxBytes() int {
+	if env := strings.TrimSpace(os.Getenv("WEBDAV_BUFFER_MB")); env != "" {
+		if val, err := strconv.Atoi(env); err == nil && val > 0 {
+			return val * 1024 * 1024
+		}
+	}
+	return 32 * 1024 * 1024 // 32 MB por defecto (cubre el 99% de bloques de Duplicati y restic en RAM sin tocar disco)
+}
+
 func getUploadTempDir() string {
 	if dir := strings.TrimSpace(os.Getenv("WEBDAV_TMPDIR")); dir != "" {
 		return dir
@@ -195,12 +205,80 @@ type MovistarFS struct {
 
 type cachedFolders struct {
 	folders []sapi.FolderItem
+	byLower map[string]sapi.FolderItem
 	time    time.Time
 }
 
+func newCachedFolders(folders []sapi.FolderItem) *cachedFolders {
+	byLower := make(map[string]sapi.FolderItem, len(folders))
+	for _, f := range folders {
+		byLower[strings.ToLower(f.Name)] = f
+	}
+	return &cachedFolders{
+		folders: folders,
+		byLower: byLower,
+		time:    time.Now(),
+	}
+}
+
+func (cf *cachedFolders) find(name string) (*sapi.FolderItem, bool) {
+	lower := strings.ToLower(name)
+	if item, ok := cf.byLower[lower]; ok {
+		itemCopy := item
+		return &itemCopy, true
+	}
+	// Tolerancia Synology HyperBackup .hbk
+	if strings.HasSuffix(lower, ".hbk") && len(lower) > 4 {
+		base := lower[:len(lower)-4]
+		if item, ok := cf.byLower[base]; ok {
+			itemCopy := item
+			return &itemCopy, true
+		}
+	} else {
+		hbk := lower + ".hbk"
+		if item, ok := cf.byLower[hbk]; ok {
+			itemCopy := item
+			return &itemCopy, true
+		}
+	}
+	return nil, false
+}
+
 type cachedMedia struct {
-	media []sapi.MediaItem
-	time  time.Time
+	media   []sapi.MediaItem
+	byExact map[string]sapi.MediaItem
+	byLower map[string]sapi.MediaItem
+	time    time.Time
+}
+
+func newCachedMedia(media []sapi.MediaItem) *cachedMedia {
+	byExact := make(map[string]sapi.MediaItem, len(media))
+	byLower := make(map[string]sapi.MediaItem, len(media))
+	for _, m := range media {
+		byExact[m.Name] = m
+		lower := strings.ToLower(m.Name)
+		if _, exists := byLower[lower]; !exists {
+			byLower[lower] = m
+		}
+	}
+	return &cachedMedia{
+		media:   media,
+		byExact: byExact,
+		byLower: byLower,
+		time:    time.Now(),
+	}
+}
+
+func (cm *cachedMedia) find(name string) (*sapi.MediaItem, bool) {
+	if item, ok := cm.byExact[name]; ok {
+		itemCopy := item
+		return &itemCopy, true
+	}
+	if item, ok := cm.byLower[strings.ToLower(name)]; ok {
+		itemCopy := item
+		return &itemCopy, true
+	}
+	return nil, false
 }
 
 type cachedStorage struct {
@@ -256,8 +334,7 @@ func (mfs *MovistarFS) getSubfolders(parentID int64) []sapi.FolderItem {
 	mfs.cacheMu.RLock()
 	cached, ok := mfs.folderCache[parentID]
 	if ok && time.Since(cached.time) < mfs.cacheTTL {
-		folders := make([]sapi.FolderItem, len(cached.folders))
-		copy(folders, cached.folders)
+		folders := cached.folders
 		mfs.cacheMu.RUnlock()
 		return mfs.mergeCreatedFolders(parentID, folders)
 	}
@@ -268,8 +345,7 @@ func (mfs *MovistarFS) getSubfolders(parentID int64) []sapi.FolderItem {
 		logger.Log("[WebDAV] ⚠️ Error listando subcarpetas de %d: %v", parentID, err)
 		mfs.cacheMu.RLock()
 		if ok && cached != nil {
-			folders := make([]sapi.FolderItem, len(cached.folders))
-			copy(folders, cached.folders)
+			folders := cached.folders
 			mfs.cacheMu.RUnlock()
 			return mfs.mergeCreatedFolders(parentID, folders)
 		}
@@ -277,8 +353,9 @@ func (mfs *MovistarFS) getSubfolders(parentID int64) []sapi.FolderItem {
 		return nil
 	}
 
+	cf := newCachedFolders(subs)
 	mfs.cacheMu.Lock()
-	mfs.folderCache[parentID] = &cachedFolders{folders: subs, time: time.Now()}
+	mfs.folderCache[parentID] = cf
 	mfs.cacheMu.Unlock()
 
 	return mfs.mergeCreatedFolders(parentID, subs)
@@ -288,11 +365,18 @@ func (mfs *MovistarFS) mergeCreatedFolders(parentID int64, folders []sapi.Folder
 	mfs.cacheMu.Lock()
 	defer mfs.cacheMu.Unlock()
 
+	if len(mfs.createdFolders) == 0 {
+		return folders
+	}
+
 	now := time.Now()
-	seen := make(map[string]bool)
+	seen := make(map[string]bool, len(folders))
 	for _, f := range folders {
 		seen[f.Name] = true
 	}
+
+	merged := make([]sapi.FolderItem, len(folders), len(folders)+len(mfs.createdFolders))
+	copy(merged, folders)
 
 	for p, cf := range mfs.createdFolders {
 		if now.Sub(cf.Time) > 60*time.Second {
@@ -300,19 +384,60 @@ func (mfs *MovistarFS) mergeCreatedFolders(parentID int64, folders []sapi.Folder
 			continue
 		}
 		if cf.Info.ParentID == parentID && !seen[cf.Info.Name] {
-			folders = append(folders, cf.Info)
+			merged = append(merged, cf.Info)
 			seen[cf.Info.Name] = true
 		}
 	}
-	return folders
+	return merged
+}
+
+func (mfs *MovistarFS) findSubfolder(parentID int64, name string) (*sapi.FolderItem, bool) {
+	mfs.cacheMu.RLock()
+	now := time.Now()
+	for _, cf := range mfs.createdFolders {
+		if now.Sub(cf.Time) <= 60*time.Second && cf.Info.ParentID == parentID {
+			if strings.EqualFold(cf.Info.Name, name) || (strings.HasSuffix(strings.ToLower(name), ".hbk") && strings.EqualFold(cf.Info.Name, name[:len(name)-4])) {
+				f := cf.Info
+				mfs.cacheMu.RUnlock()
+				return &f, true
+			}
+		}
+	}
+
+	cached, ok := mfs.folderCache[parentID]
+	if ok && time.Since(cached.time) < mfs.cacheTTL {
+		item, found := cached.find(name)
+		mfs.cacheMu.RUnlock()
+		return item, found
+	}
+	mfs.cacheMu.RUnlock()
+
+	subs, err := mfs.client.ListAllSubfolders(parentID)
+	if err != nil {
+		logger.Log("[WebDAV] ⚠️ Error listando subcarpetas de %d: %v", parentID, err)
+		mfs.cacheMu.RLock()
+		if ok && cached != nil {
+			item, found := cached.find(name)
+			mfs.cacheMu.RUnlock()
+			return item, found
+		}
+		mfs.cacheMu.RUnlock()
+		return nil, false
+	}
+
+	cf := newCachedFolders(subs)
+	mfs.cacheMu.Lock()
+	mfs.folderCache[parentID] = cf
+	mfs.cacheMu.Unlock()
+
+	return cf.find(name)
 }
 
 func (mfs *MovistarFS) getMedia(folderID int64) []sapi.MediaItem {
 	mfs.cacheMu.RLock()
 	cached, ok := mfs.mediaCache[folderID]
 	if ok && time.Since(cached.time) < mfs.cacheTTL {
-		items := make([]sapi.MediaItem, len(cached.media))
-		copy(items, cached.media)
+		items := cached.media
 		mfs.cacheMu.RUnlock()
 		return items
 	}
@@ -323,8 +448,7 @@ func (mfs *MovistarFS) getMedia(folderID int64) []sapi.MediaItem {
 		logger.Log("[WebDAV] ⚠️ Error listando media de %d: %v", folderID, err)
 		mfs.cacheMu.RLock()
 		if ok && cached != nil {
-			res := make([]sapi.MediaItem, len(cached.media))
-			copy(res, cached.media)
+			res := cached.media
 			mfs.cacheMu.RUnlock()
 			return res
 		}
@@ -332,11 +456,43 @@ func (mfs *MovistarFS) getMedia(folderID int64) []sapi.MediaItem {
 		return nil
 	}
 
+	cm := newCachedMedia(items)
 	mfs.cacheMu.Lock()
-	mfs.mediaCache[folderID] = &cachedMedia{media: items, time: time.Now()}
+	mfs.mediaCache[folderID] = cm
 	mfs.cacheMu.Unlock()
 
 	return items
+}
+
+func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, bool) {
+	mfs.cacheMu.RLock()
+	cached, ok := mfs.mediaCache[folderID]
+	if ok && time.Since(cached.time) < mfs.cacheTTL {
+		item, found := cached.find(name)
+		mfs.cacheMu.RUnlock()
+		return item, found
+	}
+	mfs.cacheMu.RUnlock()
+
+	items, err := mfs.client.ListAllMediaInFolder(folderID)
+	if err != nil {
+		logger.Log("[WebDAV] ⚠️ Error listando media de %d: %v", folderID, err)
+		mfs.cacheMu.RLock()
+		if ok && cached != nil {
+			item, found := cached.find(name)
+			mfs.cacheMu.RUnlock()
+			return item, found
+		}
+		mfs.cacheMu.RUnlock()
+		return nil, false
+	}
+
+	cm := newCachedMedia(items)
+	mfs.cacheMu.Lock()
+	mfs.mediaCache[folderID] = cm
+	mfs.cacheMu.Unlock()
+
+	return cm.find(name)
 }
 
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
@@ -399,22 +555,8 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 	for idx, part := range parts {
 		isLast := (idx == len(parts)-1)
 
-		subs := mfs.getSubfolders(currentID)
-		var foundSub *sapi.FolderItem
-		for _, s := range subs {
-			sCopy := s
-			if s.Name == part || strings.EqualFold(s.Name, part) {
-				foundSub = &sCopy
-				break
-			}
-			// Tolerancia Synology HyperBackup .hbk
-			if strings.EqualFold(s.Name, part+".hbk") || (strings.HasSuffix(strings.ToLower(part), ".hbk") && strings.EqualFold(s.Name, part[:len(part)-4])) {
-				foundSub = &sCopy
-				break
-			}
-		}
-
-		if foundSub != nil {
+		foundSub, ok := mfs.findSubfolder(currentID, part)
+		if ok {
 			currentID = foundSub.ID
 			currentFolder = foundSub
 			if isLast {
@@ -425,27 +567,7 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 
 		// Si no se encontró en subcarpetas y es el último elemento, buscar en archivos
 		if isLast {
-			media := mfs.getMedia(currentID)
-			var foundMedia *sapi.MediaItem
-			// Solo el nombre exacto (y, si no está, sin mirar mayúsculas). Antes también valía
-			// "foto (1).jpg" por "foto.jpg": se sobrescribía o borraba otra foto distinta.
-			for _, m := range media {
-				if m.Name == part {
-					mCopy := m
-					foundMedia = &mCopy
-					break
-				}
-			}
-			if foundMedia == nil {
-				for _, m := range media {
-					if strings.EqualFold(m.Name, part) {
-						mCopy := m
-						foundMedia = &mCopy
-						break
-					}
-				}
-			}
-			if foundMedia != nil {
+			if foundMedia, ok := mfs.findMedia(currentID, part); ok {
 				return nil, foundMedia, false, nil
 			}
 		}
@@ -901,7 +1023,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 		}
 		return n, err
 	}
-	if w.buf.Len()+len(p) > 10*1024*1024 {
+	if w.buf.Len()+len(p) > GetUploadRAMBufferMaxBytes() {
 		tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_upload_*")
 		if err != nil {
 			w.failed = true
