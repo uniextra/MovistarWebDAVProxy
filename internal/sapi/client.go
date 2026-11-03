@@ -930,6 +930,55 @@ func (c *Client) ListAllMediaInFolder(folderID int64) ([]MediaItem, error) {
 	return allFiles, nil
 }
 
+// GetMediaByID consulta los datos de un único archivo por su ID, incluida su URL de
+// descarga. Devuelve (nil, nil) si SAPI responde correctamente pero todavía no lo
+// conoce (p. ej. justo después de subirlo, mientras se indexa).
+func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
+	u := fmt.Sprintf("%s/media?action=get&origin=omh,dropbox", c.baseURL)
+	payload := map[string]interface{}{
+		"data": map[string]interface{}{
+			"ids":    []string{mediaID},
+			"fields": []string{"name", "size", "url", "etag", "folderid", "modificationdate"},
+		},
+	}
+	bodyBytes, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+
+	resp, err := c.DoRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("get media failed (HTTP %d, id=%s): %s", resp.StatusCode, mediaID, string(b))
+	}
+
+	var res struct {
+		Data struct {
+			Media []MediaItem `json:"media"`
+		} `json:"data"`
+		Error interface{} `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&res); err != nil {
+		return nil, fmt.Errorf("decode get media error (id=%s): %w", mediaID, err)
+	}
+	if res.Error != nil {
+		return nil, fmt.Errorf("API error in get media (id=%s): %v", mediaID, res.Error)
+	}
+	for i := range res.Data.Media {
+		if res.Data.Media[i].ID == mediaID {
+			return &res.Data.Media[i], nil
+		}
+	}
+	return nil, nil
+}
+
 func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) {
 	u := fmt.Sprintf("%s/media/folder?action=save", c.baseURL)
 	payload := map[string]interface{}{
