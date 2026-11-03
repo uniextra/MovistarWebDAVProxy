@@ -129,6 +129,10 @@ type MemoryFile struct {
 	Size      int64
 	ModTime   time.Time
 	URL       string
+	// URLConfirmed indica que URL ya se ha obtenido de SAPI consultando el archivo por su ID.
+	URLConfirmed bool
+	// URLLookupFailedAt es el momento del último error al consultar la URL (cero si no hubo).
+	URLLookupFailedAt time.Time
 	MD5       string
 }
 
@@ -535,7 +539,7 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 			ID:               mem.ID,
 			Name:             mem.Name,
 			Size:             mem.Size,
-			URL:              mem.URL,
+			URL:              mem.downloadURL(mfs),
 			FolderID:         mem.FolderID,
 			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 		}
@@ -544,6 +548,56 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 	mfs.cacheMu.RUnlock()
 
 	return NewWebDAVFileReader(mfs, cleanPath, *mediaInfo), nil
+}
+
+// urlLookupErrorBackoff es el tiempo durante el que no se vuelve a consultar la URL de
+// un archivo tras un error de SAPI, para no insistir contra un servicio que está fallando.
+var urlLookupErrorBackoff = 10 * time.Second
+
+// downloadURL devuelve la URL de descarga de un archivo recién subido.
+//
+// La respuesta de subida de SAPI no siempre incluye la URL de descarga; en ese caso
+// el cliente construye una por defecto que el servidor no sirve, y las lecturas
+// inmediatas tras subir (p. ej. "restic check" justo después de un backup) devuelven
+// un cuerpo vacío durante toda la vida de la caché de subidas.
+//
+// Se consulta a SAPI ese archivo por su ID (una sola petición, sin esperas):
+//   - si devuelve la URL, se usa y se recuerda para las lecturas siguientes;
+//   - si aún no lo conoce (indexándose), se usa la URL conocida y se volverá a
+//     consultar en la siguiente lectura;
+//   - si la consulta falla, se usa la URL conocida, se registra el error y no se
+//     reintenta para ese archivo hasta pasado urlLookupErrorBackoff.
+//
+// En ningún caso es peor que el comportamiento anterior (usar siempre la URL conocida).
+func (mem *MemoryFile) downloadURL(mfs *MovistarFS) string {
+	mfs.cacheMu.RLock()
+	known, confirmed, failedAt := mem.URL, mem.URLConfirmed, mem.URLLookupFailedAt
+	mfs.cacheMu.RUnlock()
+	if confirmed || mem.ID == "" {
+		return known
+	}
+	if !failedAt.IsZero() && time.Since(failedAt) < urlLookupErrorBackoff {
+		return known
+	}
+
+	item, err := mfs.client.GetMediaByID(mem.ID)
+	switch {
+	case err != nil:
+		logger.Log("[WebDAV] ⚠️ No se pudo consultar la URL de descarga de '%s' (ID: %s): %v. Se usa la conocida; nuevo intento en %s.", mem.Name, mem.ID, err, urlLookupErrorBackoff)
+		mfs.cacheMu.Lock()
+		mem.URLLookupFailedAt = time.Now()
+		mfs.cacheMu.Unlock()
+		return known
+	case item == nil || item.URL == "":
+		return known
+	default:
+		mfs.cacheMu.Lock()
+		mem.URL = item.URL
+		mem.URLConfirmed = true
+		mem.URLLookupFailedAt = time.Time{}
+		mfs.cacheMu.Unlock()
+		return item.URL
+	}
 }
 
 func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
