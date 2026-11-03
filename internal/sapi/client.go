@@ -255,6 +255,7 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		ResponseHeaderTimeout: 60 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20, // <- IMPRESCINDIBLE: evita destruir sockets idle hacia micloud.movistar.es
 	}
 
 	httpClient := &http.Client{
@@ -590,6 +591,43 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 			}
 			// Restaurar cuerpo legible si RefreshSession falló para evitar "http: read on closed response body"
 			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+	}
+
+	// Manejo de retroceso suave ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
+	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) &&
+		(req.Body == nil || req.GetBody != nil) {
+		const maxBackoffRetries = 3
+		for retry := 1; retry <= maxBackoffRetries; retry++ {
+			backoff := time.Duration(1<<(retry-1)) * time.Second
+			jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
+			sleepDur := backoff + jitter
+			logger.Log("[SAPI] ⏳ Rate limit o servicio ocupado (%s %s HTTP %d). Reintentando en %v (%d/%d)...", req.Method, req.URL.Path, resp.StatusCode, sleepDur, retry, maxBackoffRetries)
+			resp.Body.Close()
+			time.Sleep(sleepDur)
+
+			var retryBody io.Reader
+			if req.GetBody != nil {
+				rb, err := req.GetBody()
+				if err != nil {
+					return nil, err
+				}
+				retryBody = rb
+			}
+			newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
+			if err != nil {
+				return nil, err
+			}
+			newReq.Header = req.Header.Clone()
+			respRetry, errRetry := c.httpClient.Do(newReq)
+			if errRetry != nil {
+				return nil, errRetry
+			}
+			c.processSAPIResponse(respRetry)
+			if respRetry.StatusCode != http.StatusTooManyRequests && respRetry.StatusCode != http.StatusServiceUnavailable {
+				return respRetry, nil
+			}
+			resp = respRetry
 		}
 	}
 
@@ -1288,6 +1326,22 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				continue
 			}
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
+		}
+
+		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			if attempt < maxRetries {
+				backoff := time.Duration(1<<attempt) * time.Second
+				if backoff > 8*time.Second {
+					backoff = 8 * time.Second
+				}
+				jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
+				sleepDur := backoff + jitter
+				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o servicio ocupado (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
+				time.Sleep(sleepDur)
+				continue
+			}
+			return nil, fmt.Errorf("upload failed: rate limited or service unavailable (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, bStr)
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {

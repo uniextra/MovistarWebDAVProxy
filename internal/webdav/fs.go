@@ -24,8 +24,10 @@ import (
 )
 
 var (
-	transferSem         = make(chan struct{}, 3)
-	uploadBufferSem     = make(chan struct{}, 3)
+	uploadSem           = make(chan struct{}, 4) // Hasta 4 subidas simultáneas (óptimo Duplicati)
+	downloadSem         = make(chan struct{}, 4) // Hasta 4 descargas simultáneas (óptimo restore)
+	globalTransferSem   = make(chan struct{}, 5) // Techo conjunto para no sobrepasar la cuota por token de SAPI
+	uploadBufferSem     = make(chan struct{}, 4) // Límite de ingestión PUT local
 	folderLocks         sync.Map
 	ErrUploadTooLarge   = errors.New("file exceeds maximum allowed upload size")
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
@@ -962,8 +964,12 @@ func (w *WebDAVFileWriter) Close() error {
 	sizeMB := float64(w.size) / (1024 * 1024)
 	logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
 
-	transferSem <- struct{}{}
-	defer func() { <-transferSem }()
+	uploadSem <- struct{}{}
+	globalTransferSem <- struct{}{}
+	defer func() {
+		<-globalTransferSem
+		<-uploadSem
+	}()
 
 	var reader io.Reader
 	var cachedContent []byte
@@ -1070,10 +1076,12 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 		} else {
 			logger.Log("[WebDAV] ⬇ Descargando: '%s' (%.2f MB) desde Movistar Cloud...", r.item.Name, sizeMB)
 		}
-		transferSem <- struct{}{}
+		downloadSem <- struct{}{}
+		globalTransferSem <- struct{}{}
 		rawStream, err := r.mfs.client.DownloadFileStreamRange(r.item, pos)
 		if err != nil {
-			<-transferSem
+			<-globalTransferSem
+			<-downloadSem
 			return 0, err
 		}
 		semStream := &semaphoreReleaseReader{stream: rawStream}
@@ -1151,26 +1159,26 @@ type semaphoreReleaseReader struct {
 	mu       sync.Mutex
 }
 
+func (s *semaphoreReleaseReader) release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.released {
+		s.released = true
+		<-globalTransferSem
+		<-downloadSem
+	}
+}
+
 func (s *semaphoreReleaseReader) Read(p []byte) (n int, err error) {
 	n, err = s.stream.Read(p)
 	if err == io.EOF {
-		s.mu.Lock()
-		if !s.released {
-			s.released = true
-			<-transferSem
-		}
-		s.mu.Unlock()
+		s.release()
 	}
 	return n, err
 }
 
 func (s *semaphoreReleaseReader) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.released {
-		s.released = true
-		<-transferSem
-	}
+	s.release()
 	return s.stream.Close()
 }
 
