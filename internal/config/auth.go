@@ -296,8 +296,9 @@ func ExtractClientIPWithTrusted(r *http.Request, trusted *IPMatcher) string {
 	return peerIP
 }
 
-// DefaultBruteForceExcludedSubnets subredes puente estándar de Docker excluidas por defecto para evitar bloqueos globales.
-const DefaultBruteForceExcludedSubnets = "127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16"
+// DefaultBruteForceExcludedSubnets subredes puente estándar de Docker (rango RFC 1918 172.16.0.0/12) y loopback
+// excluidas por defecto para evitar bloqueos globales del gateway de contenedores.
+const DefaultBruteForceExcludedSubnets = "127.0.0.1,::1,172.16.0.0/12"
 
 // LoadBruteForceExclusions carga las IPs y subredes excluidas de bloqueo por fuerza bruta.
 // Permite que peticiones originadas desde el gateway de Docker o localhost no queden bloqueadas con 429,
