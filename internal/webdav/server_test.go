@@ -67,6 +67,18 @@ func newMockSAPIServer(t *testing.T) *httptest.Server {
 			})
 		case path == "/sapi/media" && action == "softdelete":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case path == "/sapi/media/folder" && action == "softdelete":
+			if r.URL.Query().Get("id") == "" {
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]string{
+						"code":    "COM-1011",
+						"message": "Missing required parameter",
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": "Folders have been softdeleted"})
 		default:
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"data":{}}`))
@@ -245,5 +257,13 @@ func TestWebDAV_UploadMaxBytesAndOperations(t *testing.T) {
 	srv.ServeHTTP(delRec, delReq)
 	if delRec.Code != http.StatusNoContent && delRec.Code != http.StatusOK {
 		t.Errorf("expected DELETE 204/200, got %d", delRec.Code)
+	}
+
+	// 5. DELETE de carpeta existente -> 204 No Content
+	delFolderReq := httptest.NewRequest("DELETE", "/Backups", nil)
+	delFolderRec := httptest.NewRecorder()
+	srv.ServeHTTP(delFolderRec, delFolderReq)
+	if delFolderRec.Code != http.StatusNoContent && delFolderRec.Code != http.StatusOK {
+		t.Errorf("expected DELETE folder 204/200, got %d (body: %s)", delFolderRec.Code, delFolderRec.Body.String())
 	}
 }

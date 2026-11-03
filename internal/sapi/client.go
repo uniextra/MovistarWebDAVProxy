@@ -1084,7 +1084,7 @@ func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
 	if permanent {
 		action = "delete"
 	}
-	u := fmt.Sprintf("%s/media/folder?action=%s", c.baseURL, action)
+	u := fmt.Sprintf("%s/media/folder?action=%s&id=%d", c.baseURL, action, folderID)
 	payload := map[string]interface{}{
 		"data": map[string]interface{}{
 			"folders": []int64{folderID},
@@ -1102,9 +1102,19 @@ func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
 	}
 	defer resp.Body.Close()
 
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("delete folder failed (%d): %s", resp.StatusCode, string(b))
+	}
+
+	var res struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
+		return fmt.Errorf("delete folder API error: %s (%s)", res.Error.Message, res.Error.Code)
 	}
 	return nil
 }

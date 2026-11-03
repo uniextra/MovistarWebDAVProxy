@@ -2,6 +2,30 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.1.2] - 2026-11-03
+
+### 🐛 Correcciones y Mejoras de Compatibilidad
+- **Lectura Inmediata en O2 Cloud (PR #2, Issue #5):**
+  - Consulta a SAPI por ID (`media?action=get`) para entradas recién subidas cuya respuesta no incluía `url` de descarga, evitando el error `COM-1005 Unsupported operation` y descargas de 0 bytes en herramientas como `restic check` o `rclone check --download`.
+- **Conservación de Timestamp Original con `X-OC-Mtime` (PR #3):**
+  - Soporte completo para la cabecera estándar de facto `X-OC-Mtime` (segundos Unix) utilizada por `rclone` y clientes Nextcloud/ownCloud.
+  - Envío de `modificationdate` a SAPI y respuesta `X-OC-Mtime: accepted`.
+  - Separación en `MemoryFile` entre `ModTime` (fecha servida al cliente) y `CachedAt` (caducidad de la caché en memoria).
+- **Protección contra Subidas Cortadas e Incompletas (Issue #4):**
+  - Incorporado `uploadGuard` en el cuerpo de peticiones `PUT`. Si la conexión con el cliente WebDAV se interrumpe o la cantidad de bytes recibidos no coincide con el `Content-Length` anunciado, se limpia el temporal y se aborta la subida sin modificar ni corromper archivos existentes en la nube.
+- **Corrección de Colisiones de Nombres Parecidos (Issue #4):**
+  - Eliminada la heurística agresiva de expresiones regulares para sufijos ` (1)`, permitiendo que archivos como `foto.jpg` y `foto (1).jpg` se traten como archivos completamente independientes al buscar, listar (`Readdir`) y borrar.
+- **Corrección en Borrado de Carpetas en la Nube (Issue #7):**
+  - Añadido parámetro obligatorio `&id=<folder_id>` en la llamada SAPI `POST /media/folder?action=softdelete`. Anteriormente SAPI devolvía código interno `COM-1011: Missing required parameter` provocando que las carpetas eliminadas por WebDAV no se borraran realmente en la nube de Movistar/O2.
+  - Validación explícita de errores devueltos por SAPI al borrar carpetas y archivos, evitando reportar éxito falso.
+- **Deadlock de RWMutex en Listado de Directorios:**
+  - Corregido auto-deadlock en `WebDAVDirReader.Readdir` que congelaba el servidor WebDAV al solicitar `getMedia()` mientras se retenía un `RLock`.
+- **Compatibilidad con Windows WebClient:**
+  - Soporte para nombres de usuario con prefijo de dominio (`PC\usuario` o `.\usuario`) al validar Basic Auth.
+  - Prevención de error `http: read on closed response body` en peticiones rechazadas con `HTTP 401`.
+- **Documentación y Docker:**
+  - Actualizadas las instrucciones y ejemplos de `README.md` y `docker-compose.yml` para usar `:latest` por defecto.
+
 ## [v2.1.0] - 2026-11-02
 
 ### 🔒 Seguridad y Hardening

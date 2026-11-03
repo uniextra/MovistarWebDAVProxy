@@ -651,7 +651,10 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 
 	if isFolder && folderInfo != nil {
 		logger.Log("[WebDAV] 🗑 Eliminando carpeta: '%s' (ID: %d)...", folderInfo.Name, folderInfo.ID)
-		_ = mfs.client.DeleteFolder(folderInfo.ID, false)
+		if err := mfs.client.DeleteFolder(folderInfo.ID, false); err != nil {
+			logger.Log("[WebDAV] ❌ Error eliminando carpeta '%s' (ID: %d): %v", folderInfo.Name, folderInfo.ID, err)
+			return err
+		}
 		mfs.cacheMu.Lock()
 		delete(mfs.createdFolders, cleanPath)
 		delete(mfs.uploadCache, cleanPath)
@@ -664,7 +667,10 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 	if !isFolder && mediaInfo != nil {
 		logger.Log("[WebDAV] 🗑 Eliminando archivo: '%s' (ID: %s)...", mediaInfo.Name, mediaInfo.ID)
 		if mediaInfo.ID != "" {
-			_ = mfs.client.DeleteFile(mediaInfo.ID)
+			if err := mfs.client.DeleteFile(mediaInfo.ID); err != nil {
+				logger.Log("[WebDAV] ❌ Error eliminando archivo '%s' (ID: %s): %v", mediaInfo.Name, mediaInfo.ID, err)
+				return err
+			}
 		}
 		mfs.cacheMu.Lock()
 		delete(mfs.uploadCache, cleanPath)

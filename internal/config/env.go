@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	Version          = "v2.1.0"
+	Version          = "v2.1.2"
 	encryptedPrefix  = "enc:v1:"
 	tokensEncryptEnv = "TOKENS_ENCRYPTION_KEY"
 )
