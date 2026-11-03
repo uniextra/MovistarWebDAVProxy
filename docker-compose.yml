@@ -13,6 +13,10 @@ services:
       - WEBDAV_PASSWORD=${WEBDAV_PASSWORD:-}
       - WEBUI_USER=${WEBUI_USER:-}
       - WEBUI_PASSWORD=${WEBUI_PASSWORD:-}
+      # Redes y proxies inversos (opcional):
+      # - TRUSTED_PROXIES=127.0.0.1,172.18.0.0/16  # Solo se evalúan cabeceras X-Forwarded-For / X-Real-IP de estos orígenes
+      # - BRUTE_FORCE_EXCLUDED_IPS=127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16 # IPs/subredes exentas de bloqueo HTTP 429
+      # - WEBDAV_BUFFER_MB=32 # Tamaño de buffer RAM para subidas PUT antes de hacer spool a disco (por defecto 32 MB)
     ports:
       - "${BIND_IP:-0.0.0.0}:${WEB_PORT:-5000}:5000"      # Panel Web de gestión y logs (usa BIND_IP=127.0.0.1 para acceso solo local)
       - "${BIND_IP:-0.0.0.0}:${WEBDAV_PORT:-5050}:8080"   # Endpoint WebDAV (Duplicati / Synology HyperBackup)

@@ -120,7 +120,7 @@ func TestWebDAV_BasicAuthAndRateLimit(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without auth, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Header().Get("WWW-Authenticate"), `Basic realm="Movistar WebDAV"`) {
+	if !strings.Contains(rec.Header().Get("WWW-Authenticate"), `Basic realm="WebDAV"`) {
 		t.Errorf("missing or invalid WWW-Authenticate header: %q", rec.Header().Get("WWW-Authenticate"))
 	}
 
@@ -265,5 +265,93 @@ func TestWebDAV_UploadMaxBytesAndOperations(t *testing.T) {
 	srv.ServeHTTP(delFolderRec, delFolderReq)
 	if delFolderRec.Code != http.StatusNoContent && delFolderRec.Code != http.StatusOK {
 		t.Errorf("expected DELETE folder 204/200, got %d (body: %s)", delFolderRec.Code, delFolderRec.Body.String())
+	}
+}
+
+func TestWebDAV_AllMethodsAuthAndWindowsCompatibility(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{
+		Username: "davuser",
+		Password: "dav:pass:with:colons",
+	})
+	defer cleanup()
+
+	// 1. Todos los métodos WebDAV sin credenciales deben devolver 401 Unauthorized y WWW-Authenticate: Basic realm="WebDAV"
+	protectedMethods := []string{
+		"PROPFIND", "GET", "HEAD", "PUT", "DELETE",
+		"MKCOL", "MOVE", "COPY", "LOCK", "UNLOCK",
+	}
+
+	for _, m := range protectedMethods {
+		t.Run("Unauthenticated_"+m, func(t *testing.T) {
+			req := httptest.NewRequest(m, "/hello.txt", nil)
+			req.RemoteAddr = "192.168.1.100:12345"
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("method %s: expected 401, got %d", m, rec.Code)
+			}
+			authHeader := rec.Header().Get("WWW-Authenticate")
+			if authHeader != `Basic realm="WebDAV"` {
+				t.Errorf("method %s: expected WWW-Authenticate: Basic realm=\"WebDAV\", got %q", m, authHeader)
+			}
+		})
+	}
+
+	// 2. OPTIONS sin credenciales devuelve 200 OK para descubrimiento de Windows WebClient
+	t.Run("OPTIONS_Discovery_NoAuth", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", "/", nil)
+		req.RemoteAddr = "192.168.1.100:12345"
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for OPTIONS discovery, got %d", rec.Code)
+		}
+		if rec.Header().Get("MS-Author-Via") != "DAV" {
+			t.Errorf("expected MS-Author-Via: DAV")
+		}
+		if dav := rec.Header().Get("DAV"); !strings.Contains(dav, "1") {
+			t.Errorf("expected DAV compliance header containing 1, got %q", dav)
+		}
+	})
+
+	// 3. OPTIONS con credenciales incorrectas debe devolver 401
+	t.Run("OPTIONS_BadAuth", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", "/", nil)
+		req.SetBasicAuth("davuser", "badpass")
+		req.RemoteAddr = "192.168.1.100:12345"
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for OPTIONS with bad auth, got %d", rec.Code)
+		}
+		if rec.Header().Get("WWW-Authenticate") != `Basic realm="WebDAV"` {
+			t.Errorf("expected WWW-Authenticate: Basic realm=\"WebDAV\", got %q", rec.Header().Get("WWW-Authenticate"))
+		}
+	})
+
+	// 4. Compatibilidad con Windows: normalización de DOMAIN\user, \user y contraseñas con dos puntos
+	testUsers := []string{
+		`CORP\davuser`,
+		`\davuser`,
+		`   davuser   `,
+		`davuser`,
+	}
+
+	for _, u := range testUsers {
+		t.Run("WindowsAuth_"+u, func(t *testing.T) {
+			req := httptest.NewRequest("PROPFIND", "/", nil)
+			req.Header.Set("Depth", "0")
+			req.SetBasicAuth(u, "dav:pass:with:colons")
+			req.RemoteAddr = "192.168.1.100:12345"
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusMultiStatus {
+				t.Fatalf("user %q: expected 207 MultiStatus, got %d", u, rec.Code)
+			}
+		})
 	}
 }

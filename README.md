@@ -100,8 +100,16 @@ docker run -d \
 
 ## 🔒 Seguridad y Variables de Entorno
 
-### Recomendaciones de Seguridad
-* **Autenticación HTTP Basic (`WEBDAV_USER` / `WEBDAV_PASSWORD`):** A partir de `v2.1.0`, tanto el servidor WebDAV como el panel web validan usuario y contraseña en tiempo constante con protección contra fuerza bruta (rate-limit por IP tras 10 fallos/minuto). Si actualizas un contenedor existente sin estas variables definidas, el servicio arrancará en modo retrocompatible emitiendo un aviso (`[WARNING]`), salvo que actives `REQUIRE_AUTH=true`.
+### Recomendaciones de Seguridad y Autenticación
+* **Autenticación HTTP Basic Robusta y Normalización:** Tanto el servidor WebDAV como el panel web validan usuario y contraseña en tiempo constante contra ataques de temporización (`subtle.ConstantTimeCompare`).
+  * **Normalización de usuarios Windows:** Los prefijos de dominio habituales de Windows WebClient (`DOMAIN\usuario` o `\usuario`) se normalizan automáticamente a `usuario`, ignorando espacios en blanco accidentales.
+  * **Preservación intacta de contraseñas:** La contraseña se preserva exactamente tal como se envía, permitiendo contraseñas complejas con dos puntos (`:`) o espacios internos.
+  * **Desafío RFC 4918 (`401 Unauthorized`):** Toda petición no autenticada o con credenciales erróneas recibe un código HTTP `401 Unauthorized` junto al encabezado estándar `WWW-Authenticate: Basic realm="WebDAV"`.
+  * **Descubrimiento Windows WebClient:** La petición inicial `OPTIONS /` sin credenciales devuelve `200 OK` con `MS-Author-Via: DAV` y cabeceras de conformidad `DAV: 1, 2`, permitiendo al explorador de Windows identificar el servicio antes de solicitar credenciales en `PROPFIND /`.
+* **Topologías de Red Docker y Detección de IP:**
+  * **Docker Bridge (por defecto):** Mediante `BRUTE_FORCE_EXCLUDED_IPS`, las subredes puente estándar de Docker (`172.17.0.0/16`, `172.18.0.0/16`) y loopback (`127.0.0.1`, `::1`) quedan excluidas del bloqueo por fuerza bruta (HTTP 429). Esto evita que múltiples clientes compartiendo el gateway de Docker (ej. `172.18.0.1`) queden bloqueados accidentalmente. **La autenticación Basic Auth se exige y valida en todo momento (las exclusiones solo evitan el baneo 429, nunca eluden la clave).**
+  * **Proxy Inverso (Nginx, Traefik, Caddy, Synology DSM Reverse Proxy):** Al configurar `TRUSTED_PROXIES` (ej. `127.0.0.1,172.18.0.0/16`), el proxy extrae la IP real del cliente de `X-Forwarded-For` o `X-Real-IP`. Si la petición proviene de un origen no confiable, las cabeceras de reenvío se descartan de forma estricta para evitar spoofing.
+  * **Docker Host (`network_mode: host`):** En Linux nativo permite ver la IP real directa del socket. En Docker Desktop (Windows/macOS), debido a la máquina virtual interna de virtualización, el modo bridge con mapeo de puertos o proxy inverso es la topología recomendada.
 * **No exponer directamente a Internet:** Si necesitas acceder desde fuera de tu red local, coloca siempre un proxy inverso con **TLS/HTTPS** delante (Caddy, Nginx, Traefik o túnel VPN/WireGuard/Tailscale).
 * **Contenedor sin privilegios (`non-root`):** La imagen oficial ejecuta el servidor bajo el usuario sin privilegios `app` (`UID 10001`). En actualizaciones sobre volúmenes existentes, el entrypoint migra automáticamente los permisos de `/app/tokens` antes de soltar privilegios.
 
@@ -121,7 +129,10 @@ docker run -d \
 | `TOKENS_DIR` | `/app/tokens` | Directorio donde se almacenan las credenciales OAuth2 (`0700`). |
 | `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave opcional para cifrar en reposo (AES-256-GCM) los tokens guardados en disco. |
 | `MAX_UPLOAD_MB` | `4096` | Tamaño máximo permitido por archivo en subidas `PUT` (en MB). |
-| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores a 10 MB. |
+| `WEBDAV_BUFFER_MB` | `32` | Tamaño máximo del búfer en RAM (MB) antes de hacer spool a disco (óptimo Duplicati). |
+| `TRUSTED_PROXIES` | *(vacío)* | Lista de IPs/CIDRs de proxies de confianza para evaluar `X-Forwarded-For` / `X-Real-IP`. |
+| `BRUTE_FORCE_EXCLUDED_IPS` | `127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16` | IPs/subredes exentas de bloqueo HTTP 429 (mantiene Basic Auth activo). |
+| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
 
 > **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.

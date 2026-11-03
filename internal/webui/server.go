@@ -129,13 +129,13 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
 				return
 			}
-			user, pass, ok := r.BasicAuth()
-			if !ok || !s.authCfg.Validate(user, pass) {
-				if ok {
+			rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
+			if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
+				if hasAuth && (rawUser != "" || pass != "") {
 					s.rateLimiter.RecordFailure(clientIP)
-					logger.Log("[WebUI] 🔒 Intento de acceso fallido al panel desde %s (usuario: %s)", clientIP, logger.Mask(user))
+					logger.Log("[WebUI] 🔒 Intento de acceso fallido al panel desde %s (usuario: %s)", clientIP, logger.Mask(rawUser))
 				}
-				w.Header().Set("WWW-Authenticate", `Basic realm="Movistar WebDAV Panel"`)
+				w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}

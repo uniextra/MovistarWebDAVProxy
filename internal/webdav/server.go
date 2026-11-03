@@ -113,20 +113,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Validación Basic Auth y rate-limit por IP (salvo OPTIONS sin credenciales para discovery)
 	if s.authCfg.IsEnabled() {
-		_, _, hasAuth := r.BasicAuth()
+		rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
 		if method != "OPTIONS" || hasAuth {
 			if s.rateLimiter.IsBlocked(clientIP) {
 				logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
 				http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
 				return
 			}
-			user, pass, ok := r.BasicAuth()
-			if !ok || !s.authCfg.Validate(user, pass) {
-				if ok && (user != "" || pass != "") {
+			if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
+				if hasAuth && (rawUser != "" || pass != "") {
 					s.rateLimiter.RecordFailure(clientIP)
-					logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s)", clientIP, logger.Mask(user))
+					logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s)", clientIP, logger.Mask(rawUser))
 				}
-				w.Header().Set("WWW-Authenticate", `Basic realm="Movistar WebDAV"`)
+				w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
