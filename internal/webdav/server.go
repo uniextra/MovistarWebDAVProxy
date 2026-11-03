@@ -166,6 +166,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.activeWG.Add(1)
 		defer s.activeWG.Done()
 
+		// Conservar la fecha de modificación original si el cliente envía X-OC-Mtime
+		r = withOCMtime(w, r)
+
 		pw := &putStatusInterceptor{ResponseWriter: w, exceededFlag: &exceededFlag}
 		s.handler.ServeHTTP(pw, r)
 		return

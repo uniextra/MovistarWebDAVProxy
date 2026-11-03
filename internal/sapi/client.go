@@ -1124,12 +1124,19 @@ func (c *Client) DeleteFile(mediaID string) error {
 	return errors.New("delete file failed tras agotar reintentos")
 }
 
-func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string) (*MediaItem, error) {
+// UploadFileToFolder sube un archivo. Si modTime no es cero, se envía como fecha de
+// modificación del archivo en la nube (p. ej. la original, recibida vía X-OC-Mtime);
+// si es cero, se usa la hora actual.
+func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
 	c.mu.RLock()
 	uploadEndpoint := fmt.Sprintf("%s/sapi/upload?action=save&acceptasynchronous=true", c.uploadURL)
 	c.mu.RUnlock()
 
 	nowRFC := time.Now().UTC().Format("20060102T150405Z")
+	modRFC := nowRFC
+	if !modTime.IsZero() {
+		modRFC = modTime.UTC().Format("20060102T150405Z")
+	}
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
@@ -1137,7 +1144,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 	metaData := map[string]interface{}{
 		"name":             fileName,
 		"size":             size,
-		"modificationdate": nowRFC,
+		"modificationdate": modRFC,
 		"creationdate":     nowRFC,
 		"contenttype":      mimeType,
 		"folderid":         folderID,
@@ -1286,7 +1293,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			URL:              finalURL,
 			FolderID:         folderID,
 			CreationDate:     FlexDate(nowRFC),
-			ModificationDate: FlexDate(nowRFC),
+			ModificationDate: FlexDate(modRFC),
 		}, nil
 	}
 

@@ -127,7 +127,8 @@ type MemoryFile struct {
 	FolderID  int64
 	Content   []byte
 	Size      int64
-	ModTime   time.Time
+	ModTime   time.Time // fecha de modificación que se muestra al cliente
+	CachedAt  time.Time // momento en que entró en la caché (caducidad)
 	URL       string
 	MD5       string
 }
@@ -511,7 +512,9 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 			existingID = mediaInfo.ID
 		}
 
-		return NewWebDAVFileWriter(mfs, cleanPath, fileName, parentFolder.ID, existingID), nil
+		fw := NewWebDAVFileWriter(mfs, cleanPath, fileName, parentFolder.ID, existingID)
+		fw.modTime = ocMtimeFromContext(ctx)
+		return fw, nil
 	}
 
 	// Modo lectura
@@ -745,6 +748,7 @@ type WebDAVFileWriter struct {
 	closed         bool
 	semAcquired    bool
 	failed         bool
+	modTime        time.Time // fecha pedida por el cliente (X-OC-Mtime); cero = ahora
 }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
@@ -877,7 +881,7 @@ func (w *WebDAVFileWriter) Close() error {
 	}
 
 	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
-	media, err := w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.existingID)
+	media, err := w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.existingID, w.modTime)
 	if err != nil {
 		logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
 		return err
@@ -887,6 +891,10 @@ func (w *WebDAVFileWriter) Close() error {
 
 	w.mfs.cacheMu.Lock()
 	now := time.Now()
+	modTime := now
+	if !w.modTime.IsZero() {
+		modTime = w.modTime
+	}
 	delete(w.mfs.deletedTombstones, w.path)
 	w.mfs.uploadCache[w.path] = &MemoryFile{
 		ID:       media.ID,
@@ -894,13 +902,14 @@ func (w *WebDAVFileWriter) Close() error {
 		FolderID: w.parentFolderID,
 		Content:  cachedContent,
 		Size:     w.size,
-		ModTime:  now,
+		ModTime:  modTime,
+		CachedAt: now,
 		URL:      media.URL,
 	}
 
 	// Limpieza de entradas expiradas para prevenir fugas de memoria
 	for p, mem := range w.mfs.uploadCache {
-		if now.Sub(mem.ModTime) > 15*time.Minute {
+		if now.Sub(mem.CachedAt) > 15*time.Minute {
 			delete(w.mfs.uploadCache, p)
 		}
 	}
@@ -924,7 +933,11 @@ func (w *WebDAVFileWriter) Read(p []byte) (n int, err error) { return 0, io.EOF 
 func (w *WebDAVFileWriter) Seek(offset int64, whence int) (int64, error) { return 0, nil }
 func (w *WebDAVFileWriter) Readdir(count int) ([]os.FileInfo, error) { return nil, fs.ErrInvalid }
 func (w *WebDAVFileWriter) Stat() (os.FileInfo, error) {
-	return &VirtualFileInfo{name: w.name, size: w.size, mode: 0644, modTime: time.Now()}, nil
+	modTime := time.Now()
+	if !w.modTime.IsZero() {
+		modTime = w.modTime
+	}
+	return &VirtualFileInfo{name: w.name, size: w.size, mode: 0644, modTime: modTime}, nil
 }
 
 type WebDAVFileReader struct {
