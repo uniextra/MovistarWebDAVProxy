@@ -1,6 +1,6 @@
 services:
   movistar-webdav-proxy:
-    image: uniextra/movistar-webdav-proxy:v2.1.0
+    image: uniextra/movistar-webdav-proxy:latest
     container_name: movistar-webdav-proxy
     restart: unless-stopped
     read_only: true

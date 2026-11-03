@@ -2,6 +2,7 @@ package webdav
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -159,6 +160,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 			return
 		}
+
+		// Vigilar que el cuerpo llegue entero (ver uploadGuard en fs.go).
+		guard := &uploadGuard{expected: r.ContentLength}
+		if r.Body != nil {
+			r.Body = &guardedBody{rc: r.Body, guard: guard}
+		}
+		r = r.WithContext(context.WithValue(r.Context(), uploadGuardKey{}, guard))
+
 		var exceededFlag atomic.Bool
 		if maxBytes > 0 && r.Body != nil {
 			r.Body = &maxUploadReader{rc: r.Body, remaining: maxBytes, path: urlPath, exceededFlag: &exceededFlag}

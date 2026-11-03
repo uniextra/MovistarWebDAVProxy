@@ -52,7 +52,7 @@ Crea un archivo `docker-compose.yml`:
 ```yaml
 services:
   movistar-webdav-proxy:
-    image: uniextra/movistar-webdav-proxy:v2.1.0
+    image: uniextra/movistar-webdav-proxy:latest
     container_name: movistar-webdav-proxy
     restart: unless-stopped
     read_only: true
@@ -93,7 +93,7 @@ docker run -d \
   -p 5000:5000 \
   -p 5050:8080 \
   -v movistar_webdav_tokens:/app/tokens \
-  uniextra/movistar-webdav-proxy:v2.1.0
+  uniextra/movistar-webdav-proxy:latest
 ```
 
 ---

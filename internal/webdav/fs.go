@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"mime"
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/webdav"
@@ -23,12 +24,48 @@ import (
 )
 
 var (
-	transferSem       = make(chan struct{}, 3)
-	uploadBufferSem   = make(chan struct{}, 3)
-	collisionRegex    = regexp.MustCompile(` \(\d+\)(\.[^.]+)?$`)
-	folderLocks       sync.Map
-	ErrUploadTooLarge = errors.New("file exceeds maximum allowed upload size")
+	transferSem         = make(chan struct{}, 3)
+	uploadBufferSem     = make(chan struct{}, 3)
+	folderLocks         sync.Map
+	ErrUploadTooLarge   = errors.New("file exceeds maximum allowed upload size")
+	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
 )
+
+type uploadGuardKey struct{}
+
+type uploadGuard struct {
+	expected int64 // Content-Length anunciado (-1 si no se sabe)
+	broken   atomic.Bool
+}
+
+type guardedBody struct {
+	rc    io.ReadCloser
+	guard *uploadGuard
+}
+
+func (g *guardedBody) Read(p []byte) (int, error) {
+	n, err := g.rc.Read(p)
+	if err != nil && err != io.EOF {
+		g.guard.broken.Store(true)
+	}
+	return n, err
+}
+
+func (g *guardedBody) Close() error { return g.rc.Close() }
+
+// incomplete dice si la subida está incompleta y por qué.
+func (u *uploadGuard) incomplete(size int64) (bool, string) {
+	if u == nil {
+		return false, ""
+	}
+	if u.broken.Load() {
+		return true, "la conexión se cortó"
+	}
+	if u.expected >= 0 && size != u.expected {
+		return true, fmt.Sprintf("llegaron %d de %d bytes", size, u.expected)
+	}
+	return false, ""
+}
 
 // GetMaxUploadMB devuelve el límite máximo de subida en MB (por defecto 4096 MB).
 func GetMaxUploadMB() int64 {
@@ -388,27 +425,21 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 		if isLast {
 			media := mfs.getMedia(currentID)
 			var foundMedia *sapi.MediaItem
-			stem := strings.TrimSuffix(part, filepath.Ext(part))
+			// Solo el nombre exacto (y, si no está, sin mirar mayúsculas). Antes también valía
+			// "foto (1).jpg" por "foto.jpg": se sobrescribía o borraba otra foto distinta.
 			for _, m := range media {
-				mCopy := m
-				if m.Name == part || strings.EqualFold(m.Name, part) {
+				if m.Name == part {
+					mCopy := m
 					foundMedia = &mCopy
 					break
 				}
-				// Tolerancia sufijos de colisión ' (1)'
-				cleanMName := collisionRegex.ReplaceAllString(m.Name, "$1")
-				if cleanMName != "" && (cleanMName == part || strings.EqualFold(cleanMName, part)) {
-					foundMedia = &mCopy
-					break
-				}
-				if strings.HasPrefix(m.Name, stem+" (") {
-					rest := m.Name[len(stem)+2:]
-					if closeParen := strings.Index(rest, ")"); closeParen != -1 {
-						digits := rest[:closeParen]
-						if _, err := strconv.Atoi(digits); err == nil {
-							foundMedia = &mCopy
-							break
-						}
+			}
+			if foundMedia == nil {
+				for _, m := range media {
+					if strings.EqualFold(m.Name, part) {
+						mCopy := m
+						foundMedia = &mCopy
+						break
 					}
 				}
 			}
@@ -518,6 +549,7 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 
 		fw := NewWebDAVFileWriter(mfs, cleanPath, fileName, parentFolder.ID, existingID)
 		fw.modTime = ocMtimeFromContext(ctx)
+		fw.guard, _ = ctx.Value(uploadGuardKey{}).(*uploadGuard)
 		return fw, nil
 	}
 
@@ -803,6 +835,7 @@ type WebDAVFileWriter struct {
 	semAcquired    bool
 	failed         bool
 	modTime        time.Time // fecha pedida por el cliente (X-OC-Mtime); cero = ahora
+	guard          *uploadGuard
 }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
@@ -906,6 +939,13 @@ func (w *WebDAVFileWriter) Close() error {
 	if w.failed {
 		w.cleanupTemp()
 		return ErrUploadTooLarge
+	}
+
+	// Si el cuerpo no llegó entero, no subir el trozo (la copia anterior queda intacta).
+	if bad, why := w.guard.incomplete(w.size); bad {
+		w.cleanupTemp()
+		logger.Log("[WebDAV] ❌ Subida incompleta, NO se sube a la nube (%s): '%s'", why, w.name)
+		return ErrUploadIncomplete
 	}
 
 	if w.tmpFile == nil && w.buf == nil {
@@ -1213,10 +1253,6 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 				continue
 			}
 			name := m.Name
-			cleanName := collisionRegex.ReplaceAllString(name, "$1")
-			if cleanName != "" && !seen[cleanName] {
-				name = cleanName
-			}
 			if !seen[name] && !isOSJunk(name) {
 				seen[name] = true
 				list = append(list, &VirtualFileInfo{name: name, size: m.Size, mode: 0644, modTime: parseTime(m.ModificationDate), isDir: false})
