@@ -861,7 +861,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		}
 
 		if oldMedia.ID != "" {
-			if err := mfs.client.UpdateMedia(oldMedia.ID, newBaseName, parentFolder.ID); err != nil {
+			if err := mfs.client.UpdateMedia(oldMedia.ID, oldMedia.Name, newBaseName, parentFolder.ID); err != nil {
 				return err
 			}
 		}
