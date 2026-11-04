@@ -156,11 +156,47 @@ Puedes montar la nube como si fuera un disco duro o carpeta compartida local:
 
 | Sistema Operativo | Método Rápido | Ruta / Comando |
 | :--- | :--- | :--- |
-| **🪟 Windows** | PowerShell / CMD | `net use M: http://TU_IP:5050 /user:admin admin /persistent:yes` |
+| **🪟 Windows** | PowerShell / CMD | `net use M: \\TU_IP@5050\DavWWWRoot /persistent:yes` |
 | **🍏 macOS** | Finder (`Cmd + K`) | `http://TU_IP:5050` (Usuario: `admin` / Clave: `admin`) |
 | **🐧 Linux** | GNOME Nautilus / `davfs2` | `dav://TU_IP:5050/` o `mount -t davfs http://TU_IP:5050 /mnt/cloud` |
 
-👉 **Para instrucciones paso a paso, ajustes del registro de Windows (límite de 50MB de Microsoft) y montaje con Rclone, consulta la [Guía Completa de Mapeo de Red](docs/network-drive.md).**
+### 🪟 Reconexión Persistente en Windows tras Reinicio (v2.2.1)
+
+A partir de la versión **v2.2.1**, el proxy incluye soporte completo para autenticación **NTLMv2 en paralelo con Basic Auth**. Esto permite que el cliente nativo de Windows (`WebClient` / `DAV Mini-Redirector`) reconecte las unidades de red mapeadas de forma automática, silenciosa y persistente tras reiniciar el equipo.
+
+Para garantizar la reconexión automática en Windows 10/11:
+
+1. **Configurar el Servicio WebClient en inicio Automático (PowerShell como Administrador):**
+   ```powershell
+   Set-Service -Name WebClient -StartupType Automatic
+   Start-Service WebClient
+   ```
+
+2. **Ajustes de Registro para Autenticación HTTP y Límite de Tamaño:**
+   ```powershell
+   # 1. Habilitar Basic Auth sobre HTTP en redes locales
+   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
+
+   # 2. Aumentar el límite máximo de archivo de 50 MB a 4 GB (4294967295 bytes)
+   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "FileSizeLimitInBytes" -Value 4294967295
+
+   # 3. Permitir envío automático de credenciales al proxy tras reiniciar
+   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "AuthForwardServerList" -Value @("http://TU_IP:5050/*")
+   Restart-Service WebClient
+   ```
+
+3. **Almacenar las Credenciales en el Administrador de Windows (cmdkey):**
+   ```powershell
+   cmdkey /add:TU_IP /user:TU_USUARIO /pass:TU_PASSWORD
+   ```
+
+4. **Mapear la Unidad de Red:**
+   ```powershell
+   net use M: \\TU_IP@5050\DavWWWRoot /persistent:yes
+   ```
+   *(También compatible con la sintaxis `net use M: http://TU_IP:5050 /user:TU_USUARIO TU_PASSWORD /persistent:yes`)*
+
+👉 **Para instrucciones paso a paso detalladas y montaje con Rclone, consulta la [Guía Completa de Mapeo de Red](docs/network-drive.md).**
 
 ---
 

@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -434,4 +435,19 @@ func (rl *AuthRateLimiter) Reset(ip string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	delete(rl.entries, ip)
+}
+
+// DescribeCredentialShape devuelve un resumen NO sensible de las credenciales recibidas
+// (longitudes y rarezas de codificación) para diagnosticar fallos de autenticación sin exponer la contraseña.
+func DescribeCredentialShape(rawUser, pass string) string {
+	nonASCII := false
+	for i := 0; i < len(pass); i++ {
+		if pass[i] > 126 || pass[i] < 32 {
+			nonASCII = true
+			break
+		}
+	}
+	return fmt.Sprintf("userLen=%d domain=%t passLen=%d passEdgeSpace=%t passNonASCII=%t",
+		len(rawUser), strings.Contains(rawUser, `\`), len(pass),
+		pass != strings.TrimSpace(pass), nonASCII)
 }

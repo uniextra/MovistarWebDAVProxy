@@ -37,6 +37,7 @@ type Server struct {
 	running     atomic.Bool
 	authCfg     config.AuthConfig
 	rateLimiter *config.AuthRateLimiter
+	ntlmAuth    *config.NTLMAuthenticator
 	activeWG    sync.WaitGroup
 }
 
@@ -50,6 +51,7 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 		fs:          fs,
 		authCfg:     authCfg,
 		rateLimiter: config.NewAuthRateLimiter(10, time.Minute),
+		ntlmAuth:    config.NewNTLMAuthenticator(),
 	}
 	h := &webdav.Handler{
 		FileSystem: fs,
@@ -111,25 +113,69 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("MS-Author-Via", "DAV")
 	}
 
-	// 1. Validación Basic Auth y rate-limit por IP (salvo OPTIONS sin credenciales para discovery)
+	// 1. Validación Basic Auth / NTLMv2 y rate-limit por IP (salvo OPTIONS sin credenciales para discovery)
 	if s.authCfg.IsEnabled() {
-		rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
-		if method != "OPTIONS" || hasAuth {
+		authHeader := r.Header.Get("Authorization")
+		if config.IsNTLMHeader(authHeader) {
 			if s.rateLimiter.IsBlocked(clientIP) {
 				logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
 				http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
 				return
 			}
-			if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
-				if hasAuth && (rawUser != "" || pass != "") {
+			challenge, isType1, ntlmUser, ok := s.ntlmAuth.HandleHandshake(r.RemoteAddr, clientIP, authHeader, s.authCfg)
+			if isType1 {
+				if r.Body != nil {
+					_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
+				}
+				w.Header().Set("WWW-Authenticate", challenge)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if !ok {
+				if r.Body != nil {
+					_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
+				}
+				if ntlmUser != "" {
 					s.rateLimiter.RecordFailure(clientIP)
-					logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s)", clientIP, logger.Mask(rawUser))
+					logger.Log("[WebDAV] 🔒 Intento de acceso NTLM fallido desde %s (usuario: %s)", clientIP, logger.Mask(ntlmUser))
 				}
 				w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+				if s.authCfg.Password != "" {
+					w.Header().Add("WWW-Authenticate", "NTLM")
+				}
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 			s.rateLimiter.Reset(clientIP)
+		} else {
+			rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(authHeader)
+			connAuthed := false
+			if !hasAuth && s.ntlmAuth != nil {
+				_, connAuthed = s.ntlmAuth.IsConnAuthenticated(r.RemoteAddr)
+			}
+			if !connAuthed && (method != "OPTIONS" || hasAuth) {
+				if s.rateLimiter.IsBlocked(clientIP) {
+					logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
+					http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
+					return
+				}
+				if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
+					if r.Body != nil {
+						_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
+					}
+					if hasAuth && (rawUser != "" || pass != "") {
+						s.rateLimiter.RecordFailure(clientIP)
+						logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s, %s)", clientIP, logger.Mask(rawUser), config.DescribeCredentialShape(rawUser, pass))
+					}
+					w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+					if s.authCfg.Password != "" {
+						w.Header().Add("WWW-Authenticate", "NTLM")
+					}
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
+				s.rateLimiter.Reset(clientIP)
+			}
 		}
 	}
 

@@ -51,14 +51,27 @@ El cliente WebDAV integrado de Windows (*WebClient*) tiene por defecto dos limit
 #### Solución (Ejecutar en PowerShell como Administrador):
 
 ```powershell
-# 1. Permitir autenticación básica en redes locales (HTTP)
+# 1. Configurar servicio WebClient en Automático
+Set-Service -Name WebClient -StartupType Automatic
+Start-Service WebClient
+
+# 2. Permitir autenticación básica en redes locales (HTTP)
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
 
-# 2. Aumentar el límite máximo de archivo a 4 GB (4294967295 bytes)
+# 3. Aumentar el límite máximo de archivo a 4 GB (4294967295 bytes)
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "FileSizeLimitInBytes" -Value 4294967295
 
-# 3. Reiniciar el servicio WebClient para aplicar los cambios
+# 4. Permitir reenvío automático y silencioso de credenciales tras reinicio (v2.2.1+)
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "AuthForwardServerList" -Value @("http://TU_IP_SERVIDOR:5050/*")
+
+# 5. Reiniciar el servicio WebClient para aplicar los cambios
 Restart-Service WebClient
+```
+
+#### Almacenar credenciales persistentes con `cmdkey`:
+```powershell
+cmdkey /add:TU_IP_SERVIDOR /user:admin /pass:admin
+net use M: \\TU_IP_SERVIDOR@5050\DavWWWRoot /persistent:yes
 ```
 
 ---

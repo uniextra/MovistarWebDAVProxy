@@ -2,6 +2,16 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.1] - 2026-11-05
+
+### 🪟 Autenticación NTLMv2 y Reconexión Persistente en Windows
+- **Soporte NTLMv2 en Paralelo con HTTP Basic Auth:**
+  - Implementación del protocolo de autenticación NTLMv2 (`internal/config/ntlm.go`, `internal/webdav/server.go`) junto a HTTP Basic Auth.
+  - Permite la reconexión automática, persistente y silenciosa de unidades de red mapeadas en Windows 10 y Windows 11 (`WebClient` / `DAV Mini-Redirector`) tras el reinicio del sistema, eliminando el fallo recurrente de reconexión sin interacción del usuario.
+  - Las cabeceras `WWW-Authenticate: Basic realm="WebDAV"` y `WWW-Authenticate: NTLM` se emiten conjuntamente, manteniendo compatibilidad total y transparente con clientes que utilizan Basic Auth (Linux, macOS, Duplicati, rclone, Synology HyperBackup, Cyberduck, curl, etc.).
+- **Telemetría Segura de Credenciales (`DescribeCredentialShape`):**
+  - Diagnóstico detallado en logs ante intentos fallidos de autenticación (longitud de usuario, presencia de dominio Windows `\`, longitud de contraseña, espacios al inicio/final o caracteres no-ASCII), facilitando la detección de codificaciones o entradas erróneas sin exponer jamás contraseñas ni secretos en texto plano.
+
 ## [v2.2.0] - 2026-11-04
 
 ### 🚀 Rendimiento, Concurrencia y Caché
