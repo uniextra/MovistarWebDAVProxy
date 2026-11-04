@@ -1119,8 +1119,100 @@ func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
 	return nil
 }
 
-func (c *Client) UpdateMedia(mediaID string, name string, folderID int64) error {
-	u := fmt.Sprintf("%s/upload/file?action=save-metadata", c.baseURL)
+// mediaKindForName devuelve el tipo de media con el que SAPI clasifica un archivo
+// según su extensión: "audio", "video", "picture" o "file" (genérico).
+//
+// Comprobado con O2 Cloud subiendo y moviendo archivos reales de cada formato:
+//   - audio:   mp3, m4a (AAC y ALAC), wav
+//   - vídeo:   mp4
+//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff
+//   - genérico (la app no los trata como multimedia): aac, ogg, opus, wma, aiff, flac,
+//     mkv, mov, m4v, 3gp, avi, webm, wmv, mpg, ts, flv, heic, heif, avif, svg y
+//     cualquier otro.
+//
+// Si una extensión clasificada como multimedia resultara genérica para SAPI,
+// UpdateMedia recurre a la operación genérica.
+func mediaKindForName(name string) string {
+	ext := strings.ToLower(name)
+	if i := strings.LastIndex(ext, "."); i >= 0 {
+		ext = ext[i+1:]
+	} else {
+		return "file"
+	}
+	switch ext {
+	case "mp3", "m4a", "wav":
+		return "audio"
+	case "mp4":
+		return "video"
+	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff":
+		return "picture"
+	}
+	return "file"
+}
+
+// mediaMoveRetries y mediaMoveRetryDelay controlan los reintentos cuando SAPI todavía
+// está validando un archivo recién subido (MED-1017), igual que en subidas y borrados.
+var (
+	mediaMoveRetries    = 6
+	mediaMoveRetryDelay = 1500 * time.Millisecond
+)
+
+// UpdateMedia renombra y/o mueve un archivo (cambia su nombre y su carpeta).
+//
+// currentName es el nombre actual del archivo en la nube y newName el deseado.
+// SAPI usa una operación distinta según el tipo de media (upload/audio, upload/video,
+// upload/picture o upload/file); con una que no corresponde responde con un error en el
+// cuerpo (a menudo con HTTP 200). El tipo se deduce del nombre actual (el tipo real del
+// archivo guardado) y, si falla, del nuevo y de la genérica. Si SAPI aún está validando
+// el archivo (MED-1017) se reintenta. Devuelve error si ninguna operación lo confirma.
+func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int64) error {
+	var kinds []string
+	for _, k := range []string{mediaKindForName(currentName), mediaKindForName(newName), "file"} {
+		dup := false
+		for _, e := range kinds {
+			if e == k {
+				dup = true
+			}
+		}
+		if !dup {
+			kinds = append(kinds, k)
+		}
+	}
+
+	var lastErr error
+	for i, kind := range kinds {
+		var err error
+		for attempt := 0; ; attempt++ {
+			err = c.saveMediaMetadata(kind, mediaID, newName, folderID)
+			if err == nil || !strings.Contains(err.Error(), "MED-1017") || attempt >= mediaMoveRetries {
+				break
+			}
+			logger.Log("[SAPI] ⏳ '%s' aún en validación (MED-1017) al moverlo. Reintentando en %s (%d/%d)...", newName, mediaMoveRetryDelay, attempt+1, mediaMoveRetries)
+			time.Sleep(mediaMoveRetryDelay)
+		}
+		if err == nil {
+			if i > 0 {
+				logger.Log("[SAPI] ↪ Movimiento de '%s' (ID: %s) confirmado con upload/%s tras rechazo de upload/%s", newName, mediaID, kind, kinds[0])
+			}
+			return nil
+		}
+		// MED-1050 (extensión o formato no soportado, p. ej. al cambiar la extensión de un
+		// audio, vídeo o imagen) es una negativa definitiva: otra operación no lo arregla.
+		if strings.Contains(err.Error(), "MED-1050") {
+			lastErr = err
+			break
+		}
+		if i < len(kinds)-1 {
+			logger.Log("[SAPI] ↪ upload/%s no aceptó mover '%s' (ID: %s): %v. Probando upload/%s...", kind, newName, mediaID, err, kinds[i+1])
+		}
+		lastErr = err
+	}
+	logger.Log("[SAPI] ❌ No se pudo mover '%s' (ID: %s): %v", newName, mediaID, lastErr)
+	return lastErr
+}
+
+func (c *Client) saveMediaMetadata(kind, mediaID, name string, folderID int64) error {
+	u := fmt.Sprintf("%s/upload/%s?action=save-metadata", c.baseURL, kind)
 	data := map[string]interface{}{"id": mediaID}
 	if name != "" {
 		data["name"] = name
@@ -1141,9 +1233,18 @@ func (c *Client) UpdateMedia(mediaID string, name string, folderID int64) error 
 	}
 	defer resp.Body.Close()
 
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("update media failed (%d): %s", resp.StatusCode, string(b))
+		return fmt.Errorf("update media (%s) failed (%d): %s", kind, resp.StatusCode, string(b))
+	}
+	var res struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
+		return fmt.Errorf("update media (%s) API error: %s (%s)", kind, res.Error.Message, res.Error.Code)
 	}
 	return nil
 }
@@ -1342,7 +1443,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 
 		// Corregir sufijo ' (1)' si la nube lo añadió
 		if finalID != "" && cloudName != "" && cloudName != fileName && strings.Contains(cloudName, " (") {
-			_ = c.UpdateMedia(finalID, fileName, folderID)
+			_ = c.UpdateMedia(finalID, cloudName, fileName, folderID)
 		}
 
 		return &MediaItem{
