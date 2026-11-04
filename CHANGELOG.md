@@ -2,6 +2,43 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.0] - 2026-11-04
+
+### 🚀 Rendimiento, Concurrencia y Caché
+- **Arquitectura de Concurrencia Desacoplada (4/4 con Techo Global de 5):**
+  - Sustitución del semáforo compartido rígido de 3 hilos por semáforos independientes para subidas (`uploadSem = 4`) y descargas (`downloadSem = 4`), protegidos por un techo conjunto de seguridad (`globalTransferSem = 5`).
+  - Optimiza de forma nativa los 4 hilos paralelos de Duplicati y acelera restauraciones sin sobrepasar la cuota por token de la API de Telefónica.
+- **Caché Zero-Allocation y Resolución de Rutas O(1):**
+  - Índices en memoria indexados por nombre (`byExact` y `byLower`) en la caché de carpetas y multimedia, eliminando la duplicación masiva de slices (`make([]MediaItem, ...)` y `copy()`) en cada resolución de ruta WebDAV.
+- **Reutilización de Conexiones HTTP y Resiliencia SAPI:**
+  - Configurado `MaxIdleConnsPerHost = 20` (frente al valor por defecto de 2 de Go) eliminando la destrucción y re-negociación continua de sockets TLS hacia `micloud.movistar.es`.
+  - Retroceso exponencial adaptativo con jitter ante respuestas HTTP 429 (Too Many Requests) o 503 en SAPI (hasta 3 reintentos antes de abortar).
+- **Buffer de Subida PUT en RAM (32 MB):**
+  - Añadida variable `WEBDAV_BUFFER_MB` (por defecto 32 MB), permitiendo que el 99% de bloques de Duplicati y restic se procesen directamente en memoria RAM sin generar escrituras temporales en disco.
+- **Suite de Pruebas de Interoperabilidad con `emersion/go-webdav`:**
+  - Verificación de cumplimiento estricto del estándar RFC 4918 mediante el cliente oficial de referencia `emersion/go-webdav v0.7.0`.
+
+### 🪟 Autenticación Multiplataforma y Redes Docker
+- **Normalización de Credenciales Windows:**
+  - Limpieza automática de prefijos de dominio habituales en Windows WebClient (`DOMAIN\usuario` y `\usuario` $\rightarrow$ `usuario`) y recorte de espacios en blanco accidentales.
+  - Preservación exacta de contraseñas complejas que incluyan caracteres de dos puntos (`:`) o espacios internos.
+- **Desafío RFC 4918 y Descubrimiento WebClient:**
+  - Respuestas HTTP `401 Unauthorized` con el encabezado estándar `WWW-Authenticate: Basic realm="WebDAV"`.
+  - Tratamiento especial para la petición exploratoria inicial `OPTIONS /` sin credenciales (devolviendo `200 OK` con `MS-Author-Via: DAV` y `DAV: 1, 2`), permitiendo al Explorador de Windows identificar el servicio antes de solicitar credenciales en `PROPFIND /`.
+- **Detección Segura de IP y Anti-Spoofing (`TRUSTED_PROXIES`):**
+  - Prioriza la IP real del socket (`RemoteAddr`) y solo evalúa `X-Forwarded-For` o `X-Real-IP` cuando la conexión procede de un proxy inverso explícitamente configurado.
+- **Exclusión de Subredes Docker contra Bloqueos 429 (`BRUTE_FORCE_EXCLUDED_IPS`):**
+  - Exclusión automática de subredes puente de Docker (`172.16.0.0/12`) y loopback del limitador de fuerza bruta, evitando que un cliente con clave errónea bloquee la pasarela compartida de Docker para toda la red local. La autenticación Basic Auth se sigue exigiendo en todo momento.
+
+### 🐛 Correcciones Críticas de Compatibilidad
+- **Mover y Renombrar Audio, Vídeo e Imágenes (PR #8):**
+  - Incorporada la operación adecuada de SAPI según el tipo de archivo (`upload/audio`, `upload/video`, `upload/picture` o `upload/file`), evitando que fotos y música fallen silenciosamente al renombrarse o moverse con errores `MED-1005`.
+  - Detección de errores devueltos en el cuerpo JSON de SAPI con códigos HTTP 2xx y reintentos ante archivos en validación (`MED-1017`).
+- **Renombrado con Cambio de Extensión (`moveByReupload` - Issue #9):**
+  - Si la extensión de un archivo cambia al renombrarse (ej. `.tmp` $\rightarrow$ `.zip.aes` en Duplicati), el proxy realiza automáticamente una descarga y re-subida con el nuevo nombre antes de borrar el original, sorteando la limitación de SAPI que provocaba errores `MED-1050` o forzaba la extensión original.
+- **Persistencia de Notificaciones Telegram en WebUI (Issue #10):**
+  - Solucionado el fallo al guardar la configuración de Telegram que solicitaba un teléfono válido aunque la cuenta ya estuviera vinculada, haciendo fallback automático a la cuenta activa.
+
 ## [v2.1.2] - 2026-11-03
 
 ### 🐛 Correcciones y Mejoras de Compatibilidad
