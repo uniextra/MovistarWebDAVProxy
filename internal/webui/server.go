@@ -600,9 +600,17 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 
 	phone := config.SanitizePhone(body.Phone)
 	if phone == "" {
+		if activeCfg := s.client.GetConfig(); activeCfg.Phone != "" {
+			phone = activeCfg.Phone
+		} else {
+			loaded := config.LoadAccountConfig("")
+			phone = loaded.Phone
+		}
+	}
+	if phone == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
-			"message": "Introduce un teléfono válido",
+			"message": "Introduce un teléfono válido o vincula una cuenta primero",
 		})
 		return
 	}

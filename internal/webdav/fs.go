@@ -861,8 +861,18 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		}
 
 		if oldMedia.ID != "" {
-			if err := mfs.client.UpdateMedia(oldMedia.ID, oldMedia.Name, newBaseName, parentFolder.ID); err != nil {
-				return err
+			oldExt := strings.ToLower(path.Ext(oldMedia.Name))
+			newExt := strings.ToLower(path.Ext(newBaseName))
+			if oldExt != newExt {
+				// SAPI no admite cambiar de extensión vía save-metadata (MED-1050 en multimedia y conserva extensión original en genéricos).
+				// Se resuelve descargando y volviendo a subir con el nuevo nombre (moveByReupload), igual que rclone.
+				if err := mfs.moveByReupload(ctx, oldMedia, newBaseName, parentFolder.ID); err != nil {
+					return err
+				}
+			} else {
+				if err := mfs.client.UpdateMedia(oldMedia.ID, oldMedia.Name, newBaseName, parentFolder.ID); err != nil {
+					return err
+				}
 			}
 		}
 		mfs.cacheMu.Lock()
@@ -878,6 +888,61 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		return nil
 	}
 
+	return nil
+}
+
+func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaItem, newName string, newFolderID int64) error {
+	logger.Log("[WebDAV] 🔄 Re-subiendo '%s' -> '%s' (ID: %s) por cambio de extensión...", oldMedia.Name, newName, oldMedia.ID)
+
+	stream, err := mfs.client.DownloadFileStream(*oldMedia)
+	if err != nil {
+		return fmt.Errorf("moveByReupload download error: %w", err)
+	}
+	defer stream.Close()
+
+	var reader io.ReadSeeker
+	var cleanup func()
+
+	if oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes()) {
+		buf := bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
+		if _, err := io.Copy(buf, stream); err != nil {
+			return fmt.Errorf("moveByReupload buffer error: %w", err)
+		}
+		reader = bytes.NewReader(buf.Bytes())
+		cleanup = func() {}
+	} else {
+		tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_reupload_*")
+		if err != nil {
+			return fmt.Errorf("moveByReupload temp file error: %w", err)
+		}
+		tmpPath := tmp.Name()
+		cleanup = func() {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+		defer cleanup()
+
+		if _, err := io.Copy(tmp, stream); err != nil {
+			return fmt.Errorf("moveByReupload spool error: %w", err)
+		}
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("moveByReupload seek error: %w", err)
+		}
+		reader = tmp
+	}
+	defer cleanup()
+
+	newItem, err := mfs.client.UploadFileToFolder(newName, reader, oldMedia.Size, newFolderID, "", "", oldMedia.ModificationDate.Time())
+	if err != nil {
+		return fmt.Errorf("moveByReupload upload error: %w", err)
+	}
+
+	// Únicamente tras confirmar la subida del nuevo archivo se elimina el original
+	if err := mfs.client.DeleteFile(oldMedia.ID); err != nil {
+		logger.Log("[WebDAV] ⚠️ Advertencia: No se pudo eliminar el archivo original '%s' tras re-subida: %v", oldMedia.Name, err)
+	}
+
+	logger.Log("[WebDAV] ✔ Re-subida completada: '%s' -> '%s' (Nuevo ID: %s)", oldMedia.Name, newName, newItem.ID)
 	return nil
 }
 

@@ -355,3 +355,19 @@ func TestWebDAV_AllMethodsAuthAndWindowsCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestWebDAV_RenameExtensionChange_MoveByReupload(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+
+	// 1. MOVE con cambio de extensión (.txt -> .md) debe disparar moveByReupload y responder 201 Created o 204 No Content
+	moveReq := httptest.NewRequest("MOVE", "/hello.txt", nil)
+	moveReq.Header.Set("Destination", "/hello.md")
+	moveReq.Header.Set("Overwrite", "T")
+	moveRec := httptest.NewRecorder()
+	srv.ServeHTTP(moveRec, moveReq)
+
+	if moveRec.Code != http.StatusCreated && moveRec.Code != http.StatusNoContent {
+		t.Fatalf("expected 201 Created or 204 No Content on MOVE with extension change, got %d (body: %s)", moveRec.Code, moveRec.Body.String())
+	}
+}

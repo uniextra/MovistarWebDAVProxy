@@ -148,6 +148,19 @@ func TestWebUI_MethodsCSRFAndSecretsMasking(t *testing.T) {
 		t.Errorf("expected existing bot token to be preserved and chat_id updated, got: %+v", reloaded)
 	}
 
+	// 4b. Guardar en /save_telegram con phone vacío recurre a la cuenta activa (Issue #10)
+	saveEmptyPhoneReq := httptest.NewRequest("POST", "/save_telegram", strings.NewReader(`{"phone":"","bot_token":"","chat_id":"-100888888"}`))
+	saveEmptyPhoneReq.Header.Set("Content-Type", "application/json")
+	saveEmptyPhoneRec := httptest.NewRecorder()
+	handler.ServeHTTP(saveEmptyPhoneRec, saveEmptyPhoneReq)
+	if saveEmptyPhoneRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /save_telegram with empty phone fallback, got %d: %s", saveEmptyPhoneRec.Code, saveEmptyPhoneRec.Body.String())
+	}
+	reloadedFallback := config.LoadAccountConfig("612345678")
+	if reloadedFallback.TelegramChatID != "-100888888" {
+		t.Errorf("expected chat_id updated via fallback, got: %s", reloadedFallback.TelegramChatID)
+	}
+
 	// 5. Intentar guardar bot_token con comillas o salto de línea -> 400 Bad Request
 	badSaveReq := httptest.NewRequest("POST", "/save_telegram", strings.NewReader(`{"phone":"612345678","bot_token":"123:abc\"def","chat_id":"-100999999"}`))
 	badSaveReq.Header.Set("Content-Type", "application/json")
