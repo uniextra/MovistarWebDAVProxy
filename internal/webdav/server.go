@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -32,13 +33,14 @@ var (
 )
 
 type Server struct {
-	handler     *webdav.Handler
-	fs          *MovistarFS
-	running     atomic.Bool
-	authCfg     config.AuthConfig
-	rateLimiter *config.AuthRateLimiter
-	ntlmAuth    *config.NTLMAuthenticator
-	activeWG    sync.WaitGroup
+	handler        *webdav.Handler
+	fs             *MovistarFS
+	running        atomic.Bool
+	authCfg        config.AuthConfig
+	rateLimiter    *config.AuthRateLimiter
+	ntlmAuth       *config.NTLMAuthenticator
+	activeWG       sync.WaitGroup
+	duplicatiStore *DuplicatiProbeStore
 }
 
 func NewServer(client *sapi.Client) *Server {
@@ -48,10 +50,11 @@ func NewServer(client *sapi.Client) *Server {
 func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 	fs := NewMovistarFS(client)
 	s := &Server{
-		fs:          fs,
-		authCfg:     authCfg,
-		rateLimiter: config.NewAuthRateLimiter(10, time.Minute),
-		ntlmAuth:    config.NewNTLMAuthenticator(),
+		fs:             fs,
+		authCfg:        authCfg,
+		rateLimiter:    config.NewAuthRateLimiter(10, time.Minute),
+		ntlmAuth:       config.NewNTLMAuthenticator(),
+		duplicatiStore: fs.getDuplicatiStore(),
 	}
 	h := &webdav.Handler{
 		FileSystem: fs,
@@ -66,6 +69,37 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 	s.running.Store(true)
 	return s
 }
+
+func (s *Server) getDuplicatiStore() *DuplicatiProbeStore {
+	if s != nil && s.duplicatiStore != nil {
+		return s.duplicatiStore
+	}
+	return globalDuplicatiStore
+}
+
+func isWindowsClient(r *http.Request) bool {
+	ua := strings.ToLower(r.Header.Get("User-Agent"))
+	return strings.Contains(ua, "microsoft-webdav-miniredir") ||
+		strings.Contains(ua, "davclnt") ||
+		strings.Contains(ua, "windows") ||
+		strings.Contains(ua, "winhttp")
+}
+
+func (s *Server) shouldOfferNTLM(r *http.Request) bool {
+	if s.authCfg.Password == "" {
+		return false
+	}
+	ntlmEnv := strings.ToLower(strings.TrimSpace(os.Getenv("WEBDAV_NTLM")))
+	if ntlmEnv == "false" || ntlmEnv == "0" || ntlmEnv == "no" || ntlmEnv == "disabled" {
+		return false
+	}
+	if ntlmEnv == "true" || ntlmEnv == "always" || ntlmEnv == "1" {
+		return true
+	}
+	// "auto" (por defecto): solo a clientes Windows nativos o que ya envíen NTLM
+	return isWindowsClient(r) || config.IsNTLMHeader(r.Header.Get("Authorization"))
+}
+
 
 func (s *Server) InvalidateCache() {
 	if s.fs != nil {
@@ -140,7 +174,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					logger.Log("[WebDAV] 🔒 Intento de acceso NTLM fallido desde %s (usuario: %s)", clientIP, logger.Mask(ntlmUser))
 				}
 				w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
-				if s.authCfg.Password != "" {
+				if s.shouldOfferNTLM(r) {
 					w.Header().Add("WWW-Authenticate", "NTLM")
 				}
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -168,7 +202,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s, %s)", clientIP, logger.Mask(rawUser), config.DescribeCredentialShape(rawUser, pass))
 					}
 					w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
-					if s.authCfg.Password != "" {
+					if s.shouldOfferNTLM(r) {
 						w.Header().Add("WWW-Authenticate", "NTLM")
 					}
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -186,6 +220,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if method == "OPTIONS" || method == "PUT" || method == "GET" || method == "DELETE" || method == "MOVE" ||
 		method == "MKCOL" || method == "PROPFIND" || method == "HEAD" || method == "LOCK" || method == "UNLOCK" {
 		logger.Log("[WebDAV] ⚡ %s -> %s %s", clientIP, method, urlPath)
+	}
+
+	// Interceptar sondas de prueba de Duplicati (duplicati-access-privileges-test.tmp)
+	// para absorberlas completamente en memoria sin enviar extensiones .tmp a Telefónica SAPI
+	if s.handleDuplicatiProbe(w, r, urlPath) {
+		return
 	}
 
 	// 2. Rechazar PUT a colecciones según RFC 4918 §9.7.1 y validar límite de subida

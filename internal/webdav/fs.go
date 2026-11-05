@@ -201,6 +201,7 @@ type MovistarFS struct {
 	storageCache      *cachedStorage
 	cacheMu           sync.RWMutex
 	cacheTTL          time.Duration
+	duplicatiStore    *DuplicatiProbeStore
 }
 
 type cachedFolders struct {
@@ -295,7 +296,15 @@ func NewMovistarFS(client *sapi.Client) *MovistarFS {
 		folderCache:       make(map[int64]*cachedFolders),
 		mediaCache:        make(map[int64]*cachedMedia),
 		cacheTTL:          15 * time.Second,
+		duplicatiStore:    NewDuplicatiProbeStore(),
 	}
+}
+
+func (mfs *MovistarFS) getDuplicatiStore() *DuplicatiProbeStore {
+	if mfs != nil && mfs.duplicatiStore != nil {
+		return mfs.duplicatiStore
+	}
+	return globalDuplicatiStore
 }
 
 func (mfs *MovistarFS) InvalidateCache(folderID int64) {
@@ -512,6 +521,20 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 		return nil, nil, false, os.ErrNotExist
 	}
 
+	// Sondas de prueba de Duplicati en memoria
+	if isDuplicatiTestPath(cleanPath) {
+		if content, modTime, _, ok := mfs.getDuplicatiStore().Get(cleanPath); ok {
+			mi := &sapi.MediaItem{
+				ID:               "duplicati-probe",
+				Name:             path.Base(cleanPath),
+				Size:             int64(len(content)),
+				ModificationDate: sapi.FlexDate(modTime.UTC().Format("20060102T150405Z")),
+			}
+			return nil, mi, false, nil
+		}
+		return nil, nil, false, os.ErrNotExist
+	}
+
 	// Check if path is currently a tombstone (deleted within 5m)
 	mfs.cacheMu.Lock()
 	if exp, ok := mfs.deletedTombstones[cleanPath]; ok {
@@ -648,6 +671,11 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 			return NewDevNullFileWriter(cleanPath, fileName), nil
 		}
 
+		// Absorber sondas de prueba de Duplicati en memoria sin subir a Telefónica SAPI
+		if isDuplicatiTestPath(cleanPath) {
+			return NewDuplicatiProbeFileWriter(mfs.getDuplicatiStore(), cleanPath, fileName), nil
+		}
+
 		parentDir := path.Dir(cleanPath)
 
 		parentFolder, _, isFolder, err := mfs.resolvePath(parentDir)
@@ -678,6 +706,20 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 	}
 
 	// Modo lectura
+	if isDuplicatiTestPath(cleanPath) {
+		content, modTime, _, ok := mfs.getDuplicatiStore().Get(cleanPath)
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		return NewWebDAVMemoryReader(cleanPath, &MemoryFile{
+			Name:     path.Base(cleanPath),
+			Content:  content,
+			Size:     int64(len(content)),
+			ModTime:  modTime,
+			CachedAt: time.Now(),
+		}), nil
+	}
+
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
 		return nil, err
@@ -765,6 +807,10 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 		return fs.ErrPermission
 	}
 	if isOSJunkPath(cleanPath) {
+		return nil
+	}
+	if isDuplicatiTestPath(cleanPath) {
+		mfs.getDuplicatiStore().Delete(cleanPath)
 		return nil
 	}
 
@@ -860,13 +906,35 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 			_ = mfs.client.DeleteFile(destMedia.ID)
 		}
 
+		var reuploaded *MemoryFile
 		if oldMedia.ID != "" {
 			oldExt := strings.ToLower(path.Ext(oldMedia.Name))
 			newExt := strings.ToLower(path.Ext(newBaseName))
 			if oldExt != newExt {
 				// SAPI no admite cambiar de extensión vía save-metadata (MED-1050 en multimedia y conserva extensión original en genéricos).
 				// Se resuelve descargando y volviendo a subir con el nuevo nombre (moveByReupload), igual que rclone.
-				if err := mfs.moveByReupload(ctx, oldMedia, newBaseName, parentFolder.ID); err != nil {
+				src := *oldMedia
+				modTime := oldMedia.ModificationDate.Time()
+				var content []byte
+				mfs.cacheMu.RLock()
+				mem, inCache := mfs.uploadCache[oldClean]
+				mfs.cacheMu.RUnlock()
+				if inCache {
+					modTime = mem.ModTime
+					if mem.Size == 0 || len(mem.Content) > 0 {
+						// Recién subido y pequeño: se re-sube desde la copia en memoria.
+						content = mem.Content
+						if content == nil {
+							content = []byte{}
+						}
+					} else {
+						// Recién subido: SAPI tarda unos segundos en servirlo y la URL de
+						// la respuesta de subida no siempre sirve el archivo.
+						src.URL = mfs.waitForDownloadURL(mem)
+					}
+				}
+				var err error
+				if reuploaded, err = mfs.moveByReupload(ctx, &src, content, newBaseName, parentFolder.ID, modTime); err != nil {
 					return err
 				}
 			} else {
@@ -877,7 +945,12 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		}
 		mfs.cacheMu.Lock()
 		delete(mfs.deletedTombstones, newClean)
-		if mem, ok := mfs.uploadCache[oldClean]; ok {
+		if reuploaded != nil {
+			// El archivo nuevo tiene otro ID y SAPI tarda en listarlo: se registra como
+			// una subida recién hecha para que se vea y se lea en seguida.
+			delete(mfs.uploadCache, oldClean)
+			mfs.uploadCache[newClean] = reuploaded
+		} else if mem, ok := mfs.uploadCache[oldClean]; ok {
 			delete(mfs.uploadCache, oldClean)
 			mem.Name = newBaseName
 			mem.FolderID = parentFolder.ID
@@ -891,50 +964,94 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 	return nil
 }
 
-func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaItem, newName string, newFolderID int64) error {
+// Espera máxima a que SAPI sirva un archivo recién subido antes de re-subirlo
+// (en O2 Cloud se ha medido del orden de 10 s tras la subida).
+var (
+	reuploadSourceWait = 45 * time.Second
+	reuploadSourcePoll = 2 * time.Second
+)
+
+// waitForDownloadURL consulta por ID la URL de descarga de un archivo recién subido
+// hasta que SAPI la confirma o se agota reuploadSourceWait; en ese caso devuelve la
+// URL conocida y la descarga posterior informará del error.
+func (mfs *MovistarFS) waitForDownloadURL(mem *MemoryFile) string {
+	deadline := time.Now().Add(reuploadSourceWait)
+	for {
+		u := mem.downloadURL(mfs)
+		mfs.cacheMu.RLock()
+		confirmed := mem.URLConfirmed
+		mfs.cacheMu.RUnlock()
+		if confirmed || mem.ID == "" || time.Now().After(deadline) {
+			return u
+		}
+		time.Sleep(reuploadSourcePoll)
+	}
+}
+
+// moveByReupload sube el archivo con el nombre nuevo y, solo si la subida se completa,
+// borra el original. Si content no es nil se sube desde ahí en vez de descargarlo.
+func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaItem, content []byte, newName string, newFolderID int64, modTime time.Time) (*MemoryFile, error) {
 	logger.Log("[WebDAV] 🔄 Re-subiendo '%s' -> '%s' (ID: %s) por cambio de extensión...", oldMedia.Name, newName, oldMedia.ID)
 
-	stream, err := mfs.client.DownloadFileStream(*oldMedia)
-	if err != nil {
-		return fmt.Errorf("moveByReupload download error: %w", err)
-	}
-	defer stream.Close()
-
 	var reader io.ReadSeeker
-	var cleanup func()
+	var cachedContent []byte
+	var n int64
 
-	if oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes()) {
-		buf := bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
-		if _, err := io.Copy(buf, stream); err != nil {
-			return fmt.Errorf("moveByReupload buffer error: %w", err)
-		}
-		reader = bytes.NewReader(buf.Bytes())
-		cleanup = func() {}
+	if content != nil {
+		n = int64(len(content))
+		reader = bytes.NewReader(content)
+		cachedContent = content
 	} else {
-		tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_reupload_*")
+		stream, err := mfs.client.DownloadFileStream(*oldMedia)
 		if err != nil {
-			return fmt.Errorf("moveByReupload temp file error: %w", err)
+			return nil, fmt.Errorf("moveByReupload download error: %w", err)
 		}
-		tmpPath := tmp.Name()
-		cleanup = func() {
-			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
-		}
-		defer cleanup()
+		defer stream.Close()
 
-		if _, err := io.Copy(tmp, stream); err != nil {
-			return fmt.Errorf("moveByReupload spool error: %w", err)
+		if oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes()) {
+			buf := bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
+			if n, err = io.Copy(buf, stream); err != nil {
+				return nil, fmt.Errorf("moveByReupload buffer error: %w", err)
+			}
+			reader = bytes.NewReader(buf.Bytes())
+			if oldMedia.Size <= 256*1024 {
+				cachedContent = buf.Bytes()
+			}
+		} else {
+			tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_reupload_*")
+			if err != nil {
+				return nil, fmt.Errorf("moveByReupload temp file error: %w", err)
+			}
+			tmpPath := tmp.Name()
+			defer func() {
+				_ = tmp.Close()
+				_ = os.Remove(tmpPath)
+			}()
+
+			if n, err = io.Copy(tmp, stream); err != nil {
+				return nil, fmt.Errorf("moveByReupload spool error: %w", err)
+			}
+			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("moveByReupload seek error: %w", err)
+			}
+			reader = tmp
 		}
-		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			return fmt.Errorf("moveByReupload seek error: %w", err)
-		}
-		reader = tmp
 	}
-	defer cleanup()
 
-	newItem, err := mfs.client.UploadFileToFolder(newName, reader, oldMedia.Size, newFolderID, "", "", oldMedia.ModificationDate.Time())
+	// Garantía de integridad: solo se re-sube y se borra el original si tenemos
+	// exactamente los bytes esperados. Una descarga corta terminada en EOF limpio
+	// (menos bytes de los anunciados) no debe provocar la pérdida del original.
+	if n != oldMedia.Size {
+		return nil, fmt.Errorf("moveByReupload: '%s' incompleto (%d de %d bytes); no se modifica el origen", oldMedia.Name, n, oldMedia.Size)
+	}
+
+	return mfs.finishReupload(oldMedia, reader, cachedContent, newName, newFolderID, modTime)
+}
+
+func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSeeker, cachedContent []byte, newName string, newFolderID int64, modTime time.Time) (*MemoryFile, error) {
+	newItem, err := mfs.client.UploadFileToFolder(newName, reader, oldMedia.Size, newFolderID, "", "", modTime)
 	if err != nil {
-		return fmt.Errorf("moveByReupload upload error: %w", err)
+		return nil, fmt.Errorf("moveByReupload upload error: %w", err)
 	}
 
 	// Únicamente tras confirmar la subida del nuevo archivo se elimina el original
@@ -943,11 +1060,35 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 	}
 
 	logger.Log("[WebDAV] ✔ Re-subida completada: '%s' -> '%s' (Nuevo ID: %s)", oldMedia.Name, newName, newItem.ID)
-	return nil
+	now := time.Now()
+	return &MemoryFile{
+		ID:       newItem.ID,
+		Name:     newName,
+		FolderID: newFolderID,
+		Content:  cachedContent,
+		Size:     oldMedia.Size,
+		ModTime:  modTime,
+		CachedAt: now,
+		URL:      newItem.URL,
+	}, nil
 }
 
 func (mfs *MovistarFS) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	cleanPath := path.Clean("/" + name)
+	if isDuplicatiTestPath(cleanPath) {
+		content, modTime, _, ok := mfs.getDuplicatiStore().Get(cleanPath)
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		return &VirtualFileInfo{
+			name:    path.Base(cleanPath),
+			size:    int64(len(content)),
+			mode:    0644,
+			modTime: modTime,
+			isDir:   false,
+		}, nil
+	}
+
 	_, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
 		return nil, err
@@ -1442,7 +1583,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			if exp, isTomb := d.mfs.deletedTombstones[childPath]; isTomb && now.Before(exp) {
 				continue
 			}
-			if !seen[s.Name] && !isOSJunk(s.Name) {
+			if !seen[s.Name] && !isOSJunk(s.Name) && !isDuplicatiTestPath(s.Name) {
 				seen[s.Name] = true
 				list = append(list, &VirtualFileInfo{name: s.Name, size: 0, mode: os.ModeDir | 0755, modTime: parseTime(s.ModificationDate), isDir: true})
 			}
@@ -1454,7 +1595,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 				continue
 			}
 			name := m.Name
-			if !seen[name] && !isOSJunk(name) {
+			if !seen[name] && !isOSJunk(name) && !isDuplicatiTestPath(name) {
 				seen[name] = true
 				list = append(list, &VirtualFileInfo{name: name, size: m.Size, mode: 0644, modTime: parseTime(m.ModificationDate), isDir: false})
 			}
@@ -1465,7 +1606,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			if exp, isTomb := d.mfs.deletedTombstones[childPath]; isTomb && now.Before(exp) {
 				continue
 			}
-			if mem.FolderID == d.folderID && !seen[mem.Name] && !isOSJunk(mem.Name) {
+			if mem.FolderID == d.folderID && !seen[mem.Name] && !isOSJunk(mem.Name) && !isDuplicatiTestPath(mem.Name) {
 				seen[mem.Name] = true
 				list = append(list, &VirtualFileInfo{name: mem.Name, size: mem.Size, mode: 0644, modTime: mem.ModTime, isDir: false})
 			}

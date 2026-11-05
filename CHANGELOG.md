@@ -2,6 +2,28 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.3] - 2026-11-05
+
+### 🐧 Compatibilidad Linux Desktop & Reverse Proxies (Issue #15)
+- **Desafío NTLM Adaptativo (`shouldOfferNTLM`):**
+  - Se restringe el envío de la cabecera `WWW-Authenticate: NTLM` exclusivamente a clientes Windows nativos (`Microsoft-WebDAV-MiniRedir`, `davclnt`, `winhttp`) o clientes que inicien explícitamente un handshake NTLM.
+  - Para clientes Linux desktop (GNOME Nautilus/GVFS, KDE Dolphin/KIO, rclone, curl) se envía únicamente `WWW-Authenticate: Basic realm="WebDAV"`.
+  - Soluciona el error `Intento de acceso NTLM fallido` al acceder desde Linux a través de reverse proxies (Nginx Proxy Manager, Traefik, Caddy), donde libsoup priorizaba erróneamente NTLM sobre Basic Auth y el proxy no mantenía la afinidad de conexión requerida por NTLM.
+  - Se añade la variable de entorno `WEBDAV_NTLM` (`auto` [por defecto], `true`/`always`, `false`/`disabled`) para forzar o desactivar la negociación NTLM si fuera necesario.
+
+### 🛡️ Absorción en Memoria de Sondas Duplicati (Issue #13 / PR #14)
+- **Soporte transparente para el botón "Test connection" de Duplicati:**
+  - La API SAPI de Telefónica rechaza de forma estricta los archivos temporales con extensión `.tmp` con error `MED-1000: Unknown exception in media handling`.
+  - Duplicati ejecuta obligatoriamente una sonda creando, leyendo y borrando el archivo `duplicati-access-privileges-test.tmp`.
+  - Se incorpora `DuplicatiProbeStore`, un almacén volátil en memoria RAM (TTL 5 min, límite 10MB) que intercepta y responde a nivel WebDAV (`PUT` -> 201, `GET` -> 200, `PROPFIND` -> 207, `DELETE` -> 204, `LOCK`/`UNLOCK`) sin enviar solicitudes a los servidores de Movistar/O2.
+
+### ⚡ Optimizaciones y Consistencia en Renombrado (`moveByReupload` / PR #12)
+- **Re-subida directa desde memoria y confirmación de URL SAPI:**
+  - Al cambiar de extensión un archivo recién subido presente en `uploadCache` (RAM) o con tamaño $\le$ 256 KB, se re-sube directamente sin necesidad de descargarlo por red.
+  - Para archivos mayores recién subidos, se implementa `waitForDownloadURL` con sondeo activo para garantizar que SAPI ha publicado la URL de descarga antes de proceder al reemplazo.
+  - El archivo resultante se registra inmediatamente en `uploadCache` con su nuevo ID de SAPI para lecturas inmediatas consistentes.
+  - Verificación estricta de integridad de tamaño de descarga antes de eliminar el archivo origen.
+
 ## [v2.2.2] - 2026-11-05
 
 ### 🐛 Corrección: Descarga de Archivos JSON y Metadatos de Home Assistant (Issue #11)

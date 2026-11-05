@@ -371,3 +371,108 @@ func TestWebDAV_RenameExtensionChange_MoveByReupload(t *testing.T) {
 		t.Fatalf("expected 201 Created or 204 No Content on MOVE with extension change, got %d (body: %s)", moveRec.Code, moveRec.Body.String())
 	}
 }
+
+func TestWebDAV_DuplicatiAccessPrivilegesProbe(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+
+	probePath := "/duplicati-access-privileges-test.tmp"
+	payload := []byte("duplicati probe content 12345")
+
+	// 1. PUT probe -> 201 Created
+	putReq := httptest.NewRequest("PUT", probePath, bytes.NewReader(payload))
+	putRec := httptest.NewRecorder()
+	srv.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusCreated && putRec.Code != http.StatusOK && putRec.Code != http.StatusNoContent {
+		t.Fatalf("PUT probe: expected 201 Created, got %d", putRec.Code)
+	}
+
+	// 2. GET probe -> 200 OK with payload
+	getReq := httptest.NewRequest("GET", probePath, nil)
+	getRec := httptest.NewRecorder()
+	srv.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET probe: expected 200 OK, got %d", getRec.Code)
+	}
+	if getRec.Body.String() != string(payload) {
+		t.Fatalf("GET probe: payload mismatch: got %q, want %q", getRec.Body.String(), string(payload))
+	}
+
+	// 3. PROPFIND probe -> 207 Multi-Status
+	propReq := httptest.NewRequest("PROPFIND", probePath, nil)
+	propReq.Header.Set("Depth", "0")
+	propRec := httptest.NewRecorder()
+	srv.ServeHTTP(propRec, propReq)
+	if propRec.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND probe: expected 207 MultiStatus, got %d", propRec.Code)
+	}
+
+	// 4. DELETE probe -> 204 No Content
+	delReq := httptest.NewRequest("DELETE", probePath, nil)
+	delRec := httptest.NewRecorder()
+	srv.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusNoContent && delRec.Code != http.StatusOK {
+		t.Fatalf("DELETE probe: expected 204 No Content, got %d", delRec.Code)
+	}
+
+	// 5. GET probe after DELETE -> 404 Not Found
+	getReq2 := httptest.NewRequest("GET", probePath, nil)
+	getRec2 := httptest.NewRecorder()
+	srv.ServeHTTP(getRec2, getReq2)
+	if getRec2.Code != http.StatusNotFound {
+		t.Fatalf("GET probe after delete: expected 404, got %d", getRec2.Code)
+	}
+}
+
+func TestWebDAV_NTLM_Offer_Selective(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{
+		Username: "davuser",
+		Password: "davpassword",
+	})
+	defer cleanup()
+
+	// 1. Generic Linux/curl client -> should only get Basic, never NTLM (Issue #15 fix)
+	linuxReq := httptest.NewRequest("PROPFIND", "/", nil)
+	linuxReq.Header.Set("User-Agent", "gvfs/1.50.0")
+	linuxReq.RemoteAddr = "192.168.1.100:12345"
+	linuxRec := httptest.NewRecorder()
+	srv.ServeHTTP(linuxRec, linuxReq)
+
+	if linuxRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", linuxRec.Code)
+	}
+	authHeaders := linuxRec.Header().Values("WWW-Authenticate")
+	for _, h := range authHeaders {
+		if strings.Contains(strings.ToUpper(h), "NTLM") {
+			t.Errorf("Linux/GVFS client must NOT be offered NTLM, got header: %s", h)
+		}
+	}
+	if linuxRec.Header().Get("WWW-Authenticate") != `Basic realm="WebDAV"` {
+		t.Errorf("expected Basic realm=\"WebDAV\", got %q", linuxRec.Header().Get("WWW-Authenticate"))
+	}
+
+	// 2. Windows native client (Microsoft-WebDAV-MiniRedir) -> should get both NTLM and Basic
+	winReq := httptest.NewRequest("PROPFIND", "/", nil)
+	winReq.Header.Set("User-Agent", "Microsoft-WebDAV-MiniRedir/10.0.19045")
+	winReq.RemoteAddr = "192.168.1.100:12345"
+	winRec := httptest.NewRecorder()
+	srv.ServeHTTP(winRec, winReq)
+
+	if winRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", winRec.Code)
+	}
+	winAuthHeaders := winRec.Header().Values("WWW-Authenticate")
+	hasNTLM := false
+	hasBasic := false
+	for _, h := range winAuthHeaders {
+		if strings.Contains(strings.ToUpper(h), "NTLM") {
+			hasNTLM = true
+		}
+		if strings.Contains(h, "Basic") {
+			hasBasic = true
+		}
+	}
+	if !hasNTLM || !hasBasic {
+		t.Errorf("Windows client must be offered both NTLM and Basic, got headers: %v", winAuthHeaders)
+	}
+}
