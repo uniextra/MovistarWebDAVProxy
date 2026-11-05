@@ -1230,10 +1230,12 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 		return n, err
 	}
 	if w.buf.Len()+len(p) > GetUploadRAMBufferMaxBytes() {
-		tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_upload_*")
+		tmpDir := getUploadTempDir()
+		tmp, err := os.CreateTemp(tmpDir, "webdav_upload_*")
 		if err != nil {
 			w.failed = true
 			w.releaseBufferSem()
+			logger.Log("[WebDAV] ❌ No se pudo crear archivo temporal en '%s': %v (verifica permisos o espacio en disco)", tmpDir, err)
 			return 0, err
 		}
 		w.tmpFile = tmp

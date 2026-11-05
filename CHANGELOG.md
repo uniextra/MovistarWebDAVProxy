@@ -2,6 +2,16 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.4] - 2026-11-05
+
+### 🛡️ Permisos y Resiliencia en Almacenamiento Temporal (`WEBDAV_TMPDIR`)
+- **Auto-asignación de permisos en `docker-entrypoint.sh`:**
+  - Se añade inicialización automática para directorios temporales personalizados (`WEBDAV_TMPDIR`, ej. `/app/tmp` mapeado desde el host).
+  - Al arrancar como root, el contenedor crea y asigna la propiedad a `app:app` (UID `10001`) con permisos `700`.
+  - Si el volumen montado desde el host restringe permisos a nivel de sistema de ficheros e impide el acceso al usuario `app`, el contenedor conmuta de forma segura y transparente a ejecución root sin provocar errores `405 Method Not Allowed` / `permission denied` en runtime.
+- **Telemetría y Diagnóstico de Archivos Temporales:**
+  - En caso de fallo al crear el archivo temporal en disco previo a la subida a Movistar/O2 Cloud (`os.CreateTemp`), se emite un log explícito indicando la ruta y el motivo exacto (permisos o falta de espacio libre en disco).
+
 ## [v2.2.3] - 2026-11-05
 
 ### 🐧 Compatibilidad Linux Desktop & Reverse Proxies (Issue #15)
