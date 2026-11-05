@@ -2,6 +2,19 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.5] - 2026-11-05
+
+### 🔒 Seguridad: Corrección de Bypass de Autenticación en NTLMv2 (GHSA-fpxr-64gm-wxvf)
+- **Ligar sesiones NTLM a la conexión TCP real (`net.Conn`):**
+  - Se sustituye el indexado de sesiones autenticadas por `r.RemoteAddr` (par IP:puerto) por un identificador unívoco de conexión mediante `http.Server.ConnContext`.
+  - Evita que clientes no autenticados puedan heredar la sesión NTLM de otro usuario cuando un proxy inverso (Nginx, Traefik, Caddy, etc.) agrupa y reutiliza conexiones TCP upstream.
+- **Invalidación inmediata en cierre de conexión (`ConnState`):**
+  - Implementación de `http.Server.ConnState` para llamar automáticamente a `InvalidateConn(id)` al pasar la conexión a `StateClosed` o `StateHijacked`.
+- **Desactivación de herencia de sesión NTLM tras proxies de confianza (`RemoteIsTrustedProxy`):**
+  - Ante peticiones provenientes de `TRUSTED_PROXIES`, la autenticación se exige de forma estricta por petición sin confiar en la autenticación por conexión TCP upstream.
+- **Suite de tests exhaustiva:** Cobertura con 7 tests unitarios en `internal/webdav/ntlm_connreuse_test.go`.
+- *Agradecimiento especial a @aarizaga90 por el reporte de seguridad responsable y la contribución del parche.*
+
 ## [v2.2.4] - 2026-11-05
 
 ### 🛡️ Permisos y Resiliencia en Almacenamiento Temporal (`WEBDAV_TMPDIR`)

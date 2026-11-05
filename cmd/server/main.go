@@ -82,6 +82,8 @@ func main() {
 		Handler:           webdavServer,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		ConnContext:       webdavServer.ConnContext,
+		ConnState:         webdavServer.ConnState,
 	}
 
 	go func() {

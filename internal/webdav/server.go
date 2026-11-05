@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,8 +41,25 @@ type Server struct {
 	authCfg        config.AuthConfig
 	rateLimiter    *config.AuthRateLimiter
 	ntlmAuth       *config.NTLMAuthenticator
+	connIDs        map[net.Conn]string // conexión TCP -> id, para ligar la auth NTLM a la conexión real
+	connMu         sync.Mutex
 	activeWG       sync.WaitGroup
 	duplicatiStore *DuplicatiProbeStore
+}
+
+// connSeq genera un identificador único por cada conexión TCP aceptada.
+var connSeq atomic.Uint64
+
+type connIDKey struct{}
+
+// WithConnID guarda el identificador de conexión en el contexto de la petición.
+func WithConnID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, connIDKey{}, id)
+}
+
+func connIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(connIDKey{}).(string)
+	return id
 }
 
 func NewServer(client *sapi.Client) *Server {
@@ -53,6 +72,7 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 		fs:             fs,
 		authCfg:        authCfg,
 		rateLimiter:    config.NewAuthRateLimiter(10, time.Minute),
+		connIDs:        make(map[net.Conn]string),
 		ntlmAuth:       config.NewNTLMAuthenticator(),
 		duplicatiStore: fs.getDuplicatiStore(),
 	}
@@ -130,6 +150,32 @@ func (s *Server) WaitActiveUploads(timeout time.Duration) bool {
 	}
 }
 
+// ConnContext asigna un identificador único a cada conexión TCP entrante y lo guarda
+// en el contexto, de modo que la autenticación NTLM quede ligada a la conexión real y
+// no a su par IP:puerto (reutilizable). Se pasa a http.Server.ConnContext.
+func (s *Server) ConnContext(ctx context.Context, c net.Conn) context.Context {
+	id := strconv.FormatUint(connSeq.Add(1), 10)
+	s.connMu.Lock()
+	s.connIDs[c] = id
+	s.connMu.Unlock()
+	return WithConnID(ctx, id)
+}
+
+// ConnState invalida la autenticación NTLM de una conexión cuando se cierra, para que
+// su identidad no pueda heredarse. Se pasa a http.Server.ConnState.
+func (s *Server) ConnState(c net.Conn, state http.ConnState) {
+	if state != http.StateClosed && state != http.StateHijacked {
+		return
+	}
+	s.connMu.Lock()
+	id := s.connIDs[c]
+	delete(s.connIDs, c)
+	s.connMu.Unlock()
+	if id != "" {
+		s.ntlmAuth.InvalidateConn(id)
+	}
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.IsRunning() {
 		http.Error(w, "WebDAV Server Paused", http.StatusServiceUnavailable)
@@ -150,13 +196,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Validación Basic Auth / NTLMv2 y rate-limit por IP (salvo OPTIONS sin credenciales para discovery)
 	if s.authCfg.IsEnabled() {
 		authHeader := r.Header.Get("Authorization")
+		// Identidad de la conexión TCP real (no el par IP:puerto) y si la petición
+		// llega a través de un proxy inverso de confianza. La autenticación NTLM es
+		// por conexión; tras un proxy que agrupa conexiones upstream no puede confiarse.
+		connKey := connIDFromContext(r.Context())
+		viaTrustedProxy := config.RemoteIsTrustedProxy(r)
 		if config.IsNTLMHeader(authHeader) {
 			if s.rateLimiter.IsBlocked(clientIP) {
 				logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
 				http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
 				return
 			}
-			challenge, isType1, ntlmUser, ok := s.ntlmAuth.HandleHandshake(r.RemoteAddr, clientIP, authHeader, s.authCfg)
+			challenge, isType1, ntlmUser, ok := s.ntlmAuth.HandleHandshake(connKey, clientIP, authHeader, s.authCfg)
 			if isType1 {
 				if r.Body != nil {
 					_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
@@ -184,8 +235,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(authHeader)
 			connAuthed := false
-			if !hasAuth && s.ntlmAuth != nil {
-				_, connAuthed = s.ntlmAuth.IsConnAuthenticated(r.RemoteAddr)
+			if !hasAuth && !viaTrustedProxy && connKey != "" && s.ntlmAuth != nil {
+				_, connAuthed = s.ntlmAuth.IsConnAuthenticated(connKey)
 			}
 			if !connAuthed && (method != "OPTIONS" || hasAuth) {
 				if s.rateLimiter.IsBlocked(clientIP) {
@@ -415,4 +466,3 @@ func (r *responseInterceptor) flush() {
 	r.ResponseWriter.WriteHeader(r.statusCode)
 	_, _ = io.WriteString(r.ResponseWriter, rawXML)
 }
-

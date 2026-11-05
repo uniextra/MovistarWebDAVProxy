@@ -250,6 +250,20 @@ func LoadTrustedProxies() *IPMatcher {
 	return ParseIPMatcher(raw)
 }
 
+// RemoteIsTrustedProxy indica si el socket remoto (RemoteAddr) pertenece a la lista
+// TRUSTED_PROXIES; es decir, si la petición llega a través de un proxy inverso de confianza.
+func RemoteIsTrustedProxy(r *http.Request) bool {
+	return RemoteIsTrustedProxyWithMatcher(r, LoadTrustedProxies())
+}
+
+// RemoteIsTrustedProxyWithMatcher permite inyectar el matcher para pruebas.
+func RemoteIsTrustedProxyWithMatcher(r *http.Request, trusted *IPMatcher) bool {
+	if trusted == nil {
+		return false
+	}
+	return trusted.Matches(ExtractPeerIP(r.RemoteAddr))
+}
+
 // ExtractClientIP obtiene la IP del cliente respetando proxies de confianza:
 // 1. Usa la IP del socket remoto (RemoteAddr) como fuente de confianza por defecto.
 // 2. Solo si la IP remota coincide con un proxy de confianza (TRUSTED_PROXIES), evalúa cabeceras X-Forwarded-For o X-Real-IP.
