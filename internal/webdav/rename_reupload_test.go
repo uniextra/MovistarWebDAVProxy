@@ -24,15 +24,16 @@ import (
 //     consultas (en O2 Cloud, unos segundos) y después devuelve la URL real;
 //   - el listado de la carpeta tarda en incluir los archivos recién subidos.
 type reuploadO2 struct {
-	mu      sync.Mutex
-	nextID  int
-	content map[string][]byte // ID -> contenido
-	names   map[string]string // ID -> nombre
-	listed  map[string]bool   // IDs que ya aparecen en el listado de la carpeta
-	deleted []string
-	lag     int            // consultas por ID que responden "no encontrado" tras subir
-	queries map[string]int // ID -> consultas por ID recibidas
-	reads   int            // descargas solicitadas (URL real o por defecto)
+	mu               sync.Mutex
+	nextID           int
+	content          map[string][]byte // ID -> contenido
+	names            map[string]string // ID -> nombre
+	listed           map[string]bool   // IDs que ya aparecen en el listado de la carpeta
+	deleted          []string
+	truncateDownload int            // si >0, la descarga devuelve solo esos bytes (simula descarga corta)
+	lag              int            // consultas por ID que responden "no encontrado" tras subir
+	queries          map[string]int // ID -> consultas por ID recibidas
+	reads            int            // descargas solicitadas (URL real o por defecto)
 }
 
 func newReuploadO2() *reuploadO2 {
@@ -146,6 +147,12 @@ func (f *reuploadO2) handler(t *testing.T) http.Handler {
 			if !ok {
 				jsonOut(w, map[string]interface{}{"error": map[string]interface{}{"code": "MED-1005", "message": "Unable to retrieve media with given id"}})
 				return
+			}
+			f.mu.Lock()
+			trunc := f.truncateDownload
+			f.mu.Unlock()
+			if trunc > 0 && trunc < len(b) {
+				b = b[:trunc]
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = w.Write(b)
@@ -286,4 +293,27 @@ func TestRename_ExtensionChange_SettledFile(t *testing.T) {
 	payload := randomBytes(1024 * 1024)
 	f.seed("c.part", payload)
 	moveAndCheck(t, srv, f, "c.part", "c.zip.aes", payload)
+}
+
+// Una descarga corta (EOF limpio con menos bytes de los anunciados) NO debe re-subir
+// un archivo truncado ni borrar el original: el MOVE falla y el origen se conserva.
+func TestRename_ExtensionChange_ShortDownloadKeepsOriginal(t *testing.T) {
+	f := newReuploadO2()
+	srv := newReuploadServer(t, f)
+	payload := randomBytes(1024 * 1024)
+	oldID := f.seed("c.part", payload) // archivo asentado -> va por la ruta de descarga
+	f.mu.Lock()
+	f.truncateDownload = len(payload) / 2 // O2 entrega solo la mitad
+	f.mu.Unlock()
+
+	rec := do(srv, "MOVE", "/c.part", nil, map[string]string{"Destination": "/c.zip.aes", "Overwrite": "T"})
+	if rec.Code >= 200 && rec.Code < 300 {
+		t.Fatalf("MOVE con descarga incompleta debería fallar, obtenido %d", rec.Code)
+	}
+	if f.wasDeleted(oldID) {
+		t.Fatal("el original se borró tras una descarga incompleta (pérdida de datos)")
+	}
+	if f.idOf("c.zip.aes") != "" {
+		t.Fatal("se creó un destino truncado en la nube")
+	}
 }

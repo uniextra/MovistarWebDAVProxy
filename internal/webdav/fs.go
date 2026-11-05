@@ -171,19 +171,19 @@ func acquireFolderLock(cleanPath string) func() {
 }
 
 type MemoryFile struct {
-	ID        string
-	Name      string
-	FolderID  int64
-	Content   []byte
-	Size      int64
-	ModTime   time.Time // fecha de modificación que se muestra al cliente
-	CachedAt  time.Time // momento en que entró en la caché (caducidad)
-	URL       string
+	ID       string
+	Name     string
+	FolderID int64
+	Content  []byte
+	Size     int64
+	ModTime  time.Time // fecha de modificación que se muestra al cliente
+	CachedAt time.Time // momento en que entró en la caché (caducidad)
+	URL      string
 	// URLConfirmed indica que URL ya se ha obtenido de SAPI consultando el archivo por su ID.
 	URLConfirmed bool
 	// URLLookupFailedAt es el momento del último error al consultar la URL (cero si no hubo).
 	URLLookupFailedAt time.Time
-	MD5       string
+	MD5               string
 }
 
 type CreatedFolder struct {
@@ -949,47 +949,56 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 
 	var reader io.ReadSeeker
 	var cachedContent []byte
+	var n int64
 
 	if content != nil {
+		n = int64(len(content))
 		reader = bytes.NewReader(content)
 		cachedContent = content
-		return mfs.finishReupload(oldMedia, reader, cachedContent, newName, newFolderID, modTime)
-	}
-
-	stream, err := mfs.client.DownloadFileStream(*oldMedia)
-	if err != nil {
-		return nil, fmt.Errorf("moveByReupload download error: %w", err)
-	}
-	defer stream.Close()
-
-	if oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes()) {
-		buf := bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
-		if _, err := io.Copy(buf, stream); err != nil {
-			return nil, fmt.Errorf("moveByReupload buffer error: %w", err)
-		}
-		reader = bytes.NewReader(buf.Bytes())
-		if oldMedia.Size <= 256*1024 {
-			cachedContent = buf.Bytes()
-		}
 	} else {
-		tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_reupload_*")
+		stream, err := mfs.client.DownloadFileStream(*oldMedia)
 		if err != nil {
-			return nil, fmt.Errorf("moveByReupload temp file error: %w", err)
+			return nil, fmt.Errorf("moveByReupload download error: %w", err)
 		}
-		tmpPath := tmp.Name()
-		defer func() {
-			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
-		}()
+		defer stream.Close()
 
-		if _, err := io.Copy(tmp, stream); err != nil {
-			return nil, fmt.Errorf("moveByReupload spool error: %w", err)
+		if oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes()) {
+			buf := bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
+			if n, err = io.Copy(buf, stream); err != nil {
+				return nil, fmt.Errorf("moveByReupload buffer error: %w", err)
+			}
+			reader = bytes.NewReader(buf.Bytes())
+			if oldMedia.Size <= 256*1024 {
+				cachedContent = buf.Bytes()
+			}
+		} else {
+			tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_reupload_*")
+			if err != nil {
+				return nil, fmt.Errorf("moveByReupload temp file error: %w", err)
+			}
+			tmpPath := tmp.Name()
+			defer func() {
+				_ = tmp.Close()
+				_ = os.Remove(tmpPath)
+			}()
+
+			if n, err = io.Copy(tmp, stream); err != nil {
+				return nil, fmt.Errorf("moveByReupload spool error: %w", err)
+			}
+			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("moveByReupload seek error: %w", err)
+			}
+			reader = tmp
 		}
-		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("moveByReupload seek error: %w", err)
-		}
-		reader = tmp
 	}
+
+	// Garantía de integridad: solo se re-sube y se borra el original si tenemos
+	// exactamente los bytes esperados. Una descarga corta terminada en EOF limpio
+	// (menos bytes de los anunciados) no debe provocar la pérdida del original.
+	if n != oldMedia.Size {
+		return nil, fmt.Errorf("moveByReupload: '%s' incompleto (%d de %d bytes); no se modifica el origen", oldMedia.Name, n, oldMedia.Size)
+	}
+
 	return mfs.finishReupload(oldMedia, reader, cachedContent, newName, newFolderID, modTime)
 }
 
@@ -1294,9 +1303,9 @@ func (w *WebDAVFileWriter) Close() error {
 	return nil
 }
 
-func (w *WebDAVFileWriter) Read(p []byte) (n int, err error) { return 0, io.EOF }
+func (w *WebDAVFileWriter) Read(p []byte) (n int, err error)             { return 0, io.EOF }
 func (w *WebDAVFileWriter) Seek(offset int64, whence int) (int64, error) { return 0, nil }
-func (w *WebDAVFileWriter) Readdir(count int) ([]os.FileInfo, error) { return nil, fs.ErrInvalid }
+func (w *WebDAVFileWriter) Readdir(count int) ([]os.FileInfo, error)     { return nil, fs.ErrInvalid }
 func (w *WebDAVFileWriter) Stat() (os.FileInfo, error) {
 	modTime := time.Now()
 	if !w.modTime.IsZero() {
@@ -1455,10 +1464,12 @@ func NewWebDAVMemoryReader(path string, mem *MemoryFile) *WebDAVMemoryReader {
 	}
 }
 
-func (m *WebDAVMemoryReader) Read(p []byte) (n int, err error) { return m.reader.Read(p) }
+func (m *WebDAVMemoryReader) Read(p []byte) (n int, err error)  { return m.reader.Read(p) }
 func (m *WebDAVMemoryReader) Write(p []byte) (n int, err error) { return 0, fs.ErrPermission }
-func (m *WebDAVMemoryReader) Close() error { return nil }
-func (m *WebDAVMemoryReader) Seek(offset int64, whence int) (int64, error) { return m.reader.Seek(offset, whence) }
+func (m *WebDAVMemoryReader) Close() error                      { return nil }
+func (m *WebDAVMemoryReader) Seek(offset int64, whence int) (int64, error) {
+	return m.reader.Seek(offset, whence)
+}
 func (m *WebDAVMemoryReader) Readdir(count int) ([]os.FileInfo, error) { return nil, fs.ErrInvalid }
 func (m *WebDAVMemoryReader) Stat() (os.FileInfo, error) {
 	return &VirtualFileInfo{name: m.mem.Name, size: m.mem.Size, mode: 0644, modTime: m.mem.ModTime}, nil
@@ -1478,9 +1489,9 @@ func NewWebDAVDirReader(mfs *MovistarFS, path string, folderID int64) *WebDAVDir
 	return &WebDAVDirReader{mfs: mfs, path: path, folderID: folderID}
 }
 
-func (d *WebDAVDirReader) Read(p []byte) (n int, err error) { return 0, io.EOF }
+func (d *WebDAVDirReader) Read(p []byte) (n int, err error)  { return 0, io.EOF }
 func (d *WebDAVDirReader) Write(p []byte) (n int, err error) { return 0, fs.ErrPermission }
-func (d *WebDAVDirReader) Close() error                     { return nil }
+func (d *WebDAVDirReader) Close() error                      { return nil }
 
 func (d *WebDAVDirReader) Seek(offset int64, whence int) (int64, error) {
 	d.mu.Lock()
