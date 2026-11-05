@@ -1,6 +1,7 @@
 package sapi
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -1555,10 +1557,88 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(ct, "application/json") || strings.Contains(ct, "text/javascript") {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		resp.Body.Close()
-		return nil, fmt.Errorf("cloud returned error JSON instead of file: %s", string(b))
+		br := bufio.NewReader(resp.Body)
+		peek, _ := br.Peek(4096)
+
+		isError := isSAPIErrorJSON(peek)
+		if !isError && isDefiniteBinaryFile(item.Name) {
+			isError = true
+		}
+
+		if isError {
+			b, _ := io.ReadAll(io.LimitReader(br, 1<<20))
+			resp.Body.Close()
+			return nil, fmt.Errorf("cloud returned error JSON instead of file: %s", string(b))
+		}
+
+		return &bufioReadCloser{Reader: br, Closer: resp.Body}, nil
 	}
 
 	return resp.Body, nil
+}
+
+type bufioReadCloser struct {
+	*bufio.Reader
+	io.Closer
+}
+
+func isSAPIErrorJSON(b []byte) bool {
+	trimmed := bytes.TrimSpace(b)
+	trimmed = bytes.TrimPrefix(trimmed, []byte("\xef\xbb\xbf"))
+	if !bytes.HasPrefix(trimmed, []byte("{")) {
+		return false
+	}
+
+	var detector struct {
+		Error     interface{} `json:"error"`
+		ErrorCode interface{} `json:"error_code"`
+		Status    string      `json:"status"`
+	}
+
+	if err := json.Unmarshal(trimmed, &detector); err != nil {
+		return false
+	}
+
+	if detector.Error != nil {
+		switch v := detector.Error.(type) {
+		case map[string]interface{}:
+			if v["code"] != nil || v["message"] != nil {
+				return true
+			}
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return true
+			}
+		}
+	}
+	if detector.ErrorCode != nil {
+		switch v := detector.ErrorCode.(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return true
+			}
+		case float64:
+			return true
+		}
+	}
+	if strings.EqualFold(detector.Status, "error") || strings.EqualFold(detector.Status, "fail") {
+		return true
+	}
+
+	return false
+}
+
+func isDefiniteBinaryFile(name string) bool {
+	ext := strings.ToLower(path.Ext(strings.ReplaceAll(name, "\\", "/")))
+	switch ext {
+	case ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zip", ".7z", ".rar", ".iso", ".img",
+		".bin", ".exe", ".dll", ".so", ".dmg", ".pkg", ".deb", ".rpm",
+		".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff",
+		".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
+		".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a",
+		".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx":
+		return true
+	default:
+		return false
+	}
 }

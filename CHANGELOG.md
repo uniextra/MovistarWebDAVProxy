@@ -2,6 +2,15 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.2] - 2026-11-05
+
+### 🐛 Corrección: Descarga de Archivos JSON y Metadatos de Home Assistant (Issue #11)
+- **Soporte transparente para descarga de archivos JSON / JS legítimos:**
+  - Se corrigió el falso positivo en `DownloadFileStreamRange` (`internal/sapi/client.go`), donde cualquier respuesta HTTP 200 con `Content-Type: application/json` o `text/javascript` era rechazada incondicionalmente como error de la API SAPI.
+  - Ahora se realiza una inspección no destructiva de los primeros bytes mediante `bufio.Reader.Peek()`: solo se descartan las respuestas que efectivamente contengan la estructura de error de SAPI (`{"error": {"code": ...}}`, `error_code`, `status: "error"`) o si el archivo solicitado es un binario (`.tar`, `.zip`, `.iso`, etc.) que no debería retornar JSON.
+  - Si el archivo descargado es un JSON de usuario válido (como los metadatos `<backup_id>.metadata.json` generados por el agente de backups de Home Assistant), el flujo se transmite íntegramente al cliente sin cortes ni excepciones `ContentLengthError (received 0 of N bytes)`.
+  - Cobertura de tests unitarios exhaustiva en `internal/sapi/download_json_test.go`.
+
 ## [v2.2.1] - 2026-11-05
 
 ### 🪟 Autenticación NTLMv2 y Reconexión Persistente en Windows
