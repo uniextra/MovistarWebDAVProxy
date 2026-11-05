@@ -7,7 +7,10 @@
 [![Image Size](https://img.shields.io/badge/Image%20Size-~20%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![RAM Usage](https://img.shields.io/badge/RAM%20Usage-~6.5%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 
-Proxy WebDAV nativo de alto rendimiento escrito íntegramente en **Go** que traduce peticiones estándar WebDAV (**Synology HyperBackup**, **Duplicati**, **Rclone**, mapeo de discos en **Windows / macOS / Linux**) a la API oficial de **Movistar Cloud España** y **O2 Cloud** en tiempo real y sin intermediarios.
+> [!NOTE]
+> **Aviso de Proyecto No Oficial e Independiente:** Este software es un desarrollo comunitario y no oficial para fines de interoperabilidad y copias de seguridad personales. No está afiliado, asociado, patrocinado ni respaldado por Telefónica, S.A. ni por Movistar/O2. Consulta [DISCLAIMER.md](DISCLAIMER.md) y [TRADEMARKS.md](TRADEMARKS.md) para más información.
+
+Proxy WebDAV nativo de alto rendimiento escrito íntegramente en **Go** que traduce peticiones estándar WebDAV (**Synology HyperBackup**, **Duplicati**, **Rclone**, mapeo de discos en **Windows / macOS / Linux**) permitiendo la interoperabilidad y sincronización directa con los servicios en la nube de **Movistar Cloud España** y **O2 Cloud** de forma local, en tiempo real y sin intermediarios.
 
 Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparente y segura para tus servidores, ordenadores y copias de seguridad de NAS.
 
@@ -27,7 +30,8 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 6. [🧹 Filtro Inteligente de Basura del SO (v2.1.0)](#-filtro-inteligente-de-basura-del-so-v210)
 7. [⚠️ Limitaciones Conocidas de Movistar / O2 Cloud](#️-limitaciones-conocidas-de-movistar--o2-cloud)
 8. [📚 Documentación Detallada](#-documentación-detallada)
-9. [📄 Licencia](#-licencia)
+9. [⚖️ Aviso Legal y Marcas](#️-aviso-legal-y-marcas)
+10. [📄 Licencia](#-licencia)
 
 ---
 
@@ -37,7 +41,7 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 * 🔄 **Traducción Completa de WebDAV (RFC 4918):** Soporta `PROPFIND` (paginación automática de miles de archivos), `PUT` (streaming directo a disco sin saturar RAM), `GET`/`HEAD` (con soporte para peticiones `Range` y streaming por chunks), `MKCOL`, `DELETE`, `MOVE`, `COPY` y bloqueos `LOCK`/`UNLOCK`.
 * 📊 **Cuotas Virtuales RFC 4331:** Informa del espacio disponible para que asistentes como Synology DSM o Duplicati no fallen por chequeos de espacio insuficiente.
 * 🚦 **Semáforo de Concurrencia (3 Transfers Máximo):** Optimiza las subidas y descargas masivas al ancho de banda óptimo de Telefónica previniendo bloqueos por *rate-limit*.
-* 📱 **Autenticación Oficial Windows + OAuth2 PKCE:** Emula el cliente de escritorio oficial (`omh windows client`) con sincronización milimétrica de timestamps y soporte para verificación SMS oficial desde el navegador.
+* 📱 **Autenticación Compatible + OAuth2 PKCE:** Implementa el flujo de autenticación del cliente de escritorio (`omh windows client`) con sincronización milimétrica de timestamps y soporte para verificación SMS oficial desde el navegador.
 * 🛡️ **Protección contra Colisiones:** Previene la creación de duplicados automáticos como ` (1)` al actualizar o mover archivos.
 * 🧹 **Absorbedor de Basura de SO (*DevNull Absorber*):** Filtra y neutraliza automáticamente archivos innecesarios de Windows, macOS y Linux.
 
@@ -246,6 +250,13 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
 
 * [📖 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)
 * [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone](docs/backup-clients.md)
+
+---
+
+## ⚖️ Aviso Legal y Marcas
+
+* [📋 Descargo de Responsabilidad (DISCLAIMER.md)](DISCLAIMER.md)
+* [🏷️ Política de Marcas Registradas (TRADEMARKS.md)](TRADEMARKS.md)
 
 ---
 
