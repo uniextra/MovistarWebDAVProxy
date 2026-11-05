@@ -32,13 +32,14 @@ var (
 )
 
 type Server struct {
-	handler     *webdav.Handler
-	fs          *MovistarFS
-	running     atomic.Bool
-	authCfg     config.AuthConfig
-	rateLimiter *config.AuthRateLimiter
-	ntlmAuth    *config.NTLMAuthenticator
-	activeWG    sync.WaitGroup
+	handler        *webdav.Handler
+	fs             *MovistarFS
+	running        atomic.Bool
+	authCfg        config.AuthConfig
+	rateLimiter    *config.AuthRateLimiter
+	ntlmAuth       *config.NTLMAuthenticator
+	activeWG       sync.WaitGroup
+	duplicatiStore *DuplicatiProbeStore
 }
 
 func NewServer(client *sapi.Client) *Server {
@@ -48,10 +49,11 @@ func NewServer(client *sapi.Client) *Server {
 func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 	fs := NewMovistarFS(client)
 	s := &Server{
-		fs:          fs,
-		authCfg:     authCfg,
-		rateLimiter: config.NewAuthRateLimiter(10, time.Minute),
-		ntlmAuth:    config.NewNTLMAuthenticator(),
+		fs:             fs,
+		authCfg:        authCfg,
+		rateLimiter:    config.NewAuthRateLimiter(10, time.Minute),
+		ntlmAuth:       config.NewNTLMAuthenticator(),
+		duplicatiStore: fs.getDuplicatiStore(),
 	}
 	h := &webdav.Handler{
 		FileSystem: fs,
@@ -65,6 +67,13 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 	s.handler = h
 	s.running.Store(true)
 	return s
+}
+
+func (s *Server) getDuplicatiStore() *DuplicatiProbeStore {
+	if s != nil && s.duplicatiStore != nil {
+		return s.duplicatiStore
+	}
+	return globalDuplicatiStore
 }
 
 func (s *Server) InvalidateCache() {
@@ -186,6 +195,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if method == "OPTIONS" || method == "PUT" || method == "GET" || method == "DELETE" || method == "MOVE" ||
 		method == "MKCOL" || method == "PROPFIND" || method == "HEAD" || method == "LOCK" || method == "UNLOCK" {
 		logger.Log("[WebDAV] ⚡ %s -> %s %s", clientIP, method, urlPath)
+	}
+
+	// Interceptar sondas de prueba de Duplicati (duplicati-access-privileges-test.tmp)
+	// para absorberlas completamente en memoria sin enviar extensiones .tmp a Telefónica SAPI
+	if s.handleDuplicatiProbe(w, r, urlPath) {
+		return
 	}
 
 	// 2. Rechazar PUT a colecciones según RFC 4918 §9.7.1 y validar límite de subida

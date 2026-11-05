@@ -3,6 +3,7 @@ package webdav
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -369,5 +370,104 @@ func TestWebDAV_RenameExtensionChange_MoveByReupload(t *testing.T) {
 
 	if moveRec.Code != http.StatusCreated && moveRec.Code != http.StatusNoContent {
 		t.Fatalf("expected 201 Created or 204 No Content on MOVE with extension change, got %d (body: %s)", moveRec.Code, moveRec.Body.String())
+	}
+}
+
+func TestWebDAV_DuplicatiAccessPrivilegesProbe(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+
+	probePath := "/Duplicati_Server/duplicati-access-privileges-test.tmp"
+	payload := []byte("duplicati-test-probe-content-xyz")
+
+	// 1. PUT: debe devolver 201 Created y ETag simulado sin contactar con Telefónica SAPI
+	putReq := httptest.NewRequest("PUT", probePath, bytes.NewReader(payload))
+	putRec := httptest.NewRecorder()
+	srv.ServeHTTP(putRec, putReq)
+
+	if putRec.Code != http.StatusCreated && putRec.Code != http.StatusNoContent {
+		t.Fatalf("PUT probe: expected 201 Created, got %d (body: %s)", putRec.Code, putRec.Body.String())
+	}
+	etag := putRec.Header().Get("ETag")
+	if etag == "" {
+		t.Errorf("PUT probe: expected ETag header in response")
+	}
+
+	// 2. HEAD: debe devolver 200 OK, Content-Length y ETag correctos
+	headReq := httptest.NewRequest("HEAD", probePath, nil)
+	headRec := httptest.NewRecorder()
+	srv.ServeHTTP(headRec, headReq)
+
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("HEAD probe: expected 200 OK, got %d", headRec.Code)
+	}
+	expectedLen := fmt.Sprintf("%d", len(payload))
+	if headRec.Header().Get("Content-Length") != expectedLen {
+		t.Errorf("HEAD probe: expected Content-Length %s, got %s", expectedLen, headRec.Header().Get("Content-Length"))
+	}
+	if headRec.Header().Get("ETag") != etag {
+		t.Errorf("HEAD probe: expected ETag %s, got %s", etag, headRec.Header().Get("ETag"))
+	}
+
+	// 3. GET: debe devolver 200 OK y el contenido exacto escrito
+	getReq := httptest.NewRequest("GET", probePath, nil)
+	getRec := httptest.NewRecorder()
+	srv.ServeHTTP(getRec, getReq)
+
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET probe: expected 200 OK, got %d", getRec.Code)
+	}
+	if !bytes.Equal(getRec.Body.Bytes(), payload) {
+		t.Errorf("GET probe: expected body %q, got %q", string(payload), getRec.Body.String())
+	}
+	if getRec.Header().Get("ETag") != etag {
+		t.Errorf("GET probe: expected ETag %s, got %s", etag, getRec.Header().Get("ETag"))
+	}
+
+	// 4. PROPFIND en el archivo: debe devolver 207 MultiStatus con XML WebDAV válido
+	propReq := httptest.NewRequest("PROPFIND", probePath, nil)
+	propRec := httptest.NewRecorder()
+	srv.ServeHTTP(propRec, propReq)
+
+	if propRec.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND probe: expected 207 MultiStatus, got %d", propRec.Code)
+	}
+	propXML := propRec.Body.String()
+	if !strings.Contains(propXML, "duplicati-access-privileges-test.tmp") || !strings.Contains(propXML, "HTTP/1.1 200 OK") {
+		t.Errorf("PROPFIND probe: unexpected XML output:\n%s", propXML)
+	}
+
+	// 5. DELETE: debe devolver 204 No Content
+	delReq := httptest.NewRequest("DELETE", probePath, nil)
+	delRec := httptest.NewRecorder()
+	srv.ServeHTTP(delRec, delReq)
+
+	if delRec.Code != http.StatusNoContent && delRec.Code != http.StatusOK {
+		t.Fatalf("DELETE probe: expected 204 No Content, got %d", delRec.Code)
+	}
+
+	// 6. GET tras DELETE: debe responder 200 OK con dummy payload (resiliencia para tests repetidos)
+	getAfterDel := httptest.NewRequest("GET", probePath, nil)
+	recAfterDel := httptest.NewRecorder()
+	srv.ServeHTTP(recAfterDel, getAfterDel)
+
+	if recAfterDel.Code != http.StatusOK {
+		t.Fatalf("GET after DELETE: expected 200 OK fallback dummy, got %d", recAfterDel.Code)
+	}
+
+	// 7. Test con prefijo duplicati y sufijo .tmp genérico
+	genericProbe := "/duplicati-control-probe.tmp"
+	putGen := httptest.NewRequest("PUT", genericProbe, strings.NewReader("dummy-probe-data"))
+	recGen := httptest.NewRecorder()
+	srv.ServeHTTP(recGen, putGen)
+
+	if recGen.Code != http.StatusCreated && recGen.Code != http.StatusNoContent {
+		t.Fatalf("PUT generic probe: expected 201 Created, got %d", recGen.Code)
+	}
+
+	// 8. Comprobar que archivos reales de backup (ej. .zip.aes) NO son absorbidos como sonda
+	realBackup := "/Duplicati_Server/duplicati-b001vol.zip.aes"
+	if isDuplicatiTestPath(realBackup) {
+		t.Fatalf("real backup file %s should NOT be identified as a probe", realBackup)
 	}
 }
