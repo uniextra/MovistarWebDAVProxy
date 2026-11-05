@@ -2,6 +2,17 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.3] - 2026-11-05
+
+### 🛡️ Absorción en Memoria del Test de Privilegios de Duplicati (duplicati-access-privileges-test.tmp)
+- **Intercepción y simulación transparente en RAM sin llamadas a Telefónica SAPI:**
+  - Duplicati ejecuta un test de acceso obligatorio creando, leyendo y borrando un archivo de sonda denominado `duplicati-access-privileges-test.tmp`.
+  - La API SAPI de Movistar / O2 Cloud rechaza incondicionalmente archivos con extensión `.tmp` devolviendo `SAPI error MED-1000: Unknown exception in media handling` (HTTP 500 / 405).
+  - Se implementó un subsistema concurrente en memoria (`DuplicatiProbeStore`, `internal/webdav/duplicati.go`) que absorbe todo el ciclo de vida del test (PUT -> 201 Created con ETag, GET/HEAD -> 200 OK con payload verificado, DELETE -> 204 No Content, PROPFIND -> 207 Multi-Status) sin contactar jamás con Telefónica SAPI.
+  - Implementación con protección de doble capa: intercepción inmediata en el handler HTTP de WebDAV (`internal/webdav/server.go`) con persistencia volátil acotada en memoria (10 MB máx, TTL 5 min) y blindaje a nivel de sistema de archivos (`internal/webdav/fs.go`).
+  - Trazas limpias en log: `[WebDAV] 🛡️ Interceptado test de Duplicati (...)`.
+  - Cobertura de tests unitarios completa en `internal/webdav/server_test.go`.
+
 ## [v2.2.2] - 2026-11-05
 
 ### 🐛 Corrección: Descarga de Archivos JSON y Metadatos de Home Assistant (Issue #11)
