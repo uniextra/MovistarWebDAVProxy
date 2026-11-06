@@ -3,6 +3,8 @@ package webdav
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -814,6 +816,10 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 		return nil
 	}
 
+	// Lock por path: contiende con un MOVE/PUT en curso sobre el mismo fichero.
+	unlock := acquireFolderLock(cleanPath)
+	defer unlock()
+
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
 		return nil // WebDAV idempotencia
@@ -871,6 +877,22 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 	}
 	if isOSJunkPath(oldClean) && !isOSJunkPath(newClean) {
 		return nil
+	}
+
+	// Lock por path (dentro de este proceso) para serializar MOVE/PUT/DELETE del
+	// mismo fichero y evitar que otro proceso borre o sobrescriba el origen a mitad
+	// del move. Se toman origen y destino en orden total (orden alfabético) para no
+	// generar interbloqueos entre dos renombrados cruzados.
+	// Nota: solo protege dentro de una instancia del proxy, no entre varias.
+	lkA, lkB := oldClean, newClean
+	if lkA > lkB {
+		lkA, lkB = lkB, lkA
+	}
+	unlockA := acquireFolderLock(lkA)
+	defer unlockA()
+	if lkB != lkA {
+		unlockB := acquireFolderLock(lkB)
+		defer unlockB()
 	}
 
 	newParentDir := path.Dir(newClean)
@@ -997,8 +1019,14 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 	var cachedContent []byte
 	var n int64
 
+	// Se calcula el sha256 de los bytes que se van a subir (sea desde la copia en
+	// memoria o según se descargan), para después verificar que el destino quedó con
+	// exactamente ese contenido antes de borrar el original.
+	hasher := sha256.New()
+
 	if content != nil {
 		n = int64(len(content))
+		_, _ = hasher.Write(content)
 		reader = bytes.NewReader(content)
 		cachedContent = content
 	} else {
@@ -1010,7 +1038,7 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 
 		if oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes()) {
 			buf := bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
-			if n, err = io.Copy(buf, stream); err != nil {
+			if n, err = io.Copy(io.MultiWriter(buf, hasher), stream); err != nil {
 				return nil, fmt.Errorf("moveByReupload buffer error: %w", err)
 			}
 			reader = bytes.NewReader(buf.Bytes())
@@ -1028,7 +1056,7 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 				_ = os.Remove(tmpPath)
 			}()
 
-			if n, err = io.Copy(tmp, stream); err != nil {
+			if n, err = io.Copy(io.MultiWriter(tmp, hasher), stream); err != nil {
 				return nil, fmt.Errorf("moveByReupload spool error: %w", err)
 			}
 			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
@@ -1045,31 +1073,116 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 		return nil, fmt.Errorf("moveByReupload: '%s' incompleto (%d de %d bytes); no se modifica el origen", oldMedia.Name, n, oldMedia.Size)
 	}
 
-	return mfs.finishReupload(oldMedia, reader, cachedContent, newName, newFolderID, modTime)
+	srcHash := hex.EncodeToString(hasher.Sum(nil))
+	// En la ruta de descarga (content == nil) el origen estaba en la nube: se releerá
+	// el destino entero y se comparará por hash. En la ruta de contenido tenemos los
+	// bytes exactos en memoria, así que se verifica el destino por tamaño (sin forzar
+	// una descarga) y el contenido queda respaldado por la copia en RAM.
+	return mfs.finishReupload(oldMedia, reader, cachedContent, newName, newFolderID, modTime, srcHash, content == nil)
 }
 
-func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSeeker, cachedContent []byte, newName string, newFolderID int64, modTime time.Time) (*MemoryFile, error) {
+func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSeeker, cachedContent []byte, newName string, newFolderID int64, modTime time.Time, srcHash string, verifyContent bool) (*MemoryFile, error) {
 	newItem, err := mfs.client.UploadFileToFolder(newName, reader, oldMedia.Size, newFolderID, "", "", modTime)
 	if err != nil {
 		return nil, fmt.Errorf("moveByReupload upload error: %w", err)
 	}
 
-	// Únicamente tras confirmar la subida del nuevo archivo se elimina el original
+	// No fiarse del acuse de la subida: el ID nuevo debe existir y ser distinto del
+	// original (si no, borraríamos el propio origen).
+	if newItem.ID == "" || newItem.ID == oldMedia.ID {
+		return nil, fmt.Errorf("moveByReupload: la subida de '%s' no devolvió un ID nuevo (%q); no se borra el origen", newName, newItem.ID)
+	}
+
+	// Antes de borrar el original se confirma que el destino quedó realmente
+	// persistido: tamaño de metadato correcto, contenido recuperable entero, y con
+	// el mismo sha256 que se subió. Un destino que aún no se sirve (lectura vacía con
+	// EOF limpio) no es prueba de fallo: se reintenta hasta reuploadSourceWait.
+	confirmedURL := newItem.URL
+	confirmed := false
+	deadline := time.Now().Add(reuploadSourceWait)
+	for {
+		dst, qErr := mfs.client.GetMediaByID(newItem.ID)
+		if qErr == nil && dst != nil {
+			if dst.Size != oldMedia.Size {
+				return nil, fmt.Errorf("moveByReupload: destino '%s' con tamaño %d, se esperaban %d bytes; no se borra el origen", newName, dst.Size, oldMedia.Size)
+			}
+			if dst.URL != "" {
+				confirmedURL = dst.URL
+			}
+			if !verifyContent || oldMedia.Size == 0 {
+				// Ruta de contenido (bytes conocidos en RAM) o fichero vacío: el tamaño
+				// del metadato confirma el destino; no se fuerza una descarga de relectura
+				// (el contenido ya lo garantizan los bytes exactos que tenemos en memoria).
+				//
+				// AVISO (coste medido contra O2 real): confirmar el destino por metadato
+				// añade la espera a que SAPI indexe el recién subido, así que un renombrado
+				// pequeño con cambio de extensión pasa de ~1 s a unos segundos. Se elige a
+				// propósito por seguridad (no borrar el origen sin confirmar el destino). Si
+				// esa latencia molesta en cargas con muchos renombrados pequeños (p. ej.
+				// Duplicati), aquí es donde se podría relajar a confiar solo en la copia en
+				// RAM. No se ha hecho: el proyecto prioriza no perder datos.
+				//
+				// Nota: el etag de O2 NO sirve para verificar sin descargar; es un resumen
+				// de 16 bytes sobre el objeto almacenado (cifrado), no el hash del contenido
+				// original (comprobado contra la cuenta real), y no hay otro checksum del
+				// contenido en el SAPI.
+				confirmed = true
+				break
+			}
+			vItem := sapi.MediaItem{ID: newItem.ID, Name: newName, Size: oldMedia.Size, URL: confirmedURL, FolderID: newFolderID}
+			vstream, vErr := mfs.client.DownloadFileStream(vItem)
+			if vErr != nil {
+				return nil, fmt.Errorf("moveByReupload: no se pudo leer el destino '%s' para verificarlo: %w; no se borra el origen", newName, vErr)
+			}
+			h := sha256.New()
+			willCache := oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes())
+			var vbuf *bytes.Buffer
+			var vdst io.Writer = h
+			if willCache {
+				vbuf = bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
+				vdst = io.MultiWriter(vbuf, h)
+			}
+			vn, cpErr := io.Copy(vdst, vstream)
+			_ = vstream.Close()
+			if cpErr != nil {
+				return nil, fmt.Errorf("moveByReupload: lectura del destino '%s' incompleta: %w; no se borra el origen", newName, cpErr)
+			}
+			if vn == oldMedia.Size {
+				if srcHash != "" && hex.EncodeToString(h.Sum(nil)) != srcHash {
+					return nil, fmt.Errorf("moveByReupload: el contenido del destino '%s' no coincide con el origen (sha256); no se borra el origen", newName)
+				}
+				if willCache {
+					cachedContent = vbuf.Bytes()
+				}
+				confirmed = true
+				break
+			}
+			// vn != size con EOF limpio: el destino existe pero aún no se sirve entero,
+			// como cualquier subida reciente. No es prueba de fallo: se reintenta.
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("moveByReupload: no se pudo confirmar el destino '%s' a tiempo; no se borra el origen", newName)
+		}
+		time.Sleep(reuploadSourcePoll)
+	}
+
+	// Confirmado: ya es seguro borrar el original.
 	if err := mfs.client.DeleteFile(oldMedia.ID); err != nil {
 		logger.Log("[WebDAV] ⚠️ Advertencia: No se pudo eliminar el archivo original '%s' tras re-subida: %v", oldMedia.Name, err)
 	}
 
-	logger.Log("[WebDAV] ✔ Re-subida completada: '%s' -> '%s' (Nuevo ID: %s)", oldMedia.Name, newName, newItem.ID)
+	logger.Log("[WebDAV] ✔ Re-subida completada y verificada: '%s' -> '%s' (Nuevo ID: %s)", oldMedia.Name, newName, newItem.ID)
 	now := time.Now()
 	return &MemoryFile{
-		ID:       newItem.ID,
-		Name:     newName,
-		FolderID: newFolderID,
-		Content:  cachedContent,
-		Size:     oldMedia.Size,
-		ModTime:  modTime,
-		CachedAt: now,
-		URL:      newItem.URL,
+		ID:           newItem.ID,
+		Name:         newName,
+		FolderID:     newFolderID,
+		Content:      cachedContent,
+		Size:         oldMedia.Size,
+		ModTime:      modTime,
+		CachedAt:     now,
+		URL:          confirmedURL,
+		URLConfirmed: confirmed,
 	}, nil
 }
 
@@ -1290,6 +1403,11 @@ func (w *WebDAVFileWriter) Close() error {
 		w.cleanupTemp()
 		return errors.New("upload buffer corrupted or closed after failure")
 	}
+
+	// Lock por path: contiende con un MOVE/DELETE en curso sobre el mismo fichero,
+	// de modo que la subida y la actualización de caché no se crucen con ellos.
+	unlock := acquireFolderLock(w.path)
+	defer unlock()
 
 	sizeMB := float64(w.size) / (1024 * 1024)
 	logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)

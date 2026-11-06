@@ -46,6 +46,35 @@ func newMockSAPIServer(t *testing.T) *httptest.Server {
 				},
 			})
 		case path == "/sapi/media" && action == "get":
+			// GetMediaByID llega aquí con un cuerpo {data:{ids:[...]}}. Se devuelve
+			// cada id solicitado (modela también el destino recién re-subido, id 777),
+			// con el mismo tamaño y contenido que sirve /sapi/media/content ("hello world").
+			var q struct {
+				Data struct {
+					IDs []string `json:"ids"`
+				} `json:"data"`
+			}
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &q)
+			if len(q.Data.IDs) > 0 {
+				media := make([]map[string]interface{}, 0, len(q.Data.IDs))
+				for _, id := range q.Data.IDs {
+					name := "hello.txt"
+					if id == "777" {
+						name = "hello.md"
+					}
+					media = append(media, map[string]interface{}{
+						"id": id, "name": name, "size": 11, "folderid": 100,
+						"url":              "/sapi/media/content?id=" + id,
+						"creationdate":     "20260101T000000Z",
+						"modificationdate": "20260101T000000Z",
+					})
+				}
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"data": map[string]interface{}{"media": media},
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
 					"media": []map[string]interface{}{

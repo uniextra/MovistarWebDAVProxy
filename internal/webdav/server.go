@@ -327,6 +327,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ct = "application/octet-stream"
 		}
 		w.Header().Set("Content-Type", ct)
+
+		// Vigilar que el cuerpo llegue entero: si O2 responde 200/206 con la longitud
+		// anunciada pero no entrega ni un byte (p. ej. un archivo recién subido que aún
+		// no se sirve), convertir ese cuerpo vacío en un 5xx completo en vez de un
+		// 200/206 truncado que el cliente tomaría por bueno. Un cuerpo corto (truncado
+		// a mitad de la transmisión) se deja como está: el cliente ya lo detecta con
+		// 'unexpected EOF', igual que hasta ahora.
+		g := &getBodyGuard{ResponseWriter: w, isHEAD: method == "HEAD"}
+		s.handler.ServeHTTP(g, r)
+		g.finish()
+		return
 	}
 
 	// 5. Interceptar PROPFIND para inyectar cuotas RFC 4331 si las solicitan (Hyper Backup / Duplicati)
@@ -342,6 +353,80 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.handler.ServeHTTP(w, r)
+}
+
+// getBodyGuard envuelve el ResponseWriter de un GET/HEAD y retrasa el envío de la
+// cabecera hasta el primer byte del cuerpo. Así, si el handler anuncia 200/206 con
+// longitud > 0 pero acaba sin escribir ni un byte (O2 devuelve el contenido vacío de
+// un archivo que aún no sirve), se sustituye por un 5xx completo en vez de entregar un
+// 200/206 truncado que el cliente tomaría por bueno. Un cuerpo corto (algún byte y
+// luego EOF) no se toca: ya se detecta como 'unexpected EOF'. HEAD y las respuestas de
+// longitud 0 legítimas (archivo vacío) tampoco se alteran.
+type getBodyGuard struct {
+	http.ResponseWriter
+	isHEAD       bool
+	code         int
+	wroteHeader  bool
+	flushed      bool
+	bytesWritten int64
+}
+
+func (g *getBodyGuard) WriteHeader(code int) {
+	if g.flushed {
+		return
+	}
+	g.code = code
+	g.wroteHeader = true
+}
+
+func (g *getBodyGuard) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if !g.flushed {
+		g.flushReal()
+	}
+	n, err := g.ResponseWriter.Write(p)
+	g.bytesWritten += int64(n)
+	return n, err
+}
+
+// flushReal envía al cliente la cabecera capturada tal cual.
+func (g *getBodyGuard) flushReal() {
+	if g.flushed {
+		return
+	}
+	g.flushed = true
+	code := g.code
+	if !g.wroteHeader {
+		code = http.StatusOK
+	}
+	g.ResponseWriter.WriteHeader(code)
+}
+
+// finish se llama tras volver el handler. Si la cabecera aún no se envió y resulta ser
+// un 200/206 con longitud anunciada > 0 del que no salió ni un byte, se convierte en
+// 503 completo; en cualquier otro caso se envía la cabecera capturada sin cambios.
+func (g *getBodyGuard) finish() {
+	if g.flushed || !g.wroteHeader {
+		return
+	}
+	if !g.isHEAD && (g.code == http.StatusOK || g.code == http.StatusPartialContent) {
+		expected, _ := strconv.ParseInt(g.Header().Get("Content-Length"), 10, 64)
+		if expected > 0 && g.bytesWritten == 0 {
+			const msg = "upstream devolvió un cuerpo vacío para un archivo no vacío"
+			g.flushed = true
+			h := g.Header()
+			h.Del("Content-Range")
+			h.Del("Etag")
+			h.Del("Last-Modified")
+			h.Set("Content-Length", strconv.Itoa(len(msg)))
+			g.ResponseWriter.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = g.ResponseWriter.Write([]byte(msg))
+			return
+		}
+	}
+	g.flushReal()
 }
 
 type maxUploadReader struct {
