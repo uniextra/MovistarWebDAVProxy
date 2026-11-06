@@ -2,6 +2,19 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.6] - 2026-11-06
+
+### 🛡️ Integridad de Datos y Robustez en Re-subidas (`moveByReupload`) (PR #20)
+- **Confirmación estricta del destino antes de borrar el origen:**
+  - En renombrados con cambio de extensión que requieren re-subida, el archivo original en Movistar/O2 Cloud ya no se elimina inmediatamente tras el acuse del POST de subida.
+  - Se verifica que el archivo de destino exista en SAPI (`GetMediaByID`), tenga un ID nuevo válido y que su tamaño coincida exactamente con el original.
+  - Para archivos transmitidos en flujo (no cacheados en memoria), se re-descarga el archivo subido calculando y comparando su hash SHA-256 contra el origen. Si no coincide o se agota el tiempo de espera, la operación aborta y el archivo de origen se conserva intacto.
+- **Protección frente a lecturas con cuerpo vacío de SAPI (`getBodyGuard`):**
+  - Si Movistar/O2 Cloud responde a peticiones `GET`/`HEAD` con código `200`/`206` y `Content-Length > 0` pero no entrega ningún byte (sucede ocasionalmente con archivos recién subidos que aún no han sido indexados por el backend), el proxy intercepta la respuesta y devuelve un error `503 Service Unavailable` completo con mensaje descriptivo, evitando que clientes WebDAV (Duplicati, Synology, GVFS, etc.) acepten archivos truncados de 0 bytes como válidos.
+- **Bloqueo ordenado por ruta (`acquireFolderLock`):**
+  - Serialización de operaciones `MOVE`, `PUT` y `DELETE` sobre el mismo fichero mediante ordenación lexicográfica de bloqueos para prevenir condiciones de carrera e interbloqueos (*deadlocks*).
+- *Agradecimiento a @aarizaga90 por la implementación, pruebas y contribución en el PR #20.*
+
 ## [v2.2.5] - 2026-11-05
 
 ### 🔒 Seguridad: Corrección de Bypass de Autenticación en NTLMv2 (GHSA-fpxr-64gm-wxvf)
