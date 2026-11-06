@@ -2,6 +2,15 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.7] - 2026-11-06
+
+### 🪟 Documentación y Solución Definitiva de Montaje en Windows (Issue #18)
+- **Resolución del problema de reconexión persistente en Windows WebClient:**
+  - Diagnóstico exhaustivo del comportamiento por diseño de Microsoft ([KB 2673544](https://learn.microsoft.com/en-US/troubleshoot/windows-client/networking/cannot-automatically-reconnect-dav-share)), por el cual el cliente nativo de Windows envía contraseñas vacías al reconectar tras reiniciar, provocando bucles de autenticación y bloqueos por límite de tasa (HTTP 429).
+  - Guía oficial paso a paso y script PowerShell para montaje silencioso al inicio de sesión con clave protegida mediante Windows DPAPI (`ConvertTo-SecureString`) y parámetro `/persistent:no`.
+  - Opciones de despliegue mediante Tarea Programada (`schtasks`) o carpeta de Inicio (`shell:startup`) sin ventanas emergentes.
+  - Actualización de `README.md`, `docs/network-drive.md` y actualización del cuadro de honor en `CONTRIBUTORS.md` en agradecimiento a @aarizaga90.
+
 ## [v2.2.6] - 2026-11-06
 
 ### 🛡️ Integridad de Datos y Robustez en Re-subidas (`moveByReupload`) (PR #20)
