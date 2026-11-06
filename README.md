@@ -160,39 +160,67 @@ Puedes montar la nube como si fuera un disco duro o carpeta compartida local:
 
 | Sistema Operativo | Método Rápido | Ruta / Comando |
 | :--- | :--- | :--- |
-| **🪟 Windows** | PowerShell / CMD | `net use M: \\TU_IP@5050\DavWWWRoot /persistent:yes` |
+| **🪟 Windows** | Script al Iniciar Sesión (Recomendado) | Ver [Montaje Persistente en Windows](#-reconexión-persistente-en-windows-tras-reinicio) |
 | **🍏 macOS** | Finder (`Cmd + K`) | `http://TU_IP:5050` (Usuario: `admin` / Clave: `admin`) |
 | **🐧 Linux** | GNOME Nautilus / `davfs2` | `dav://TU_IP:5050/` o `mount -t davfs http://TU_IP:5050 /mnt/cloud` |
 
-### 🪟 Reconexión Persistente en Windows tras Reinicio (v2.2.1)
+### 🪟 Reconexión Persistente en Windows tras Reinicio
 
-A partir de la versión **v2.2.1**, el proxy incluye soporte completo para autenticación **NTLMv2 en paralelo con Basic Auth**. Esto permite que el cliente nativo de Windows (`WebClient` / `DAV Mini-Redirector`) reconecte las unidades de red mapeadas de forma automática, silenciosa y persistente tras reiniciar el equipo.
+> [!IMPORTANT]
+> **Comportamiento nativo de Windows (Microsoft KB 2673544):**  
+> Al usar `net use ... /persistent:yes` o "Recordar credenciales" en Windows 10/11, tras reiniciar el equipo el cliente WebClient intenta reconectar la unidad enviando el usuario correcto pero la **contraseña vacía** por diseño de Microsoft ([KB 2673544](https://learn.microsoft.com/en-US/troubleshoot/windows-client/networking/cannot-automatically-reconnect-dav-share)). Esto genera ráfagas de autenticación fallida, bloqueo por límite de intentos (HTTP 429) y pide la contraseña en bucle.
+>
+> Para garantizar que la unidad `M:` esté siempre conectada y disponible sin cuadros emergentes ni errores, la solución oficial y recomendada consiste en montar la unidad al iniciar sesión con la contraseña cifrada mediante **DPAPI** (solo tu usuario en tu equipo puede descifrarla) y con `/persistent:no`.
 
-Para garantizar la reconexión automática en Windows 10/11:
+#### Pasos para Configurar el Montaje Silencioso al Iniciar Sesión:
 
-1. **Configurar el Servicio WebClient en inicio Automático (PowerShell como Administrador):**
+1. **Ajustes previos de WebClient (PowerShell como Administrador, solo una vez):**
    ```powershell
    Set-Service -Name WebClient -StartupType Automatic
    Start-Service WebClient
-   ```
-
-2. **Ajustes de Registro para Autenticación HTTP y Límite de Tamaño:**
-   ```powershell
-   # 1. Habilitar Basic Auth sobre HTTP en redes locales
    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
-
-   # 2. Aumentar el límite máximo de archivo de 50 MB a 4 GB (4294967295 bytes)
    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "FileSizeLimitInBytes" -Value 4294967295
-
-   # 3. Permitir envío automático de credenciales al proxy tras reiniciar
-   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "AuthForwardServerList" -Value @("http://TU_IP:5050/*")
    Restart-Service WebClient
    ```
 
-3. **Almacenar las Credenciales en el Administrador de Windows (cmdkey):**
+2. **Limpiar montajes persistentes antiguos (PowerShell normal):**
    ```powershell
-   cmdkey /add:TU_IP /user:TU_USUARIO /pass:TU_PASSWORD
+   net use M: /delete /y
+   cmdkey /delete:TU_IP_SERVIDOR
    ```
+
+3. **Guardar la contraseña cifrada con DPAPI (PowerShell normal, te pedirá la contraseña una vez):**
+   ```powershell
+   Read-Host "Contraseña WebDAV" -AsSecureString | ConvertFrom-SecureString | Out-File "$env:LOCALAPPDATA\montar-m.sec"
+   ```
+
+4. **Crear el script de montaje en `C:\Scripts\montar-m.ps1`:**
+   ```powershell
+   $letra = 'M:'
+   $url = 'http://TU_IP_SERVIDOR:5050'
+   $usuario = 'TU_USUARIO'
+   $log = "$env:LOCALAPPDATA\montar-m.log"
+   $sec = Get-Content "$env:LOCALAPPDATA\montar-m.sec" | ConvertTo-SecureString
+   $pass = [Net.NetworkCredential]::new('', $sec).Password
+   for ($i = 1; $i -le 20; $i++) {
+     if (Test-Path "$letra\") { exit 0 }
+     if ((Get-Service WebClient).Status -ne 'Running') { Start-Sleep 3; continue }
+     $out = ($null | & net.exe use $letra $url "/user:$usuario" $pass /persistent:no 2>&1) -join ' '
+     if ($LASTEXITCODE -eq 0) { exit 0 }
+     if ($out -match '(sistema|error) (5|59|86|1244|1326)\.') { exit 1 }
+     Start-Sleep 5
+   }
+   ```
+
+5. **Activar el montaje automático al iniciar sesión:**
+   * **Opción A (Tarea programada - Recomendado):** Abre CMD como Administrador y ejecuta:
+     ```cmd
+     schtasks /create /tn "Montar M WebDAV" /sc onlogon /ru "%USERNAME%" /it /rl limited /tr "conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\montar-m.ps1"
+     ```
+   * **Opción B (Carpeta Inicio - Sin necesidad de ser administrador):** Crea un acceso directo en `shell:startup` (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`) con destino:
+     ```text
+     conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\montar-m.ps1
+     ```
 
 4. **Mapear la Unidad de Red:**
    ```powershell

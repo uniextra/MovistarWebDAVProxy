@@ -9,69 +9,82 @@ Esta guía detalla paso a paso cómo montar tu almacenamiento de Movistar u O2 C
 
 ## 🪟 1. Windows
 
-### Método 1: Comando rápido por Terminal (Recomendado)
-Abre **PowerShell** o **Símbolo del sistema (CMD)** y ejecuta:
+### Método 1: Montaje Silencioso al Iniciar Sesión con DPAPI (Recomendado)
 
+> [!IMPORTANT]
+> **Por qué no usar `/persistent:yes` en WebDAV (Microsoft KB 2673544):**  
+> En Windows 10 y Windows 11, el servicio nativo WebClient no puede proporcionar contraseñas guardadas en el Administrador de Credenciales al reconectar unidades WebDAV tras un reinicio ([KB 2673544](https://learn.microsoft.com/en-US/troubleshoot/windows-client/networking/cannot-automatically-reconnect-dav-share)). En su lugar, Windows envía el usuario correcto con la **contraseña vacía**, provocando fallos de autenticación repetidos y bloqueos por rate limit (HTTP 429).
+>
+> La solución recomendada consiste en montar la unidad con un script al iniciar sesión con la contraseña protegida mediante **DPAPI** (cifrada con la clave de sesión de tu usuario en Windows) y el parámetro `/persistent:no`.
+
+#### Paso 1: Configurar el servicio WebClient (PowerShell como Administrador, una sola vez)
 ```powershell
-net use M: http://TU_IP_SERVIDOR:5050 /user:admin admin /persistent:yes
-```
-
-* Sustituye `TU_IP_SERVIDOR` por la IP local o dominio de tu servidor (ej: `192.168.1.46`).
-* La letra `M:` será la nueva unidad asignada en "Este equipo". Puedes cambiarla por cualquier letra disponible.
-* `/persistent:yes` mantendrá la unidad reconectada tras reiniciar Windows.
-
-Para desconectar la unidad en cualquier momento:
-```powershell
-net use M: /delete
-```
-
----
-
-### Método 2: Explorador de Windows (Gráfico)
-
-1. Abre el **Explorador de archivos** y haz clic en **Este equipo**.
-2. En la barra superior, pulsa en los tres puntos `...` y selecciona **Conectar a unidad de red**.
-3. Selecciona una letra de unidad libre (por ejemplo `M:`).
-4. En **Carpeta**, escribe:
-   ```text
-   http://TU_IP_SERVIDOR:5050/
-   ```
-   *(Si usas HTTPS con un proxy inverso tipo Nginx/Traefik: `https://tudominio.com/`)*
-5. Marca la casilla **Conectar con otras credenciales** y haz clic en **Finalizar**.
-6. Cuando Windows pida usuario y contraseña, introduce las credenciales configuradas en `WEBDAV_USER` y `WEBDAV_PASSWORD` y marca *Recordar mis credenciales*.
-
----
-
-### ⚠️ Ajustes Importantes del Servicio WebClient de Windows
-
-El cliente WebDAV integrado de Windows (*WebClient*) tiene por defecto dos limitaciones impuestas por Microsoft:
-1. **Bloqueo de HTTP básico:** Requiere habilitar autenticación básica sobre conexiones HTTP sin SSL.
-2. **Límite de tamaño de archivo (50 MB):** Por defecto Windows no permite descargar o transferir archivos mayores a 50 MB por WebDAV.
-
-#### Solución (Ejecutar en PowerShell como Administrador):
-
-```powershell
-# 1. Configurar servicio WebClient en Automático
+# Configurar servicio WebClient en Automático y habilitar HTTP básico y tamaño 4 GB
 Set-Service -Name WebClient -StartupType Automatic
 Start-Service WebClient
-
-# 2. Permitir autenticación básica en redes locales (HTTP)
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
-
-# 3. Aumentar el límite máximo de archivo a 4 GB (4294967295 bytes)
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "FileSizeLimitInBytes" -Value 4294967295
-
-# 4. Permitir reenvío automático y silencioso de credenciales tras reinicio (v2.2.1+)
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "AuthForwardServerList" -Value @("http://TU_IP_SERVIDOR:5050/*")
-
-# 5. Reiniciar el servicio WebClient para aplicar los cambios
 Restart-Service WebClient
 ```
 
-#### Almacenar credenciales persistentes con `cmdkey`:
+#### Paso 2: Limpiar montajes persistentes anteriores (PowerShell normal)
 ```powershell
-cmdkey /add:TU_IP_SERVIDOR /user:admin /pass:admin
-net use M: \\TU_IP_SERVIDOR@5050\DavWWWRoot /persistent:yes
+net use M: /delete /y
+cmdkey /delete:TU_IP_SERVIDOR
+```
+
+#### Paso 3: Guardar la contraseña cifrada con DPAPI (PowerShell normal)
+Se te solicitará la contraseña una sola vez y quedará almacenada cifrada:
+```powershell
+Read-Host "Contraseña WebDAV" -AsSecureString | ConvertFrom-SecureString | Out-File "$env:LOCALAPPDATA\montar-m.sec"
+```
+
+#### Paso 4: Crear el script `C:\Scripts\montar-m.ps1`
+Crea la carpeta `C:\Scripts` y el archivo `montar-m.ps1` con el siguiente contenido (sustituye `TU_IP_SERVIDOR` y `TU_USUARIO`):
+```powershell
+$letra = 'M:'
+$url = 'http://TU_IP_SERVIDOR:5050'
+$usuario = 'TU_USUARIO'
+$log = "$env:LOCALAPPDATA\montar-m.log"
+$sec = Get-Content "$env:LOCALAPPDATA\montar-m.sec" | ConvertTo-SecureString
+$pass = [Net.NetworkCredential]::new('', $sec).Password
+
+for ($i = 1; $i -le 20; $i++) {
+    if (Test-Path "$letra\") { exit 0 }
+    if ((Get-Service WebClient).Status -ne 'Running') {
+        Start-Sleep -Seconds 3; continue
+    }
+    $out = ($null | & net.exe use $letra $url "/user:$usuario" $pass /persistent:no 2>&1) -join ' '
+    if ($LASTEXITCODE -eq 0 -or (Test-Path "$letra\")) { exit 0 }
+    if ($out -match '(sistema|error) (5|59|86|1244|1326)\.') { exit 1 }
+    Start-Sleep -Seconds 5
+}
+```
+
+#### Paso 5: Programar el montaje automático
+Puedes elegir cualquiera de estas dos opciones:
+* **Opción A (Tarea programada - Recomendado):** Abre CMD como Administrador:
+  ```cmd
+  schtasks /create /tn "Montar M WebDAV" /sc onlogon /ru "%USERNAME%" /it /rl limited /tr "conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\montar-m.ps1"
+  ```
+* **Opción B (Carpeta Inicio de Windows - Sin permisos de administrador):**  
+  Crea un acceso directo en `shell:startup` (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`) con la línea:
+  ```text
+  conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\montar-m.ps1
+  ```
+
+---
+
+### Método 2: Montaje Rápido en la Sesión Actual (Temporal)
+Si solo necesitas montar la unidad puntualmente en la sesión activa sin persistencia tras reiniciar:
+
+```powershell
+net use M: http://TU_IP_SERVIDOR:5050 /user:TU_USUARIO TU_PASSWORD /persistent:no
+```
+
+Para desmontar:
+```powershell
+net use M: /delete /y
 ```
 
 ---
