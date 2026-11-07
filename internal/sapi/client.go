@@ -1361,6 +1361,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 
 	const maxRetries = 14
 	const retryDelay = 1500 * time.Millisecond
+	_, canRetry := reader.(io.ReadSeeker)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if seeker, ok := reader.(io.ReadSeeker); ok {
@@ -1373,10 +1374,10 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		go func() {
 			var writeErr error
 			defer func() {
-				_ = mpw.Close()
 				if writeErr != nil {
 					_ = pw.CloseWithError(writeErr)
 				} else {
+					_ = mpw.Close()
 					_ = pw.Close()
 				}
 			}()
@@ -1423,7 +1424,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 
 		// MED-1017 check: Media is being validated asynchronously (~4-10s)
 		if strings.Contains(bStr, "MED-1017") || strings.Contains(strings.ToLower(bStr), "media not validated") {
-			if attempt < maxRetries {
+			if attempt < maxRetries && canRetry {
 				logger.Log("[SAPI] ⏳ Servidor validando media asíncronamente (MED-1017). Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
 				time.Sleep(retryDelay)
 				continue
@@ -1433,7 +1434,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 
 		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-			if attempt < maxRetries {
+			if attempt < maxRetries && canRetry {
 				backoff := time.Duration(1<<attempt) * time.Second
 				if backoff > 8*time.Second {
 					backoff = 8 * time.Second

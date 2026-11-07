@@ -24,6 +24,7 @@ Set-Service -Name WebClient -StartupType Automatic
 Start-Service WebClient
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "FileSizeLimitInBytes" -Value 4294967295
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "SendReceiveTimeoutInSec" -Value 3600
 Restart-Service WebClient
 ```
 

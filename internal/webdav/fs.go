@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"mime"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -664,14 +666,16 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
 	cleanPath := path.Clean("/" + name)
 
-	// Manejo de escritura (flag os.O_RDWR o os.O_WRONLY o os.O_CREATE)
-	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE) != 0 {
-		fileName := path.Base(cleanPath)
+	// Absorber escrituras o PROPPATCH sobre archivos de sistema (desktop.ini, .DS_Store, etc.)
+	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && isOSJunkPath(cleanPath) {
+		return NewDevNullFileWriter(cleanPath, path.Base(cleanPath)), nil
+	}
 
-		// Absorber archivos de sistema (desktop.ini, .DS_Store, etc.) sin subir a la nube
-		if isOSJunkPath(cleanPath) {
-			return NewDevNullFileWriter(cleanPath, fileName), nil
-		}
+	// Manejo de escritura (solo cuando se solicita escritura/creación/truncado explícito;
+	// PROPPATCH en x/net/webdav abre con os.O_RDWR sin O_CREATE ni O_TRUNC solo para consultar DeadPropsHolder,
+	// por lo que NO debe instanciar WebDAVFileWriter ni sobrescribir el archivo con 0 bytes al cerrarse).
+	if flag&(os.O_WRONLY|os.O_CREATE|os.O_TRUNC) != 0 {
+		fileName := path.Base(cleanPath)
 
 		// Absorber sondas de prueba de Duplicati en memoria sin subir a Telefónica SAPI
 		if isDuplicatiTestPath(cleanPath) {
@@ -1271,6 +1275,11 @@ func (v *VirtualFileInfo) ContentType(ctx context.Context) (string, error) {
 	return "application/octet-stream", nil
 }
 
+type streamUploadResult struct {
+	media *sapi.MediaItem
+	err   error
+}
+
 type WebDAVFileWriter struct {
 	mfs            *MovistarFS
 	path           string
@@ -1285,6 +1294,10 @@ type WebDAVFileWriter struct {
 	failed         bool
 	modTime        time.Time // fecha pedida por el cliente (X-OC-Mtime); cero = ahora
 	guard          *uploadGuard
+	pathUnlock     func()
+	streamPW       *io.PipeWriter
+	streamDone     chan streamUploadResult
+	streamFailed   bool
 }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
@@ -1296,6 +1309,65 @@ func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int6
 		existingID:     existingID,
 		buf:            bytes.NewBuffer(nil),
 	}
+}
+
+func (w *WebDAVFileWriter) ensurePathLock() {
+	if w.pathUnlock == nil {
+		w.pathUnlock = acquireFolderLock(w.path)
+	}
+}
+
+func (w *WebDAVFileWriter) releasePathLock() {
+	if w.pathUnlock != nil {
+		unlock := w.pathUnlock
+		w.pathUnlock = nil
+		unlock()
+	}
+}
+
+func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
+	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil {
+		return
+	}
+	w.ensurePathLock()
+	pr, pw := io.Pipe()
+	w.streamPW = pw
+	w.streamDone = make(chan streamUploadResult, 1)
+	expectedSize := w.guard.expected
+	sizeMB := float64(expectedSize) / (1024 * 1024)
+	logger.Log("[WebDAV] ⬆ Subiendo en flujo directo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
+	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
+
+	go func() {
+		uploadSem <- struct{}{}
+		globalTransferSem <- struct{}{}
+		defer func() {
+			<-globalTransferSem
+			<-uploadSem
+		}()
+		media, err := w.mfs.client.UploadFileToFolder(w.name, pr, expectedSize, w.parentFolderID, mimeType, w.existingID, w.modTime)
+		_ = pr.Close()
+		w.streamDone <- streamUploadResult{media: media, err: err}
+	}()
+
+	if len(initialBytes) > 0 {
+		if _, err := w.streamPW.Write(initialBytes); err != nil {
+			w.streamFailed = true
+			_ = w.streamPW.CloseWithError(err)
+		}
+	}
+}
+
+func (w *WebDAVFileWriter) abortStream(err error) {
+	if w.streamPW != nil {
+		_ = w.streamPW.CloseWithError(err)
+		w.streamPW = nil
+	}
+	if w.streamDone != nil {
+		<-w.streamDone
+		w.streamDone = nil
+	}
+	w.releasePathLock()
 }
 
 func (w *WebDAVFileWriter) releaseBufferSem() {
@@ -1326,23 +1398,15 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	maxBytes := GetMaxUploadBytes()
 	if maxBytes > 0 && w.size+int64(len(p)) > maxBytes {
 		w.failed = true
+		w.abortStream(ErrUploadTooLarge)
 		w.cleanupTemp()
 		w.releaseBufferSem()
 		logger.Log("[WebDAV] ❌ Subida abortada por superar límite de %d MB: '%s'", GetMaxUploadMB(), w.name)
 		return 0, ErrUploadTooLarge
 	}
 
-	w.size += int64(len(p))
-	if w.tmpFile != nil {
-		n, err = w.tmpFile.Write(p)
-		if err != nil {
-			w.failed = true
-			w.cleanupTemp()
-			w.releaseBufferSem()
-		}
-		return n, err
-	}
-	if w.buf.Len()+len(p) > GetUploadRAMBufferMaxBytes() {
+	rambufMax := GetUploadRAMBufferMaxBytes()
+	if w.tmpFile == nil && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
 		tmpDir := getUploadTempDir()
 		tmp, err := os.CreateTemp(tmpDir, "webdav_upload_*")
 		if err != nil {
@@ -1352,20 +1416,37 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 			return 0, err
 		}
 		w.tmpFile = tmp
-		if _, err := tmp.Write(w.buf.Bytes()); err != nil {
-			w.failed = true
-			w.cleanupTemp()
-			w.releaseBufferSem()
-			return 0, err
+		var initialBytes []byte
+		if w.buf != nil && w.buf.Len() > 0 {
+			initialBytes = w.buf.Bytes()
+			if _, err := tmp.Write(initialBytes); err != nil {
+				w.failed = true
+				w.cleanupTemp()
+				w.releaseBufferSem()
+				return 0, err
+			}
 		}
 		w.buf = nil
-		n, err = tmp.Write(p)
+		w.startStreamUpload(initialBytes)
+	}
+
+	w.size += int64(len(p))
+	if w.tmpFile != nil {
+		n, err = w.tmpFile.Write(p)
 		if err != nil {
 			w.failed = true
+			w.abortStream(err)
 			w.cleanupTemp()
 			w.releaseBufferSem()
+			return n, err
 		}
-		return n, err
+		if w.streamPW != nil && !w.streamFailed {
+			if _, pwErr := w.streamPW.Write(p[:n]); pwErr != nil {
+				w.streamFailed = true
+				_ = w.streamPW.CloseWithError(pwErr)
+			}
+		}
+		return n, nil
 	}
 	n, err = w.buf.Write(p)
 	if err != nil {
@@ -1376,6 +1457,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 
 func (w *WebDAVFileWriter) MarkUploadExceeded() {
 	w.failed = true
+	w.abortStream(ErrUploadTooLarge)
 	w.cleanupTemp()
 	w.releaseBufferSem()
 }
@@ -1386,59 +1468,79 @@ func (w *WebDAVFileWriter) Close() error {
 	}
 	w.closed = true
 	defer w.releaseBufferSem()
+	defer w.releasePathLock()
 
 	if w.failed {
+		w.abortStream(ErrUploadTooLarge)
 		w.cleanupTemp()
 		return ErrUploadTooLarge
 	}
 
 	// Si el cuerpo no llegó entero, no subir el trozo (la copia anterior queda intacta).
 	if bad, why := w.guard.incomplete(w.size); bad {
+		w.abortStream(ErrUploadIncomplete)
 		w.cleanupTemp()
 		logger.Log("[WebDAV] ❌ Subida incompleta, NO se sube a la nube (%s): '%s'", why, w.name)
 		return ErrUploadIncomplete
 	}
 
 	if w.tmpFile == nil && w.buf == nil {
+		w.abortStream(errors.New("upload buffer corrupted"))
 		w.cleanupTemp()
 		return errors.New("upload buffer corrupted or closed after failure")
 	}
 
 	// Lock por path: contiende con un MOVE/DELETE en curso sobre el mismo fichero,
 	// de modo que la subida y la actualización de caché no se crucen con ellos.
-	unlock := acquireFolderLock(w.path)
-	defer unlock()
+	w.ensurePathLock()
 
 	sizeMB := float64(w.size) / (1024 * 1024)
-	logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
-
-	uploadSem <- struct{}{}
-	globalTransferSem <- struct{}{}
-	defer func() {
-		<-globalTransferSem
-		<-uploadSem
-	}()
-
-	var reader io.Reader
+	var media *sapi.MediaItem
+	var err error
 	var cachedContent []byte
 
-	if w.tmpFile != nil {
-		defer w.cleanupTemp()
-		_, _ = w.tmpFile.Seek(0, io.SeekStart)
-		reader = w.tmpFile
-	} else {
-		bufBytes := w.buf.Bytes()
-		reader = bytes.NewReader(bufBytes)
-		if w.size <= 256*1024 {
-			cachedContent = bufBytes
+	if w.streamDone != nil {
+		if w.streamPW != nil {
+			_ = w.streamPW.Close()
+			w.streamPW = nil
+		}
+		res := <-w.streamDone
+		w.streamDone = nil
+		if res.err == nil && res.media != nil {
+			media = res.media
+			w.cleanupTemp()
+		} else {
+			logger.Log("[WebDAV] ⚠️ Subida en flujo requirió reintento desde disco para '%s': %v", w.name, res.err)
 		}
 	}
 
-	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
-	media, err := w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.existingID, w.modTime)
-	if err != nil {
-		logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
-		return err
+	if media == nil {
+		logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
+
+		uploadSem <- struct{}{}
+		globalTransferSem <- struct{}{}
+
+		var reader io.Reader
+		if w.tmpFile != nil {
+			defer w.cleanupTemp()
+			_, _ = w.tmpFile.Seek(0, io.SeekStart)
+			reader = w.tmpFile
+		} else {
+			bufBytes := w.buf.Bytes()
+			reader = bytes.NewReader(bufBytes)
+			if w.size <= 256*1024 {
+				cachedContent = bufBytes
+			}
+		}
+
+		mimeType := mime.TypeByExtension(filepath.Ext(w.name))
+		media, err = w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.existingID, w.modTime)
+		<-globalTransferSem
+		<-uploadSem
+		if err != nil {
+			logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
+			return err
+		}
 	}
 
 	logger.Log("[WebDAV] ✔ Subida completada: '%s' (%.2f MB, ID: %s)", w.name, sizeMB, media.ID)
@@ -1494,7 +1596,26 @@ func (w *WebDAVFileWriter) Stat() (os.FileInfo, error) {
 	return &VirtualFileInfo{name: w.name, size: w.size, mode: 0644, modTime: modTime}, nil
 }
 
+// noopDeadProps implementa webdav.DeadPropsHolder para aceptar PROPPATCH (ej. atributos Win32 de Windows WebClient)
+// sin abrir el archivo en modo escritura ni truncarlo en la nube.
+type noopDeadProps struct{}
+
+func (noopDeadProps) DeadProps() (map[xml.Name]webdav.Property, error) {
+	return nil, nil
+}
+
+func (noopDeadProps) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error) {
+	ps := webdav.Propstat{Status: http.StatusOK}
+	for _, patch := range patches {
+		for _, p := range patch.Props {
+			ps.Props = append(ps.Props, webdav.Property{XMLName: p.XMLName})
+		}
+	}
+	return []webdav.Propstat{ps}, nil
+}
+
 type WebDAVFileReader struct {
+	noopDeadProps
 	mfs      *MovistarFS
 	path     string
 	item     sapi.MediaItem
@@ -1631,6 +1752,7 @@ func (s *semaphoreReleaseReader) Close() error {
 }
 
 type WebDAVMemoryReader struct {
+	noopDeadProps
 	path   string
 	mem    *MemoryFile
 	reader *bytes.Reader
@@ -1654,6 +1776,7 @@ func (m *WebDAVMemoryReader) Stat() (os.FileInfo, error) {
 }
 
 type WebDAVDirReader struct {
+	noopDeadProps
 	mfs      *MovistarFS
 	path     string
 	folderID int64
@@ -1762,6 +1885,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 // para absorber escrituras de archivos basura del sistema operativo sin subirlos a la nube
 // ni devolver errores al cliente WebDAV (Windows Explorer, macOS Finder, Linux).
 type DevNullFileWriter struct {
+	noopDeadProps
 	path   string
 	name   string
 	size   int64

@@ -505,3 +505,114 @@ func TestWebDAV_NTLM_Offer_Selective(t *testing.T) {
 		t.Errorf("Windows client must be offered both NTLM and Basic, got headers: %v", winAuthHeaders)
 	}
 }
+
+
+func TestWebDAV_ProppatchDoesNotTruncateUploadedFile(t *testing.T) {
+	srv, subidas, cerrar := servidorQueCuentaSubidas(t)
+	defer cerrar()
+
+	content := "contenido de video de prueba para verificar que PROPPATCH no lo trunca a 0 bytes"
+	putReq := httptest.NewRequest("PUT", "/video_proppatch.mp4", strings.NewReader(content))
+	putReq.ContentLength = int64(len(content))
+	putRec := httptest.NewRecorder()
+	srv.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusCreated && putRec.Code != http.StatusNoContent {
+		t.Fatalf("PUT failed: got %d", putRec.Code)
+	}
+	if n := subidas.Load(); n != 1 {
+		t.Fatalf("expected 1 upload after PUT, got %d", n)
+	}
+
+	// Windows WebClient envía inmediatamente un PROPPATCH con propiedades Win32*
+	proppatchBody := `<?xml version="1.0" encoding="utf-8" ?>
+<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:schemas-microsoft-com:">
+  <D:set>
+    <D:prop>
+      <Z:Win32CreationTime>Sat, 07 Nov 2026 08:10:00 GMT</Z:Win32CreationTime>
+      <Z:Win32LastAccessTime>Sat, 07 Nov 2026 08:10:00 GMT</Z:Win32LastAccessTime>
+      <Z:Win32LastModifiedTime>Sat, 07 Nov 2026 08:10:00 GMT</Z:Win32LastModifiedTime>
+      <Z:Win32FileAttributes>00000020</Z:Win32FileAttributes>
+    </D:prop>
+  </D:set>
+</D:propertyupdate>`
+	patchReq := httptest.NewRequest("PROPPATCH", "/video_proppatch.mp4", strings.NewReader(proppatchBody))
+	patchReq.Header.Set("Content-Type", "text/xml; charset=utf-8")
+	patchRec := httptest.NewRecorder()
+	srv.ServeHTTP(patchRec, patchReq)
+
+	if patchRec.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPPATCH expected 207 MultiStatus, got %d (body: %s)", patchRec.Code, patchRec.Body.String())
+	}
+	// PROPPATCH jamás debe provocar una segunda subida (de 0 bytes) a SAPI
+	if n := subidas.Load(); n != 1 {
+		t.Fatalf("PROPPATCH triggered an unexpected SAPI upload! total uploads = %d (want 1)", n)
+	}
+
+	// Verificar que el archivo conserva su tamaño y contenido íntegro tras PROPPATCH
+	getReq := httptest.NewRequest("GET", "/video_proppatch.mp4", nil)
+	getRec := httptest.NewRecorder()
+	srv.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET after PROPPATCH failed: %d", getRec.Code)
+	}
+	if getRec.Body.String() != content {
+		t.Fatalf("file content corrupted/truncated after PROPPATCH: got %d bytes (%q), want %d bytes (%q)",
+			getRec.Body.Len(), getRec.Body.String(), len(content), content)
+	}
+}
+
+func TestWebDAV_OrphanedLockAutoReleasedOnUnconditionalDelete(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+
+	// 1. Subir archivo inicial
+	putReq := httptest.NewRequest("PUT", "/locked_video.mp4", strings.NewReader("datos"))
+	putRec := httptest.NewRecorder()
+	srv.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusCreated && putRec.Code != http.StatusNoContent {
+		t.Fatalf("initial PUT failed: %d", putRec.Code)
+	}
+
+	// 2. Adquirir LOCK exclusivo (como hace Windows WebClient antes de subir)
+	lockBody := `<?xml version="1.0" encoding="utf-8" ?>
+<D:lockinfo xmlns:D="DAV:">
+  <D:lockscope><D:exclusive/></D:lockscope>
+  <D:locktype><D:write/></D:locktype>
+  <D:owner><D:href>PC\user</D:href></D:owner>
+</D:lockinfo>`
+	lockReq := httptest.NewRequest("LOCK", "/locked_video.mp4", strings.NewReader(lockBody))
+	lockReq.Header.Set("Timeout", "Second-3600")
+	lockRec := httptest.NewRecorder()
+	srv.ServeHTTP(lockRec, lockReq)
+	if lockRec.Code != http.StatusOK && lockRec.Code != http.StatusCreated {
+		t.Fatalf("LOCK failed: %d", lockRec.Code)
+	}
+
+	// 3. Enviar DELETE sin cabecera If (simulando limpieza de Windows tras timeout o borrado manual)
+	delReq := httptest.NewRequest("DELETE", "/locked_video.mp4", nil)
+	delRec := httptest.NewRecorder()
+	srv.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusNoContent && delRec.Code != http.StatusOK {
+		t.Fatalf("unconditional DELETE on orphaned lock should auto-release and succeed, got %d", delRec.Code)
+	}
+}
+
+func TestWebDAV_StreamUploadLargeFile(t *testing.T) {
+	t.Setenv("WEBDAV_BUFFER_MB", "1")
+	srv, subidas, cerrar := servidorQueCuentaSubidas(t)
+	defer cerrar()
+
+	// Payload de 2 MB (> 1 MB de WEBDAV_BUFFER_MB) para ejercitar la subida en flujo + spool
+	payload := strings.Repeat("ABCD", 512*1024)
+	putReq := httptest.NewRequest("PUT", "/stream_2mb.bin", strings.NewReader(payload))
+	putReq.ContentLength = int64(len(payload))
+	putRec := httptest.NewRecorder()
+	srv.ServeHTTP(putRec, putReq)
+
+	if putRec.Code != http.StatusCreated && putRec.Code != http.StatusNoContent {
+		t.Fatalf("stream PUT failed: got %d", putRec.Code)
+	}
+	if n := subidas.Load(); n != 1 {
+		t.Fatalf("expected 1 upload to SAPI, got %d", n)
+	}
+}

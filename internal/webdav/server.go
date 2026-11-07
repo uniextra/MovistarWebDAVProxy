@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -37,6 +38,7 @@ var (
 type Server struct {
 	handler        *webdav.Handler
 	fs             *MovistarFS
+	lockSys        *resilientLockSystem
 	running        atomic.Bool
 	authCfg        config.AuthConfig
 	rateLimiter    *config.AuthRateLimiter
@@ -76,9 +78,11 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 		ntlmAuth:       config.NewNTLMAuthenticator(),
 		duplicatiStore: fs.getDuplicatiStore(),
 	}
+	lockSys := newResilientLockSystem()
+	s.lockSys = lockSys
 	h := &webdav.Handler{
 		FileSystem: fs,
-		LockSystem: webdav.NewMemLS(),
+		LockSystem: lockSys,
 		Logger: func(r *http.Request, err error) {
 			if err != nil && !errors.Is(err, ErrUploadTooLarge) {
 				logger.Log("[WebDAV] ❌ Error en %s %s: %v", r.Method, r.URL.Path, err)
@@ -316,6 +320,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		pw := &putStatusInterceptor{ResponseWriter: w, exceededFlag: &exceededFlag}
 		s.handler.ServeHTTP(pw, r)
+		if r.Context().Err() != nil && s.lockSys != nil {
+			s.lockSys.unlockPath(time.Now(), urlPath)
+		}
+		return
+	}
+
+	// 3. Manejo de DELETE: auto-liberar bloqueos huérfanos cuando se recibe un DELETE
+	// incondicional (sin cabecera If o sin el token del bloqueo) sobre un recurso bloqueado.
+	// Clientes como Windows WebClient envían un DELETE incondicional tras cancelaciones o
+	// timeouts dejando el bloqueo colgado.
+	if method == "DELETE" {
+		if s.lockSys != nil && !s.lockSys.hasTokenInIf(urlPath, r.Header.Get("If")) {
+			if s.lockSys.unlockPath(time.Now(), urlPath) {
+				logger.Log("[WebDAV] 🔓 Liberado bloqueo huérfano antes de DELETE sobre '%s'", urlPath)
+			}
+		}
+		s.handler.ServeHTTP(w, r)
+		// RFC 4918 §7.4: eliminar un recurso debe eliminar todos sus bloqueos
+		if s.lockSys != nil {
+			s.lockSys.unlockPath(time.Now(), urlPath)
+		}
 		return
 	}
 
@@ -550,4 +575,132 @@ func (r *responseInterceptor) flush() {
 	r.ResponseWriter.Header().Set("Content-Length", fmt.Sprintf("%d", len(rawXML)))
 	r.ResponseWriter.WriteHeader(r.statusCode)
 	_, _ = io.WriteString(r.ResponseWriter, rawXML)
+}
+
+// resilientLockSystem envuelve webdav.LockSystem para liberar automáticamente bloqueos
+// huérfanos cuando un cliente (como Windows WebClient tras un timeout o cancelación)
+// envía un DELETE o PUT sin cabecera If sobre un recurso cuyo bloqueo quedó colgado.
+type resilientLockSystem struct {
+	inner  webdav.LockSystem
+	mu     sync.Mutex
+	byPath map[string]map[string]struct{}
+	byTok  map[string]string
+}
+
+func newResilientLockSystem() *resilientLockSystem {
+	return &resilientLockSystem{
+		inner:  webdav.NewMemLS(),
+		byPath: make(map[string]map[string]struct{}),
+		byTok:  make(map[string]string),
+	}
+}
+
+func cleanLockPath(p string) string {
+	return path.Clean("/" + strings.TrimSpace(p))
+}
+
+func (l *resilientLockSystem) Create(now time.Time, details webdav.LockDetails) (string, error) {
+	tok, err := l.inner.Create(now, details)
+	if err != nil {
+		return "", err
+	}
+	cp := cleanLockPath(details.Root)
+	l.mu.Lock()
+	if l.byPath[cp] == nil {
+		l.byPath[cp] = make(map[string]struct{})
+	}
+	l.byPath[cp][tok] = struct{}{}
+	l.byTok[tok] = cp
+	l.mu.Unlock()
+	return tok, nil
+}
+
+func (l *resilientLockSystem) Refresh(now time.Time, token string, duration time.Duration) (webdav.LockDetails, error) {
+	return l.inner.Refresh(now, token, duration)
+}
+
+func (l *resilientLockSystem) Unlock(now time.Time, token string) error {
+	l.mu.Lock()
+	if cp, ok := l.byTok[token]; ok {
+		delete(l.byTok, token)
+		if set := l.byPath[cp]; set != nil {
+			delete(set, token)
+			if len(set) == 0 {
+				delete(l.byPath, cp)
+			}
+		}
+	}
+	l.mu.Unlock()
+	return l.inner.Unlock(now, token)
+}
+
+func (l *resilientLockSystem) hasTokenInIf(p, ifHdr string) bool {
+	if ifHdr == "" {
+		return false
+	}
+	cp := cleanLockPath(p)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for curr := cp; curr != "" && curr != "." && curr != "/"; curr = path.Dir(curr) {
+		for tok := range l.byPath[curr] {
+			if strings.Contains(ifHdr, tok) {
+				return true
+			}
+		}
+	}
+	for tok := range l.byPath["/"] {
+		if strings.Contains(ifHdr, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *resilientLockSystem) unlockPath(now time.Time, p string) bool {
+	if p == "" {
+		return false
+	}
+	cp := cleanLockPath(p)
+	prefix := cp
+	if prefix != "/" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	l.mu.Lock()
+	var pathsToClean []string
+	var tokens []string
+	for k, set := range l.byPath {
+		if k == cp || (prefix != "/" && strings.HasPrefix(k, prefix)) {
+			pathsToClean = append(pathsToClean, k)
+			for tok := range set {
+				tokens = append(tokens, tok)
+				delete(l.byTok, tok)
+			}
+		}
+	}
+	for _, k := range pathsToClean {
+		delete(l.byPath, k)
+	}
+	l.mu.Unlock()
+
+	unlocked := false
+	for _, tok := range tokens {
+		if err := l.inner.Unlock(now, tok); err == nil {
+			unlocked = true
+		}
+	}
+	return unlocked
+}
+
+func (l *resilientLockSystem) Confirm(now time.Time, name0, name1 string, conditions ...webdav.Condition) (func(), error) {
+	release, err := l.inner.Confirm(now, name0, name1, conditions...)
+	if errors.Is(err, webdav.ErrLocked) && len(conditions) == 0 {
+		u0 := l.unlockPath(now, name0)
+		u1 := l.unlockPath(now, name1)
+		if u0 || u1 {
+			logger.Log("[WebDAV] 🔓 Liberado bloqueo huérfano sobre '%s'", name0)
+			return l.inner.Confirm(now, name0, name1, conditions...)
+		}
+	}
+	return release, err
 }

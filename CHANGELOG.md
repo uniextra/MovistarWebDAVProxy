@@ -2,6 +2,20 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.8] - 2026-11-07
+
+### ⚡ Subida en Flujo Directo y Compatibilidad Windows WebClient
+- **Subida en Flujo Concurrente (*Concurrent Spool + Stream*):**
+  - Para subidas mayores a la cuota en RAM (`WEBDAV_BUFFER_MB`), el proxy ahora transmite concurrentemente los datos hacia Movistar/O2 Cloud SAPI conforme entran desde el cliente, guardando en paralelo una copia en `/tmp` por si hiciera falta reintentar.
+  - Elimina los tiempos muertos de espera tras enviar el último byte (el archivo ya está transmitido a la nube en tiempo real), evitando que Windows WebClient cancele la petición con error por su timeout de 60 segundos (`SendReceiveTimeoutInSec`).
+- **Soporte `PROPPATCH` sin truncado (`DeadPropsHolder`):**
+  - Corrección de un fallo crítico donde la petición `PROPPATCH` enviada por Windows Explorer inmediatamente tras un `PUT` (para fijar atributos NTFS / Win32) abría el archivo con `os.O_RDWR` y truncaba el archivo recién subido a 0 bytes.
+  - Los lectores y manejadores WebDAV implementan ahora `DeadPropsHolder`, respondiendo `200 OK` a las propiedades Win32 sin abrir escritores ni sobrescribir archivos en la nube.
+- **Liberación de Bloqueos Huérfanos (`resilientLockSystem`):**
+  - Implementación de un sistema de bloqueos resiliente que rastrea tokens y rutas para liberar automáticamente bloqueos WebDAV (`LOCK`) colgados cuando una subida se corta o se envía un `DELETE` incondicional, impidiendo errores de tipo `webdav: locked` o "el proceso no tiene acceso al archivo porque está bloqueado".
+- **Documentación de Registro de Windows:**
+  - Se añade `SendReceiveTimeoutInSec = 3600` a las recomendaciones oficiales de configuración de Windows WebClient en `README.md` y `docs/network-drive.md`.
+
 ## [v2.2.7] - 2026-11-06
 
 ### 🪟 Documentación y Solución Definitiva de Montaje en Windows (Issue #18)
