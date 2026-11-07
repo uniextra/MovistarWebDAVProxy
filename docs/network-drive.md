@@ -9,17 +9,40 @@ Esta guía detalla paso a paso cómo montar tu almacenamiento de Movistar u O2 C
 
 ## 🪟 1. Windows
 
-### Método 1: Montaje Silencioso al Iniciar Sesión con DPAPI (Recomendado)
-
-> [!IMPORTANT]
-> **Por qué no usar `/persistent:yes` en WebDAV (Microsoft KB 2673544):**  
-> En Windows 10 y Windows 11, el servicio nativo WebClient no puede proporcionar contraseñas guardadas en el Administrador de Credenciales al reconectar unidades WebDAV tras un reinicio ([KB 2673544](https://learn.microsoft.com/en-US/troubleshoot/windows-client/networking/cannot-automatically-reconnect-dav-share)). En su lugar, Windows envía el usuario correcto con la **contraseña vacía**, provocando fallos de autenticación repetidos y bloqueos por rate limit (HTTP 429).
+> [!CAUTION]
+> **Aviso de Compatibilidad: El montaje nativo en Windows NO está soportado al 100% ni se recomienda para uso diario.**  
+> El cliente nativo de Windows (`mrxdav.sys` / servicio `WebClient`) fue declarado oficialmente **obsoleto (*deprecated*) por Microsoft en 2023** y sufre de graves limitaciones de diseño:
+> * **Descarga forzosa al interactuar:** El Explorador de Windows descarga los archivos íntegros a disco local antes de leer miniaturas o borrarlos.
+> * **Reconexión rota tras reinicios ([KB 2673544](https://learn.microsoft.com/en-US/troubleshoot/windows-client/networking/cannot-automatically-reconnect-dav-share)):** Windows olvida la contraseña al reiniciar y envía contraseñas vacías, bloqueando el acceso.
+> * **Límite de 4 GB y timeouts:** No soporta transferencias mayores a 4 GB y corta conexiones a los 60 segundos.
 >
-> La solución recomendada consiste en montar la unidad con un script al iniciar sesión con la contraseña protegida mediante **DPAPI** (cifrada con la clave de sesión de tu usuario en Windows) y el parámetro `/persistent:no`.
+> Por estos motivos, **el Método 1 (Rclone + WinFsp) es la solución oficial y recomendada** para usuarios de Windows.
+
+---
+
+### Método 1: Montaje de Alto Rendimiento con Rclone + WinFsp (Recomendado en Windows)
+
+Esta solución proporciona una experiencia de disco local 100% nativa, rápida y sin los bloqueos ni bugs de `WebClient`:
+
+1. Instala [WinFsp](https://winfsp.dev/) y [Rclone](https://rclone.org/downloads/) (o en PowerShell: `winget install Rclone.Rclone; winget install WinFsp.WinFsp`).
+2. Configura el remoto ejecutando `rclone config` (tipo `webdav`):
+   * **URL:** `http://TU_IP_SERVIDOR:5050`
+   * **Vendor:** `other`
+   * **User:** tu usuario WebDAV
+   * **Pass:** tu contraseña WebDAV
+3. Monta la unidad como disco local con streaming y caché transparente:
+   ```powershell
+   rclone mount movistar: M: --vfs-cache-mode full --vfs-cache-max-size 20G
+   ```
+
+---
+
+### Método 2: Montaje Nativo de Windows (Experimental / No Soportado Oficialmente)
+
+Si deseas utilizar el cliente nativo de Windows a pesar de sus limitaciones, este procedimiento automatiza el montaje mediante script al inicio de sesión mitigando parte de los fallos de `WebClient`:
 
 #### Paso 1: Configurar el servicio WebClient (PowerShell como Administrador, una sola vez)
 ```powershell
-# Configurar servicio WebClient en Automático y habilitar HTTP básico y tamaño 4 GB
 Set-Service -Name WebClient -StartupType Automatic
 Start-Service WebClient
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name "BasicAuthLevel" -Value 2
@@ -35,13 +58,11 @@ cmdkey /delete:TU_IP_SERVIDOR
 ```
 
 #### Paso 3: Guardar la contraseña cifrada con DPAPI (PowerShell normal)
-Se te solicitará la contraseña una sola vez y quedará almacenada cifrada:
 ```powershell
 Read-Host "Contraseña WebDAV" -AsSecureString | ConvertFrom-SecureString | Out-File "$env:LOCALAPPDATA\montar-m.sec"
 ```
 
 #### Paso 4: Crear el script `C:\Scripts\montar-m.ps1`
-Crea la carpeta `C:\Scripts` y el archivo `montar-m.ps1` con el siguiente contenido (sustituye `TU_IP_SERVIDOR` y `TU_USUARIO`):
 ```powershell
 $letra = 'M:'
 $url = 'http://TU_IP_SERVIDOR:5050'
@@ -63,47 +84,21 @@ for ($i = 1; $i -le 20; $i++) {
 ```
 
 #### Paso 5: Programar el montaje automático
-Puedes elegir cualquiera de estas dos opciones:
-* **Opción A (Tarea programada - Recomendado):** Abre CMD como Administrador:
+* **Opción A (Tarea programada):** En CMD como Administrador:
   ```cmd
   schtasks /create /tn "Montar M WebDAV" /sc onlogon /ru "%USERNAME%" /it /rl limited /tr "conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\montar-m.ps1"
   ```
-* **Opción B (Carpeta Inicio de Windows - Sin permisos de administrador):**  
-  Crea un acceso directo en `shell:startup` (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`) con la línea:
+* **Opción B (Carpeta Inicio):** Acceso directo en `shell:startup` con destino:
   ```text
   conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\montar-m.ps1
   ```
 
 ---
 
-### Método 2: Montaje Rápido en la Sesión Actual (Temporal)
-Si solo necesitas montar la unidad puntualmente en la sesión activa sin persistencia tras reiniciar:
-
+### Método 3: Montaje Rápido Temporal (Solo sesión activa)
 ```powershell
 net use M: http://TU_IP_SERVIDOR:5050 /user:TU_USUARIO TU_PASSWORD /persistent:no
 ```
-
-Para desmontar:
-```powershell
-net use M: /delete /y
-```
-
----
-
-### Método 3: Montaje de Alto Rendimiento con Rclone (Para archivos gigantes)
-
-Si deseas el máximo rendimiento con caché en disco y soporte para archivos de cualquier tamaño sin limitaciones de Windows WebClient:
-
-1. Instala [Rclone](https://rclone.org/downloads/) y [WinFsp](https://winfsp.dev/).
-2. Configura el remoto en `rclone config` tipo `webdav`:
-   * **URL:** `http://TU_IP_SERVIDOR:5050`
-   * **Vendor:** `other`
-   * **User:** `admin`
-   * **Pass:** `admin`
-3. Monta la unidad con caché de lectura y escritura:
-   ```powershell
-   rclone mount movistar: M: --vfs-cache-mode full --vfs-cache-max-size 20G
-   ```
 
 > [!WARNING]
 > **Límite de 4 GB por archivo en Movistar / O2 Cloud:**  
