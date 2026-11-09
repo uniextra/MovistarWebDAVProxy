@@ -195,6 +195,42 @@ type CreatedFolder struct {
 	Time time.Time
 }
 
+type sfCall struct {
+	wg  sync.WaitGroup
+	val interface{}
+	err error
+}
+
+type singleflightGroup struct {
+	mu sync.Mutex
+	m  map[string]*sfCall
+}
+
+func (g *singleflightGroup) Do(key string, fn func() (interface{}, error)) (interface{}, error) {
+	g.mu.Lock()
+	if g.m == nil {
+		g.m = make(map[string]*sfCall)
+	}
+	if c, ok := g.m[key]; ok {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err
+	}
+	c := new(sfCall)
+	c.wg.Add(1)
+	g.m[key] = c
+	g.mu.Unlock()
+
+	c.val, c.err = fn()
+	c.wg.Done()
+
+	g.mu.Lock()
+	delete(g.m, key)
+	g.mu.Unlock()
+
+	return c.val, c.err
+}
+
 type MovistarFS struct {
 	client            *sapi.Client
 	uploadCache       map[string]*MemoryFile
@@ -206,6 +242,7 @@ type MovistarFS struct {
 	cacheMu           sync.RWMutex
 	cacheTTL          time.Duration
 	duplicatiStore    *DuplicatiProbeStore
+	sf                singleflightGroup
 }
 
 type cachedFolders struct {
@@ -299,7 +336,7 @@ func NewMovistarFS(client *sapi.Client) *MovistarFS {
 		deletedTombstones: make(map[string]time.Time),
 		folderCache:       make(map[int64]*cachedFolders),
 		mediaCache:        make(map[int64]*cachedMedia),
-		cacheTTL:          15 * time.Second,
+		cacheTTL:          60 * time.Second,
 		duplicatiStore:    NewDuplicatiProbeStore(),
 	}
 }
@@ -353,19 +390,35 @@ func (mfs *MovistarFS) getSubfolders(parentID int64) []sapi.FolderItem {
 	}
 	mfs.cacheMu.RUnlock()
 
-	subs, err := mfs.client.ListAllSubfolders(parentID)
+	key := fmt.Sprintf("subfolders:%d", parentID)
+	val, err := mfs.sf.Do(key, func() (interface{}, error) {
+		mfs.cacheMu.RLock()
+		if c, ok := mfs.folderCache[parentID]; ok && time.Since(c.time) < mfs.cacheTTL {
+			folders := c.folders
+			mfs.cacheMu.RUnlock()
+			return folders, nil
+		}
+		mfs.cacheMu.RUnlock()
+		if mfs.client == nil {
+			return nil, errors.New("sapi client is nil")
+		}
+		return mfs.client.ListAllSubfolders(parentID)
+	})
+
 	if err != nil {
 		logger.Log("[WebDAV] ⚠️ Error listando subcarpetas de %d: %v", parentID, err)
 		mfs.cacheMu.RLock()
 		if ok && cached != nil {
 			folders := cached.folders
 			mfs.cacheMu.RUnlock()
+			logger.Log("[WebDAV] ℹ Sirviendo %d subcarpetas en caché previa para carpeta %d", len(folders), parentID)
 			return mfs.mergeCreatedFolders(parentID, folders)
 		}
 		mfs.cacheMu.RUnlock()
 		return nil
 	}
 
+	subs, _ := val.([]sapi.FolderItem)
 	cf := newCachedFolders(subs)
 	mfs.cacheMu.Lock()
 	mfs.folderCache[parentID] = cf
@@ -425,25 +478,24 @@ func (mfs *MovistarFS) findSubfolder(parentID int64, name string) (*sapi.FolderI
 	}
 	mfs.cacheMu.RUnlock()
 
-	subs, err := mfs.client.ListAllSubfolders(parentID)
-	if err != nil {
-		logger.Log("[WebDAV] ⚠️ Error listando subcarpetas de %d: %v", parentID, err)
-		mfs.cacheMu.RLock()
-		if ok && cached != nil {
-			item, found := cached.find(name)
-			mfs.cacheMu.RUnlock()
-			return item, found
-		}
-		mfs.cacheMu.RUnlock()
+	subs := mfs.getSubfolders(parentID)
+	if len(subs) == 0 {
 		return nil, false
 	}
+	mfs.cacheMu.RLock()
+	if c, ok := mfs.folderCache[parentID]; ok && c != nil {
+		item, found := c.find(name)
+		mfs.cacheMu.RUnlock()
+		return item, found
+	}
+	mfs.cacheMu.RUnlock()
 
-	cf := newCachedFolders(subs)
-	mfs.cacheMu.Lock()
-	mfs.folderCache[parentID] = cf
-	mfs.cacheMu.Unlock()
-
-	return cf.find(name)
+	for i := range subs {
+		if strings.EqualFold(subs[i].Name, name) || (strings.HasSuffix(strings.ToLower(name), ".hbk") && strings.EqualFold(subs[i].Name, name[:len(name)-4])) {
+			return &subs[i], true
+		}
+	}
+	return nil, false
 }
 
 func (mfs *MovistarFS) getMedia(folderID int64) []sapi.MediaItem {
@@ -456,19 +508,35 @@ func (mfs *MovistarFS) getMedia(folderID int64) []sapi.MediaItem {
 	}
 	mfs.cacheMu.RUnlock()
 
-	items, err := mfs.client.ListAllMediaInFolder(folderID)
+	key := fmt.Sprintf("media:%d", folderID)
+	val, err := mfs.sf.Do(key, func() (interface{}, error) {
+		mfs.cacheMu.RLock()
+		if c, ok := mfs.mediaCache[folderID]; ok && time.Since(c.time) < mfs.cacheTTL {
+			items := c.media
+			mfs.cacheMu.RUnlock()
+			return items, nil
+		}
+		mfs.cacheMu.RUnlock()
+		if mfs.client == nil {
+			return nil, errors.New("sapi client is nil")
+		}
+		return mfs.client.ListAllMediaInFolder(folderID)
+	})
+
 	if err != nil {
 		logger.Log("[WebDAV] ⚠️ Error listando media de %d: %v", folderID, err)
 		mfs.cacheMu.RLock()
 		if ok && cached != nil {
 			res := cached.media
 			mfs.cacheMu.RUnlock()
+			logger.Log("[WebDAV] ℹ Sirviendo %d elementos en caché previa para carpeta %d", len(res), folderID)
 			return res
 		}
 		mfs.cacheMu.RUnlock()
 		return nil
 	}
 
+	items, _ := val.([]sapi.MediaItem)
 	cm := newCachedMedia(items)
 	mfs.cacheMu.Lock()
 	mfs.mediaCache[folderID] = cm
@@ -487,25 +555,24 @@ func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, 
 	}
 	mfs.cacheMu.RUnlock()
 
-	items, err := mfs.client.ListAllMediaInFolder(folderID)
-	if err != nil {
-		logger.Log("[WebDAV] ⚠️ Error listando media de %d: %v", folderID, err)
-		mfs.cacheMu.RLock()
-		if ok && cached != nil {
-			item, found := cached.find(name)
-			mfs.cacheMu.RUnlock()
-			return item, found
-		}
-		mfs.cacheMu.RUnlock()
+	items := mfs.getMedia(folderID)
+	if len(items) == 0 {
 		return nil, false
 	}
+	mfs.cacheMu.RLock()
+	if c, ok := mfs.mediaCache[folderID]; ok && c != nil {
+		item, found := c.find(name)
+		mfs.cacheMu.RUnlock()
+		return item, found
+	}
+	mfs.cacheMu.RUnlock()
 
-	cm := newCachedMedia(items)
-	mfs.cacheMu.Lock()
-	mfs.mediaCache[folderID] = cm
-	mfs.cacheMu.Unlock()
-
-	return cm.find(name)
+	for i := range items {
+		if strings.EqualFold(items[i].Name, name) {
+			return &items[i], true
+		}
+	}
+	return nil, false
 }
 
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {

@@ -2,6 +2,25 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.10] - 2026-11-09
+
+### 🛡️ Solución Definitiva a Bloqueos AWS CloudFront WAF 403 (Issue #23)
+
+- **Control de Concurrencia Saliente y Pacing hacia SAPI:**
+  - Limitación estricta de peticiones concurrentes de metadatos salientes hacia Movistar/O2 Cloud SAPI (por defecto máx. 3 concurrentes, configurable vía `SAPI_MAX_CONCURRENT`) con espaciado (*pacing*) de 25-30ms para amortiguar ráfagas masivas de Synology HyperBackup, restic o backrest, evitando que el WAF de CloudFront interprete el tráfico como un ataque de denegación de servicio.
+- **Circuit Breaker / Pausa Global de Seguridad (WAF Cooldown):**
+  - Si CloudFront WAF activa un bloqueo HTTP 403, el proxy activa un silencio global de 30-40 segundos (`wafCooldownUntil`) deteniendo todas las peticiones salientes hacia SAPI.
+  - Al no recibir ningún paquete durante la ventana, AWS WAF drena su contador de tasa (*rate-based rule*) y levanta el bloqueo de la IP automáticamente sin colapsar los reintentos.
+- **Protección de Sesión en `KeepAlive` y `RefreshSession`:**
+  - `KeepAlive` solo considera caducada la sesión si recibe un `HTTP 401 Unauthorized`. Los bloqueos 403 de CloudFront, 429 de tasa o errores transitorios ya no provocan falsos refrescos OAuth ni revocación accidental de credenciales.
+  - `RefreshSession` preserva intactos los tokens en disco si el login SAPI es bloqueado por CloudFront WAF, impidiendo el bloqueo permanente del usuario.
+- **Deduplicación en Vuelo (*Singleflight*) y Caché Resiliente en WebDAV:**
+  - Deduplicación de peticiones concurrentes a la misma carpeta: si entran varias peticiones simultáneas para el mismo directorio, se ejecuta una única llamada a SAPI y las demás aguardan ese mismo resultado.
+  - Fallback a caché previa (*serve stale*): si SAPI experimenta un bloqueo o rate limit temporal y la caché expiró recientemente, se sirve la información en memoria en lugar de fallar la petición WebDAV.
+  - TTL de caché ampliado a 60 segundos por defecto.
+- **Agradecimientos:**
+  - A @jofera, @frjf y @uannight por los logs detallados y pruebas que permitieron diagnosticar la dinámica del bloqueo en el Issue #23.
+
 ## [v2.2.9] - 2026-11-09
 
 ### 🛡️ Resiliencia ante AWS CloudFront WAF y Validación de Creación de Carpetas
