@@ -205,7 +205,6 @@ type MovistarFS struct {
 	storageCache      *cachedStorage
 	cacheMu           sync.RWMutex
 	cacheTTL          time.Duration
-	duplicatiStore    *DuplicatiProbeStore
 }
 
 type cachedFolders struct {
@@ -300,15 +299,7 @@ func NewMovistarFS(client *sapi.Client) *MovistarFS {
 		folderCache:       make(map[int64]*cachedFolders),
 		mediaCache:        make(map[int64]*cachedMedia),
 		cacheTTL:          15 * time.Second,
-		duplicatiStore:    NewDuplicatiProbeStore(),
 	}
-}
-
-func (mfs *MovistarFS) getDuplicatiStore() *DuplicatiProbeStore {
-	if mfs != nil && mfs.duplicatiStore != nil {
-		return mfs.duplicatiStore
-	}
-	return globalDuplicatiStore
 }
 
 func (mfs *MovistarFS) InvalidateCache(folderID int64) {
@@ -525,20 +516,6 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 		return nil, nil, false, os.ErrNotExist
 	}
 
-	// Sondas de prueba de Duplicati en memoria
-	if isDuplicatiTestPath(cleanPath) {
-		if content, modTime, _, ok := mfs.getDuplicatiStore().Get(cleanPath); ok {
-			mi := &sapi.MediaItem{
-				ID:               "duplicati-probe",
-				Name:             path.Base(cleanPath),
-				Size:             int64(len(content)),
-				ModificationDate: sapi.FlexDate(modTime.UTC().Format("20060102T150405Z")),
-			}
-			return nil, mi, false, nil
-		}
-		return nil, nil, false, os.ErrNotExist
-	}
-
 	// Check if path is currently a tombstone (deleted within 5m)
 	mfs.cacheMu.Lock()
 	if exp, ok := mfs.deletedTombstones[cleanPath]; ok {
@@ -665,6 +642,9 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 
 func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
 	cleanPath := path.Clean("/" + name)
+	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && isUnsupportedTempPath(cleanPath) {
+		return nil, os.ErrPermission
+	}
 
 	// Absorber escrituras o PROPPATCH sobre archivos de sistema (desktop.ini, .DS_Store, etc.)
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && isOSJunkPath(cleanPath) {
@@ -676,11 +656,6 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 	// por lo que NO debe instanciar WebDAVFileWriter ni sobrescribir el archivo con 0 bytes al cerrarse).
 	if flag&(os.O_WRONLY|os.O_CREATE|os.O_TRUNC) != 0 {
 		fileName := path.Base(cleanPath)
-
-		// Absorber sondas de prueba de Duplicati en memoria sin subir a Telefónica SAPI
-		if isDuplicatiTestPath(cleanPath) {
-			return NewDuplicatiProbeFileWriter(mfs.getDuplicatiStore(), cleanPath, fileName), nil
-		}
 
 		parentDir := path.Dir(cleanPath)
 
@@ -709,21 +684,6 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		fw.modTime = ocMtimeFromContext(ctx)
 		fw.guard, _ = ctx.Value(uploadGuardKey{}).(*uploadGuard)
 		return fw, nil
-	}
-
-	// Modo lectura
-	if isDuplicatiTestPath(cleanPath) {
-		content, modTime, _, ok := mfs.getDuplicatiStore().Get(cleanPath)
-		if !ok {
-			return nil, os.ErrNotExist
-		}
-		return NewWebDAVMemoryReader(cleanPath, &MemoryFile{
-			Name:     path.Base(cleanPath),
-			Content:  content,
-			Size:     int64(len(content)),
-			ModTime:  modTime,
-			CachedAt: time.Now(),
-		}), nil
 	}
 
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
@@ -815,10 +775,6 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 	if isOSJunkPath(cleanPath) {
 		return nil
 	}
-	if isDuplicatiTestPath(cleanPath) {
-		mfs.getDuplicatiStore().Delete(cleanPath)
-		return nil
-	}
 
 	// Lock por path: contiende con un MOVE/PUT en curso sobre el mismo fichero.
 	unlock := acquireFolderLock(cleanPath)
@@ -866,6 +822,9 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) error {
 	oldClean := path.Clean("/" + oldName)
 	newClean := path.Clean("/" + newName)
+	if isUnsupportedTempPath(newClean) {
+		return os.ErrPermission
+	}
 
 	if oldClean == "/" || oldClean == "." || newClean == "/" || newClean == "." {
 		return fs.ErrPermission
@@ -1192,19 +1151,6 @@ func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSe
 
 func (mfs *MovistarFS) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	cleanPath := path.Clean("/" + name)
-	if isDuplicatiTestPath(cleanPath) {
-		content, modTime, _, ok := mfs.getDuplicatiStore().Get(cleanPath)
-		if !ok {
-			return nil, os.ErrNotExist
-		}
-		return &VirtualFileInfo{
-			name:    path.Base(cleanPath),
-			size:    int64(len(content)),
-			mode:    0644,
-			modTime: modTime,
-			isDir:   false,
-		}, nil
-	}
 
 	_, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
@@ -1826,7 +1772,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			if exp, isTomb := d.mfs.deletedTombstones[childPath]; isTomb && now.Before(exp) {
 				continue
 			}
-			if !seen[s.Name] && !isOSJunk(s.Name) && !isDuplicatiTestPath(s.Name) {
+			if !seen[s.Name] && !isOSJunk(s.Name) {
 				seen[s.Name] = true
 				list = append(list, &VirtualFileInfo{name: s.Name, size: 0, mode: os.ModeDir | 0755, modTime: parseTime(s.ModificationDate), isDir: true})
 			}
@@ -1838,7 +1784,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 				continue
 			}
 			name := m.Name
-			if !seen[name] && !isOSJunk(name) && !isDuplicatiTestPath(name) {
+			if !seen[name] && !isOSJunk(name) {
 				seen[name] = true
 				list = append(list, &VirtualFileInfo{name: name, size: m.Size, mode: 0644, modTime: parseTime(m.ModificationDate), isDir: false})
 			}
@@ -1849,7 +1795,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			if exp, isTomb := d.mfs.deletedTombstones[childPath]; isTomb && now.Before(exp) {
 				continue
 			}
-			if mem.FolderID == d.folderID && !seen[mem.Name] && !isOSJunk(mem.Name) && !isDuplicatiTestPath(mem.Name) {
+			if mem.FolderID == d.folderID && !seen[mem.Name] && !isOSJunk(mem.Name) {
 				seen[mem.Name] = true
 				list = append(list, &VirtualFileInfo{name: mem.Name, size: mem.Size, mode: 0644, modTime: mem.ModTime, isDir: false})
 			}

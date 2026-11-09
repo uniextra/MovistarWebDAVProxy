@@ -44,8 +44,14 @@ Duplicati es una solución multiplataforma de copias de seguridad encriptadas e 
    * **Conexión integrada (SSL):** Desactivado (a menos que uses proxy inverso HTTPS).
    * **Nombre de usuario:** El usuario definido en `WEBDAV_USER` (ej. `admin`).
    * **Contraseña:** La contraseña definida en `WEBDAV_PASSWORD`.
-5. Pulsa el botón **Probar conexión**. Duplicati verificará el acceso e indicará que la conexión ha tenido éxito (si la carpeta no existía, preguntará si deseas crearla).
+5. Pulsa el botón **Probar conexión**. La sonda `duplicati-access-privileges-test.tmp` recibe `415 Unsupported Media Type`: SAPI rechaza `.tmp` ([issue #13](https://github.com/uniextra/MovistarWebDAVProxy/issues/13)). El proxy ya no simula éxito en RAM. No ignores este fallo para considerar validado el destino: esta prueba no es compatible con el backend actual. Tampoco se admiten archivos de datos `.tmp` ni `COPY`/`MOVE` hacia esa extensión. No hay un mapeo de nombres alternativo.
 6. Selecciona los datos locales a respaldar y finaliza el asistente.
+
+Antes de confiar en cualquier copia, verifica una restauración desde una instancia
+nueva del proxy (caché vacía), no solo un `GET` inmediato que puede servirse desde
+RAM. Conserva otra copia independiente. El spool local de subidas grandes debe
+usar un volumen de disco dimensionado, no tmpfs; consulta el
+[apartado de espacio temporal del README](../README.md#espacio-temporal-para-subidas-grandes).
 
 ---
 

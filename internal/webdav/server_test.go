@@ -408,40 +408,37 @@ func TestWebDAV_DuplicatiAccessPrivilegesProbe(t *testing.T) {
 	probePath := "/duplicati-access-privileges-test.tmp"
 	payload := []byte("duplicati probe content 12345")
 
-	// 1. PUT probe -> 201 Created
+	// Una prueba de conexión no puede fingir persistencia: SAPI rechaza .tmp.
 	putReq := httptest.NewRequest("PUT", probePath, bytes.NewReader(payload))
 	putRec := httptest.NewRecorder()
 	srv.ServeHTTP(putRec, putReq)
-	if putRec.Code != http.StatusCreated && putRec.Code != http.StatusOK && putRec.Code != http.StatusNoContent {
-		t.Fatalf("PUT probe: expected 201 Created, got %d", putRec.Code)
+	if putRec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("PUT probe: expected 415, got %d", putRec.Code)
 	}
 
-	// 2. GET probe -> 200 OK with payload
+	// El cuerpo rechazado no queda disponible en una caché volátil.
 	getReq := httptest.NewRequest("GET", probePath, nil)
 	getRec := httptest.NewRecorder()
 	srv.ServeHTTP(getRec, getReq)
-	if getRec.Code != http.StatusOK {
-		t.Fatalf("GET probe: expected 200 OK, got %d", getRec.Code)
-	}
-	if getRec.Body.String() != string(payload) {
-		t.Fatalf("GET probe: payload mismatch: got %q, want %q", getRec.Body.String(), string(payload))
+	if getRec.Code != http.StatusNotFound {
+		t.Fatalf("GET probe: expected 404, got %d", getRec.Code)
 	}
 
-	// 3. PROPFIND probe -> 207 Multi-Status
+	// Tampoco se anuncian metadatos locales que no existen en el backend.
 	propReq := httptest.NewRequest("PROPFIND", probePath, nil)
 	propReq.Header.Set("Depth", "0")
 	propRec := httptest.NewRecorder()
 	srv.ServeHTTP(propRec, propReq)
-	if propRec.Code != http.StatusMultiStatus {
-		t.Fatalf("PROPFIND probe: expected 207 MultiStatus, got %d", propRec.Code)
+	if propRec.Code != http.StatusNotFound {
+		t.Fatalf("PROPFIND probe: expected 404, got %d", propRec.Code)
 	}
 
-	// 4. DELETE probe -> 204 No Content
+	// DELETE de una sonda nunca almacenada no simula su existencia.
 	delReq := httptest.NewRequest("DELETE", probePath, nil)
 	delRec := httptest.NewRecorder()
 	srv.ServeHTTP(delRec, delReq)
-	if delRec.Code != http.StatusNoContent && delRec.Code != http.StatusOK {
-		t.Fatalf("DELETE probe: expected 204 No Content, got %d", delRec.Code)
+	if delRec.Code != http.StatusNotFound {
+		t.Fatalf("DELETE probe: expected 404, got %d", delRec.Code)
 	}
 
 	// 5. GET probe after DELETE -> 404 Not Found

@@ -65,6 +65,7 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
+      - WEBDAV_TMPDIR=/app/spool
       - WEBDAV_USER=admin
       - WEBDAV_PASSWORD=TuPasswordSeguroAqui
       # Opcional: credenciales distintas para el panel web (si no se definen, usa las de WebDAV)
@@ -75,16 +76,39 @@ services:
       - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV (puerto 5050 en el host)
     volumes:
       - movistar_tokens:/app/tokens
+      - movistar_spool:/app/spool
 
 volumes:
   movistar_tokens:
     name: movistar_webdav_tokens
+  movistar_spool:
+    name: movistar_webdav_spool
 ```
 
 Inicia el servicio:
 ```bash
 docker compose up -d
 ```
+
+### Espacio temporal para subidas grandes
+
+Los ejemplos montan `movistar_webdav_spool` en `/app/spool` y fijan
+`WEBDAV_TMPDIR` a esa ruta. El `tmpfs` de `/tmp` queda para otros temporales,
+**no para el spool WebDAV**. El volumen debe residir en disco (el driver local
+por defecto lo hace; no lo configures como tmpfs). El entrypoint existente
+prepara sus permisos para el usuario `app` (UID 10001); si ejecutas directamente
+como ese UID o usas un bind mount, prepara antes un directorio escribible.
+
+Superado `WEBDAV_BUFFER_MB`, se conserva una copia temporal **completa** del
+archivo incluso con subida en flujo directo, para permitir reintentos. Reserva
+espacio para hasta cuatro subidas concurrentes de `MAX_UPLOAD_MB` cada una
+(por defecto hasta 16 GiB), más las re-subidas por cambio de extensión y margen
+operativo. Bajar el buffer RAM no reduce esa necesidad de disco. Si falta
+espacio o permisos, la operación falla; no debe interpretarse como subida correcta.
+Los temporales se eliminan al terminar o abortar normalmente; tras una caída
+brusca pueden quedar `webdav_upload_*`/`webdav_reupload_*`: elimínalos únicamente
+con el servicio parado y sin transferencias activas. Este volumen **no es una
+cola durable ni una copia de seguridad** y no reanuda transferencias tras reiniciar.
 
 ### Opción 2: Docker CLI
 
@@ -94,9 +118,11 @@ docker run -d \
   --restart unless-stopped \
   -e WEBDAV_USER=admin \
   -e WEBDAV_PASSWORD=TuPasswordSeguroAqui \
+  -e WEBDAV_TMPDIR=/app/spool \
   -p 5000:5000 \
   -p 5050:8080 \
   -v movistar_webdav_tokens:/app/tokens \
+  -v movistar_webdav_spool:/app/spool \
   uniextra/movistar-webdav-proxy:latest
 ```
 
@@ -136,7 +162,7 @@ docker run -d \
 | `WEBDAV_BUFFER_MB` | `32` | Tamaño máximo del búfer en RAM (MB) antes de hacer spool a disco (óptimo Duplicati). |
 | `TRUSTED_PROXIES` | *(vacío)* | Lista de IPs/CIDRs de proxies de confianza para evaluar `X-Forwarded-For` / `X-Real-IP`. |
 | `BRUTE_FORCE_EXCLUDED_IPS` | `127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16` | IPs/subredes exentas de bloqueo HTTP 429 (mantiene Basic Auth activo). |
-| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. |
+| `WEBDAV_TMPDIR` | `TMPDIR` o temporal del sistema (`/tmp` en Linux); `/app/spool` en los ejemplos Docker | Directorio para el spool completo de subidas grandes y re-subidas. Debe existir y ser escribible. Usa un volumen de disco, no tmpfs. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
 
 > **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.
@@ -190,6 +216,17 @@ El proxy está optimizado para actuar como repositorio remoto de copias automát
 * **Synology HyperBackup:** Destino `WebDAV` > `http://TU_IP:5050` > Usuario/Clave `admin` > Carpeta `HyperBackup_NAS` > Repositorio `Copia.hbk`.
 * **Duplicati:** Tipo de almacenamiento `WebDAV` > Servidor `TU_IP`, puerto `5050` > Carpeta `Duplicati_Server`.
 * **Rclone:** Remoto tipo `webdav` con soporte de `--transfers 3` y comandos `sync` / `copy`.
+
+> **Archivos `.tmp` y prueba de conexión:** SAPI rechaza esta extensión (ver
+> [issue #13](https://github.com/uniextra/MovistarWebDAVProxy/issues/13)). El proxy
+> devuelve `415 Unsupported Media Type` al hacer `PUT`, incluida la sonda
+> `duplicati-access-privileges-test.tmp`, en vez de guardarla solo en RAM y fingir
+> éxito. `COPY`/`MOVE` a un nombre `.tmp` también fallan. No se renombra ni se
+> simula ningún archivo. Por tanto, **Probar conexión** en Duplicati puede fallar:
+> esto refleja una incompatibilidad real, no una garantía de almacenamiento.
+> No ignores ese error para dar por validado un destino de backup. Un `GET`
+> inmediato puede usar la caché local de subidas; verifica la restauración desde
+> una instancia nueva con caché vacía y conserva otra copia independiente.
 
 👉 **Instrucciones detalladas y capturas en la [Guía de Clientes de Backup](docs/backup-clients.md).**
 

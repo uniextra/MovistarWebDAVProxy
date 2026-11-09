@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -36,17 +37,16 @@ var (
 )
 
 type Server struct {
-	handler        *webdav.Handler
-	fs             *MovistarFS
-	lockSys        *resilientLockSystem
-	running        atomic.Bool
-	authCfg        config.AuthConfig
-	rateLimiter    *config.AuthRateLimiter
-	ntlmAuth       *config.NTLMAuthenticator
-	connIDs        map[net.Conn]string // conexión TCP -> id, para ligar la auth NTLM a la conexión real
-	connMu         sync.Mutex
-	activeWG       sync.WaitGroup
-	duplicatiStore *DuplicatiProbeStore
+	handler     *webdav.Handler
+	fs          *MovistarFS
+	lockSys     *resilientLockSystem
+	running     atomic.Bool
+	authCfg     config.AuthConfig
+	rateLimiter *config.AuthRateLimiter
+	ntlmAuth    *config.NTLMAuthenticator
+	connIDs     map[net.Conn]string // conexión TCP -> id, para ligar la auth NTLM a la conexión real
+	connMu      sync.Mutex
+	activeWG    sync.WaitGroup
 }
 
 // connSeq genera un identificador único por cada conexión TCP aceptada.
@@ -71,12 +71,11 @@ func NewServer(client *sapi.Client) *Server {
 func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 	fs := NewMovistarFS(client)
 	s := &Server{
-		fs:             fs,
-		authCfg:        authCfg,
-		rateLimiter:    config.NewAuthRateLimiter(10, time.Minute),
-		connIDs:        make(map[net.Conn]string),
-		ntlmAuth:       config.NewNTLMAuthenticator(),
-		duplicatiStore: fs.getDuplicatiStore(),
+		fs:          fs,
+		authCfg:     authCfg,
+		rateLimiter: config.NewAuthRateLimiter(10, time.Minute),
+		connIDs:     make(map[net.Conn]string),
+		ntlmAuth:    config.NewNTLMAuthenticator(),
 	}
 	lockSys := newResilientLockSystem()
 	s.lockSys = lockSys
@@ -92,13 +91,6 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
 	s.handler = h
 	s.running.Store(true)
 	return s
-}
-
-func (s *Server) getDuplicatiStore() *DuplicatiProbeStore {
-	if s != nil && s.duplicatiStore != nil {
-		return s.duplicatiStore
-	}
-	return globalDuplicatiStore
 }
 
 func isWindowsClient(r *http.Request) bool {
@@ -123,7 +115,6 @@ func (s *Server) shouldOfferNTLM(r *http.Request) bool {
 	// "auto" (por defecto): solo a clientes Windows nativos o que ya envíen NTLM
 	return isWindowsClient(r) || config.IsNTLMHeader(r.Header.Get("Authorization"))
 }
-
 
 func (s *Server) InvalidateCache() {
 	if s.fs != nil {
@@ -277,9 +268,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		logger.Log("[WebDAV] ⚡ %s -> %s %s", clientIP, method, urlPath)
 	}
 
-	// Interceptar sondas de prueba de Duplicati (duplicati-access-privileges-test.tmp)
-	// para absorberlas completamente en memoria sin enviar extensiones .tmp a Telefónica SAPI
-	if s.handleDuplicatiProbe(w, r, urlPath) {
+	// SAPI rechaza .tmp (issue #13). No simular persistencia en RAM, tampoco
+	// para la sonda de conexión de Duplicati: el cliente debe ver el fallo.
+	unsupportedTemp := method == http.MethodPut && isUnsupportedTempPath(urlPath)
+	if method == "COPY" || method == "MOVE" {
+		// x/net/webdav puede borrar el destino con Overwrite antes de llamar
+		// a OpenFile/Rename: rechazar aquí, antes de cualquier efecto remoto.
+		if dst, err := url.Parse(r.Header.Get("Destination")); err == nil && (dst.Host == "" || dst.Host == r.Host) {
+			unsupportedTemp = isUnsupportedTempPath(dst.Path)
+		}
+	}
+	if unsupportedTemp {
+		http.Error(w, "SAPI does not support .tmp files; nothing was stored (including Duplicati connection probes)", http.StatusUnsupportedMediaType)
 		return
 	}
 

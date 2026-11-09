@@ -9,6 +9,7 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
+      - WEBDAV_TMPDIR=/app/spool
       - WEBDAV_USER=${WEBDAV_USER:-}
       - WEBDAV_PASSWORD=${WEBDAV_PASSWORD:-}
       - WEBUI_USER=${WEBUI_USER:-}
@@ -22,7 +23,10 @@ services:
       - "${BIND_IP:-0.0.0.0}:${WEBDAV_PORT:-5050}:8080"   # Endpoint WebDAV (Duplicati / Synology HyperBackup)
     volumes:
       - movistar_tokens:/app/tokens
+      - movistar_spool:/app/spool
 
 volumes:
   movistar_tokens:
     name: movistar_webdav_tokens
+  movistar_spool:
+    name: movistar_webdav_spool
