@@ -514,6 +514,39 @@ func (c *Client) RefreshSession() bool {
 	return false
 }
 
+// isCloudFrontWAFResponseBody verifica si las cabeceras o el cuerpo de la respuesta HTTP corresponden
+// a un bloqueo de rate limiting / WAF por parte de AWS CloudFront (HTTP 403 Forbidden).
+func isCloudFrontWAFResponseBody(header http.Header, bodyStr string) bool {
+	bodyLower := strings.ToLower(bodyStr)
+	hasCloudFront := strings.Contains(bodyLower, "cloudfront") ||
+		strings.Contains(strings.ToLower(header.Get("Server")), "cloudfront") ||
+		header.Get("X-Amz-Cf-Id") != "" ||
+		strings.Contains(strings.ToLower(header.Get("Via")), "cloudfront")
+
+	if hasCloudFront {
+		if strings.Contains(bodyLower, "the request could not be satisfied") ||
+			strings.Contains(bodyLower, "403 error") ||
+			strings.Contains(strings.ToLower(header.Get("Content-Type")), "text/html") {
+			return true
+		}
+	}
+	return false
+}
+
+// isCloudFrontWAFBlock comprueba si una respuesta HTTP es un bloqueo 403 de CloudFront WAF.
+// Restaura resp.Body mediante io.MultiReader para no perder ningún byte downstream.
+func isCloudFrontWAFBlock(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	sample, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return false
+	}
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(sample), resp.Body))
+	return isCloudFrontWAFResponseBody(resp.Header, string(sample))
+}
+
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 	c.mu.RLock()
 	cfg := c.cfg
@@ -596,15 +629,24 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// Manejo de retroceso suave ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
-	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) &&
+	// Manejo de retroceso suave ante HTTP 429 (Too Many Requests), HTTP 503 (Service Unavailable)
+	// o HTTP 403 de AWS CloudFront WAF (bloqueo por ráfagas de HyperBackup / restic)
+	isWAF := isCloudFrontWAFBlock(resp)
+	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || isWAF) &&
 		(req.Body == nil || req.GetBody != nil) {
-		const maxBackoffRetries = 3
+		const maxBackoffRetries = 5
 		for retry := 1; retry <= maxBackoffRetries; retry++ {
 			backoff := time.Duration(1<<(retry-1)) * time.Second
+			if backoff > 8*time.Second {
+				backoff = 8 * time.Second
+			}
 			jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
 			sleepDur := backoff + jitter
-			logger.Log("[SAPI] ⏳ Rate limit o servicio ocupado (%s %s HTTP %d). Reintentando en %v (%d/%d)...", req.Method, req.URL.Path, resp.StatusCode, sleepDur, retry, maxBackoffRetries)
+			reason := fmt.Sprintf("HTTP %d", resp.StatusCode)
+			if isWAF {
+				reason = "AWS CloudFront WAF 403"
+			}
+			logger.Log("[SAPI] ⏳ Rate limit o servicio ocupado (%s %s %s). Reintentando en %v (%d/%d)...", req.Method, req.URL.Path, reason, sleepDur, retry, maxBackoffRetries)
 			resp.Body.Close()
 			time.Sleep(sleepDur)
 
@@ -626,9 +668,11 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 				return nil, errRetry
 			}
 			c.processSAPIResponse(respRetry)
-			if respRetry.StatusCode != http.StatusTooManyRequests && respRetry.StatusCode != http.StatusServiceUnavailable {
+			isRetryWAF := isCloudFrontWAFBlock(respRetry)
+			if respRetry.StatusCode != http.StatusTooManyRequests && respRetry.StatusCode != http.StatusServiceUnavailable && !isRetryWAF {
 				return respRetry, nil
 			}
+			isWAF = isRetryWAF
 			resp = respRetry
 		}
 	}
@@ -1042,9 +1086,10 @@ func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) 
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("create folder failed (%d): %s", resp.StatusCode, string(b))
+		return nil, fmt.Errorf("create folder failed (%d): %s", resp.StatusCode, string(respBody))
 	}
 
 	var res struct {
@@ -1053,8 +1098,16 @@ func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) 
 			ID      interface{}  `json:"id"`
 			Folders []FolderItem `json:"folders"`
 		} `json:"data"`
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&res)
+	_ = json.Unmarshal(respBody, &res)
+	if res.Error != nil && (res.Error.Code != "" || res.Error.Message != "") {
+		return nil, fmt.Errorf("create folder API error: %s (%s)", res.Error.Message, res.Error.Code)
+	}
+
 	createdID := parseFlexibleInt64(res.ID)
 	if createdID == 0 {
 		createdID = parseFlexibleInt64(res.Data.ID)
@@ -1078,6 +1131,10 @@ func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) 
 				break
 			}
 		}
+	}
+
+	if createdID == 0 {
+		return nil, fmt.Errorf("create folder: O2/Movistar Cloud no devolvió ID para la carpeta '%s' (respuesta: %.300s)", name, string(respBody))
 	}
 
 	nowRFC := time.Now().UTC().Format("20060102T150405Z")
@@ -1432,8 +1489,9 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
-		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		// Manejo de retroceso ante HTTP 429 (Too Many Requests), 503 (Service Unavailable) o 403 (CloudFront WAF)
+		isWAF := resp.StatusCode == http.StatusForbidden && isCloudFrontWAFResponseBody(resp.Header, bStr)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || isWAF {
 			if attempt < maxRetries && canRetry {
 				backoff := time.Duration(1<<attempt) * time.Second
 				if backoff > 8*time.Second {
@@ -1441,7 +1499,11 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				}
 				jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
 				sleepDur := backoff + jitter
-				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o servicio ocupado (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
+				reason := fmt.Sprintf("HTTP %d", resp.StatusCode)
+				if isWAF {
+					reason = "AWS CloudFront WAF 403"
+				}
+				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o servicio ocupado (%s). Reintentando en %v (%d/%d)...", reason, sleepDur, attempt+1, maxRetries)
 				time.Sleep(sleepDur)
 				continue
 			}

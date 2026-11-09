@@ -2,6 +2,20 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.9] - 2026-11-09
+
+### 🛡️ Resiliencia ante AWS CloudFront WAF y Validación de Creación de Carpetas
+
+- **Resiliencia ante Bloqueos CloudFront WAF 403 (Issue #23):**
+  - Se detectan e interceptan respuestas HTTP `403 Forbidden` generadas por el WAF de AWS CloudFront (`The request could not be satisfied`) ante ráfagas de peticiones de clientes de backup como Synology HyperBackup o restic.
+  - Se aplica retroceso exponencial suave con jitter (hasta 5 reintentos con tope de 8s) en `DoRequest` y `UploadFileToFolder`, permitiendo que las ráfagas se procesen sin interrumpir las tareas de backup.
+- **Validación Estricta de Errores en `CreateFolder` (Issue #21):**
+  - Detección y parseo explícito de objetos de error en la respuesta de la API SAPI (como `FOL-1035: Maximum folder count reached for user`), impidiendo que el proxy devuelva éxito silencioso.
+  - Validación de que el ID devuelto no sea `0`. Si SAPI no devuelve un ID válido o falla la creación, se propaga el error correspondiente al cliente WebDAV en lugar de crear carpetas fantasma con ID 0 que provocaban posteriores errores `MED-1030: Folder not found`.
+- **Agradecimientos:**
+  - A @basty68 por reportar detalladamente el comportamiento de `FOL-1035` en el Issue #21.
+  - A @bytevictor por la investigación técnica y trazas de CloudFront WAF en el Issue #23.
+
 ## [v2.2.8] - 2026-11-07
 
 ### ⚡ Subida en Flujo Directo y Compatibilidad Windows WebClient
