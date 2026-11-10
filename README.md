@@ -40,7 +40,7 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 * 🚀 **Extremadamente Ligero y Eficiente (Go Nativo):** Binario estático compilado en contenedor Docker de solo **~20 MB** con consumo de memoria de apenas **~6.5 MB de RAM**.
 * 🔄 **Traducción Completa de WebDAV (RFC 4918):** Soporta `PROPFIND` (paginación automática de miles de archivos), `PUT` (streaming directo a disco sin saturar RAM), `GET`/`HEAD` (con soporte para peticiones `Range` y streaming por chunks), `MKCOL`, `DELETE`, `MOVE`, `COPY` y bloqueos `LOCK`/`UNLOCK`.
 * 📊 **Cuotas Virtuales RFC 4331:** Informa del espacio disponible para que asistentes como Synology DSM o Duplicati no fallen por chequeos de espacio insuficiente.
-* 🚦 **Semáforo de Concurrencia (3 Transfers Máximo):** Optimiza las subidas y descargas masivas al ancho de banda óptimo de Telefónica previniendo bloqueos por *rate-limit*.
+* 🚦 **Semáforo de Concurrencia 1:1 (Alineado con Cliente Oficial):** Serializa las transferencias y peticiones como el cliente nativo de escritorio, optimizando subidas y descargas sin provocar bloqueos de *rate-limit* ni *WAF*.
 * 📱 **Autenticación Compatible + OAuth2 PKCE:** Implementa el flujo de autenticación del cliente de escritorio (`omh windows client`) con sincronización milimétrica de timestamps y soporte para verificación SMS oficial desde el navegador.
 * 🛡️ **Protección contra Colisiones:** Previene la creación de duplicados automáticos como ` (1)` al actualizar o mover archivos.
 * 🧹 **Absorbedor de Basura de SO (*DevNull Absorber*):** Filtra y neutraliza automáticamente archivos innecesarios de Windows, macOS y Linux.
@@ -112,7 +112,16 @@ docker run -d \
   * **Descubrimiento Windows WebClient:** La petición inicial `OPTIONS /` sin credenciales devuelve `200 OK` con `MS-Author-Via: DAV` y cabeceras de conformidad `DAV: 1, 2`, permitiendo al explorador de Windows identificar el servicio antes de solicitar credenciales en `PROPFIND /`.
 * **Topologías de Red Docker y Detección de IP:**
   * **Docker Bridge (por defecto):** Mediante `BRUTE_FORCE_EXCLUDED_IPS`, las subredes puente estándar de Docker (`172.17.0.0/16`, `172.18.0.0/16`) y loopback (`127.0.0.1`, `::1`) quedan excluidas del bloqueo por fuerza bruta (HTTP 429). Esto evita que múltiples clientes compartiendo el gateway de Docker (ej. `172.18.0.1`) queden bloqueados accidentalmente. **La autenticación Basic Auth se exige y valida en todo momento (las exclusiones solo evitan el baneo 429, nunca eluden la clave).**
-  * **Proxy Inverso (Nginx, Traefik, Caddy, Synology DSM Reverse Proxy):** Al configurar `TRUSTED_PROXIES` (ej. `127.0.0.1,172.18.0.0/16`), el proxy extrae la IP real del cliente de `X-Forwarded-For` o `X-Real-IP`. Si la petición proviene de un origen no confiable, las cabeceras de reenvío se descartan de forma estricta para evitar spoofing.
+  * **Proxy Inverso (Nginx, Nginx Proxy Manager, Traefik, Caddy, Synology DSM Reverse Proxy):**
+    * Al configurar `TRUSTED_PROXIES` (ej. `127.0.0.1,172.18.0.0/16`), el proxy extrae la IP real del cliente de `X-Forwarded-For` o `X-Real-IP`. Si la petición proviene de un origen no confiable, las cabeceras de reenvío se descartan de forma estricta para evitar spoofing.
+    * ⚠️ **Importante para subidas de archivos grandes (`413 Request Entity Too Large`):** Si sitúas el contenedor detrás de **Nginx** o **Nginx Proxy Manager (NPM)**, debes desactivar el límite de cuerpo y el buffering en la pestaña *Advanced* (*Custom Nginx Configuration*) del proxy inverso para que no corte las subidas WebDAV de varios GB:
+      ```nginx
+      client_max_body_size 0;
+      proxy_request_buffering off;
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+      ```
+    * En Linux con clientes de escritorio basados en **GVFS** (Thunar / Nautilus `davs://`), ten en cuenta que `gvfsd-dav` / `libsoup` tiene una limitación histórica de entero con signo de 32 bits (**2 GiB**) por archivo; para subir archivos de entre 2 GB y 4 GB desde Linux se recomienda usar **Rclone** o `curl`.
   * **Docker Host (`network_mode: host`):** En Linux nativo permite ver la IP real directa del socket. En Docker Desktop (Windows/macOS), debido a la máquina virtual interna de virtualización, el modo bridge con mapeo de puertos o proxy inverso es la topología recomendada.
 * **No exponer directamente a Internet:** Si necesitas acceder desde fuera de tu red local, coloca siempre un proxy inverso con **TLS/HTTPS** delante (Caddy, Nginx, Traefik o túnel VPN/WireGuard/Tailscale).
 * **Contenedor sin privilegios (`non-root`):** La imagen oficial ejecuta el servidor bajo el usuario sin privilegios `app` (`UID 10001`). En actualizaciones sobre volúmenes existentes, el entrypoint migra automáticamente los permisos de `/app/tokens` antes de soltar privilegios.
@@ -217,8 +226,8 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
      * **Mapeo directo / Rclone:** Si intentas arrastrar manualmente un archivo mayor de 4 GB (como una imagen ISO de gran tamaño o un disco virtual), la subida fallará. Para archivos gigantes con Rclone, se recomienda utilizar el overlay [`rclone chunker`](https://rclone.org/chunker/) configurado con trozos de 2 GB.
 
 2. **🚦 Límite de conexiones concurrentes:**
-   * La API aplica restricciones de tasa (*rate-limiting*) si se satura con decenas de peticiones paralelas simultáneas.
-   * El proxy gestiona esto automáticamente mediante un **semáforo de concurrencia** que limita a **3 transferencias simultáneas** para operar siempre en el ancho de banda óptimo sin provocar bloqueos ni errores `HTTP 429`.
+   * La API aplica restricciones de tasa (*rate-limiting*) si se satura con peticiones paralelas simultáneas.
+   * El proxy gestiona esto automáticamente mediante un **semáforo de concurrencia 1:1** (idéntico al motor serie del cliente oficial de escritorio) para operar siempre sin provocar bloqueos de CloudFront WAF ni errores `HTTP 429`.
 
 3. **🔤 Caracteres reservados en nombres de archivo:**
    * Evita el uso de caracteres especiales no compatibles con URLs o APIs REST (`\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en los nombres de archivos o directorios.

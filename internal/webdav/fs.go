@@ -42,6 +42,7 @@ type uploadGuardKey struct{}
 type uploadGuard struct {
 	expected int64 // Content-Length anunciado (-1 si no se sabe)
 	broken   atomic.Bool
+	tooLarge atomic.Bool
 }
 
 type guardedBody struct {
@@ -1645,6 +1646,13 @@ func (w *WebDAVFileWriter) Close() error {
 		if res.err == nil && res.media != nil {
 			media = res.media
 			w.cleanupTemp()
+		} else if errors.Is(res.err, sapi.ErrFileTooLarge) {
+			w.cleanupTemp()
+			if w.guard != nil {
+				w.guard.tooLarge.Store(true)
+			}
+			logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
+			return ErrUploadTooLarge
 		} else {
 			logger.Log("[WebDAV] ⚠️ Subida en flujo requirió reintento desde disco para '%s': %v", w.name, res.err)
 		}
@@ -1674,6 +1682,13 @@ func (w *WebDAVFileWriter) Close() error {
 		<-globalTransferSem
 		<-uploadSem
 		if err != nil {
+			if errors.Is(err, sapi.ErrFileTooLarge) {
+				if w.guard != nil {
+					w.guard.tooLarge.Store(true)
+				}
+				logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
+				return ErrUploadTooLarge
+			}
 			logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
 			return err
 		}

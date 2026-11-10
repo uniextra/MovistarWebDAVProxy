@@ -201,10 +201,6 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 				timer.Reset(5 * time.Minute)
 				continue
 			}
-			if client.GetWAFCooldownRemaining() > 0 {
-				timer.Reset(computeKeepAliveInterval(cfg.ExpiresIn, consecutiveFailures))
-				continue
-			}
 
 			space, err := client.GetStorageSpace()
 			if err == nil && space != nil {

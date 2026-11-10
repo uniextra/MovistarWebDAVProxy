@@ -332,7 +332,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Conservar la fecha de modificación original si el cliente envía X-OC-Mtime
 		r = withOCMtime(w, r)
 
-		pw := &putStatusInterceptor{ResponseWriter: w, exceededFlag: &exceededFlag}
+		pw := &putStatusInterceptor{ResponseWriter: w, exceededFlag: &exceededFlag, guard: guard}
 		s.handler.ServeHTTP(pw, r)
 		if r.Context().Err() != nil && s.lockSys != nil {
 			s.lockSys.unlockPath(time.Now(), urlPath)
@@ -500,11 +500,12 @@ func (m *maxUploadReader) Close() error {
 type putStatusInterceptor struct {
 	http.ResponseWriter
 	exceededFlag *atomic.Bool
+	guard        *uploadGuard
 	wroteHeader  bool
 }
 
 func (p *putStatusInterceptor) WriteHeader(statusCode int) {
-	if p.exceededFlag != nil && p.exceededFlag.Load() && statusCode >= 400 {
+	if ((p.exceededFlag != nil && p.exceededFlag.Load()) || (p.guard != nil && p.guard.tooLarge.Load())) && statusCode >= 400 {
 		statusCode = http.StatusRequestEntityTooLarge
 	}
 	p.wroteHeader = true

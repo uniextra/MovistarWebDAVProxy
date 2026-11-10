@@ -2,6 +2,17 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.15] - 2026-11-10
+
+### 🛡️ Restauración del Transporte TLS Estándar, Eliminación de Pausas Artificiales WAF y Mapeo MED-1020 (Issues #17, #23 y #26)
+
+- **Causa Raíz de los Bloqueos WAF 403 en Descargas Concurrentes / Ráfagas (Issues #23 y #26):**
+  - Mediante pruebas de estrés controladas en vivo (30 peticiones concurrentes combinando descargas `/sapi/download/file` en streaming y consultas `/sapi/media`), se demostró que la combinación introducida en `v2.2.12` (`MaxVersion: tls.VersionTLS12` + `ForceAttemptHTTP2: true`) provocaba un **100% de bloqueos `HTTP 403` en AWS CloudFront WAF Bot Control** en cuanto 2 streams HTTP/2 se solapaban sobre TLS 1.2 (por ejemplo, mientras un archivo seguía descargándose en `DownloadFileStreamRange` tras liberarse el semáforo de cabeceras).
+  - Se restaura el transporte TLS estándar de Go (`TLS 1.3/1.2` automático como en `v2.2.8`) y se elimina toda la maquinaria de pausas globales artificiales de 26s (`wafCooldownUntil`) y *pacing* forzado que la app oficial no utiliza, manteniendo la concurrencia 1:1 (`SAPI_MAX_CONCURRENT = 1` y semáforos WebDAV a `1`). En la misma prueba de estrés en vivo de 30 peticiones rápidas, el transporte restaurado obtuvo **30/30 (`100% HTTP 200 OK`) y 0 bloqueos WAF**.
+- **Mapeo Explícito de `MED-1020` a `HTTP 413 Request Entity Too Large` y Documentación de Proxy Inverso (Issue #17):**
+  - Se comprobó en vivo que el límite exacto por archivo en Telefónica SAPI es de `4 GiB` ($2^{32} = 4.294.967.296$ bytes), devolviendo el código interno `MED-1020` a partir de `4 GiB + 1 byte`. Si SAPI devuelve `MED-1020`, el proxy responde ahora directamente con `413 Request Entity Too Large` sin reintentar la subida desde disco.
+  - Se documenta en `README.md` la configuración necesaria para **Nginx Proxy Manager (NPM) / Nginx** (`client_max_body_size 0;` y `proxy_request_buffering off;`) y el límite de 2 GiB de clientes Linux basados en `GVFS` (`gvfsd-dav`).
+
 ## [v2.2.14] - 2026-11-10
 
 ### 🛡️ Alineación 1:1 de Concurrencia con el Cliente Oficial de Escritorio de Windows (Issues #23 y #26)

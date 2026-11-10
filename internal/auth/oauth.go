@@ -4,7 +4,6 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -29,34 +28,12 @@ const (
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
-// NewDesktopTLSConfig devuelve la configuración TLS 1.2 compatible con el cliente de escritorio
-// oficial de Windows ("omh windows client 32.0.7.1"). Evita que el ClientHello híbrido TLS 1.3/1.2
-// por defecto de Go (JA3/JA4 de Go HTTP Client) sea bloqueado con HTTP 403 por AWS CloudFront WAF Bot Control.
-func NewDesktopTLSConfig() *tls.Config {
-	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		MaxVersion: tls.VersionTLS12,
-	}
-}
-
 var (
 	authCodeQueryRegex = regexp.MustCompile(`code=([A-Za-z0-9\-_.~]+)`)
 	validAuthCodeRegex = regexp.MustCompile(`^[A-Za-z0-9\-_.~]{1,512}$`)
 	stateQueryRegex    = regexp.MustCompile(`state=([A-Za-z0-9\-_.~%]+)`)
-	oauthHTTPClient    = &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig:   NewDesktopTLSConfig(),
-			ForceAttemptHTTP2: true,
-		},
-	}
-	sapiLoginClient = &http.Client{
-		Timeout: 20 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig:   NewDesktopTLSConfig(),
-			ForceAttemptHTTP2: true,
-		},
-	}
+	oauthHTTPClient    = &http.Client{Timeout: 30 * time.Second}
+	sapiLoginClient    = &http.Client{Timeout: 20 * time.Second}
 )
 
 func GetOAuthAuthorizeURL(provider string) string {

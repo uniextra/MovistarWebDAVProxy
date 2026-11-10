@@ -242,14 +242,14 @@ type Client struct {
 	rootFolderID     int64
 	OnSessionExpired func(err error)
 
-	sapiSem          chan struct{}
-	pacingMu         sync.Mutex
-	lastReqTime      time.Time
-	pacingInterval   time.Duration
-	wafCooldownMu    sync.RWMutex
-	wafCooldownUntil time.Time
-	wafCooldownBase  time.Duration
+	sapiSem        chan struct{}
+	pacingMu       sync.Mutex
+	lastReqTime    time.Time
+	pacingInterval time.Duration
 }
+
+// ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
+var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured max file size limit")
 
 func NewClient(cfg config.AccountConfig) (*Client, error) {
 	jar, err := cookiejar.New(nil)
@@ -258,8 +258,6 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig:   auth.NewDesktopTLSConfig(),
-		ForceAttemptHTTP2: true,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -287,7 +285,7 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		}
 	}
 
-	pacing := 150 * time.Millisecond
+	var pacing time.Duration
 	if envPacing := strings.TrimSpace(os.Getenv("SAPI_PACING_MS")); envPacing != "" {
 		if ms, err := strconv.Atoi(envPacing); err == nil && ms >= 0 {
 			pacing = time.Duration(ms) * time.Millisecond
@@ -295,14 +293,13 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 	}
 
 	c := &Client{
-		cfg:             cfg,
-		httpClient:      httpClient,
-		baseURL:         baseURL,
-		uploadURL:       uploadURL,
-		maxUploadMB:     4096,
-		sapiSem:         make(chan struct{}, maxConcurrent),
-		pacingInterval:  pacing,
-		wafCooldownBase: 25 * time.Second,
+		cfg:            cfg,
+		httpClient:     httpClient,
+		baseURL:        baseURL,
+		uploadURL:      uploadURL,
+		maxUploadMB:    4096,
+		sapiSem:        make(chan struct{}, maxConcurrent),
+		pacingInterval: pacing,
 	}
 
 	c.syncCookiesLocked()
@@ -363,15 +360,12 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 
 func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if baseURL != "" {
 		c.baseURL = strings.TrimSuffix(baseURL, "/")
 	}
 	if uploadURL != "" {
 		c.uploadURL = strings.TrimSuffix(uploadURL, "/")
-	}
-	c.mu.Unlock()
-	if (strings.HasPrefix(baseURL, "http://127.0.0.1:") || strings.HasPrefix(baseURL, "http://localhost:")) && os.Getenv("SAPI_PACING_MS") == "" {
-		c.SetPacingInterval(10 * time.Millisecond)
 	}
 }
 
@@ -549,11 +543,6 @@ func (c *Client) RefreshSession() bool {
 				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
 				return true
 			} else {
-				if res.StatusCode == http.StatusForbidden && isCloudFrontWAFResponseBody(nil, res.RawResponse) {
-					logger.Log("[OAuth] ⚠️ Inicialización SAPI bloqueada temporalmente por CloudFront WAF (HTTP 403). Conservando credenciales.")
-					c.triggerWAFCooldown(30 * time.Second)
-					return false
-				}
 				logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
 			}
 		} else if err != nil {
@@ -570,82 +559,6 @@ func (c *Client) RefreshSession() bool {
 		logger.Log("[!] ⚠️ Error transitorio durante renovación de sesión. Conservando credenciales para futuros reintentos.")
 	}
 	return false
-}
-
-// isCloudFrontWAFResponseBody verifica si las cabeceras o el cuerpo de la respuesta HTTP corresponden
-// a un bloqueo de rate limiting / WAF por parte de AWS CloudFront (HTTP 403 Forbidden).
-func isCloudFrontWAFResponseBody(header http.Header, bodyStr string) bool {
-	bodyLower := strings.ToLower(bodyStr)
-	hasCloudFront := strings.Contains(bodyLower, "cloudfront") ||
-		strings.Contains(strings.ToLower(header.Get("Server")), "cloudfront") ||
-		header.Get("X-Amz-Cf-Id") != "" ||
-		strings.Contains(strings.ToLower(header.Get("Via")), "cloudfront")
-
-	if hasCloudFront {
-		if strings.Contains(bodyLower, "the request could not be satisfied") ||
-			strings.Contains(bodyLower, "403 error") ||
-			strings.Contains(strings.ToLower(header.Get("Content-Type")), "text/html") {
-			return true
-		}
-	}
-	return false
-}
-
-// isCloudFrontWAFBlock comprueba si una respuesta HTTP es un bloqueo 403 de CloudFront WAF.
-// Restaura resp.Body mediante io.MultiReader para no perder ningún byte downstream.
-func isCloudFrontWAFBlock(resp *http.Response) bool {
-	if resp == nil || resp.StatusCode != http.StatusForbidden {
-		return false
-	}
-	sample, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return false
-	}
-	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(sample), resp.Body))
-	return isCloudFrontWAFResponseBody(resp.Header, string(sample))
-}
-
-func (c *Client) GetWAFCooldownRemaining() time.Duration {
-	c.wafCooldownMu.RLock()
-	defer c.wafCooldownMu.RUnlock()
-	if time.Now().Before(c.wafCooldownUntil) {
-		return time.Until(c.wafCooldownUntil)
-	}
-	return 0
-}
-
-func (c *Client) getWAFCooldownRemaining() time.Duration {
-	return c.GetWAFCooldownRemaining()
-}
-
-func (c *Client) triggerWAFCooldown(d time.Duration) {
-	c.wafCooldownMu.Lock()
-	defer c.wafCooldownMu.Unlock()
-	target := time.Now().Add(d)
-	if target.After(c.wafCooldownUntil) {
-		c.wafCooldownUntil = target
-		logger.Log("[SAPI] 🛑 Pausa global de seguridad por CloudFront WAF activada durante %v...", d.Round(time.Second))
-	}
-}
-
-func (c *Client) waitForWAFCooldown() {
-	for {
-		rem := c.getWAFCooldownRemaining()
-		if rem <= 0 {
-			break
-		}
-		logger.Log("[SAPI] ⏳ Petición en cola esperando fin de pausa WAF (%v restantes)...", rem.Round(time.Second))
-		time.Sleep(rem)
-	}
-}
-
-func (c *Client) SetWAFCooldownBase(d time.Duration) {
-	c.mu.Lock()
-	c.wafCooldownBase = d
-	c.mu.Unlock()
-	if d < time.Second {
-		c.SetPacingInterval(5 * time.Millisecond)
-	}
 }
 
 func (c *Client) SetPacingInterval(d time.Duration) {
@@ -673,7 +586,6 @@ func (c *Client) paceRequest() {
 }
 
 func (c *Client) acquireSlot() {
-	c.waitForWAFCooldown()
 	if c.sapiSem != nil {
 		c.sapiSem <- struct{}{}
 	}
@@ -688,12 +600,7 @@ func (c *Client) releaseSlot() {
 
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 	c.acquireSlot()
-	holdingSlot := true
-	defer func() {
-		if holdingSlot {
-			c.releaseSlot()
-		}
-	}()
+	defer c.releaseSlot()
 
 	c.mu.RLock()
 	cfg := c.cfg
@@ -776,64 +683,8 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// Manejo de retroceso ante HTTP 403 de AWS CloudFront WAF (bloqueo por ráfagas de HyperBackup / restic)
-	isWAF := isCloudFrontWAFBlock(resp)
-	if isWAF && (req.Body == nil || req.GetBody != nil) {
-		const maxWAFRetries = 3
-		c.mu.RLock()
-		base := c.wafCooldownBase
-		c.mu.RUnlock()
-		if base == 0 {
-			base = 25 * time.Second
-		}
-		for retry := 1; retry <= maxWAFRetries; retry++ {
-			step := 5 * time.Second
-			jitterMax := int64(1000 * time.Millisecond)
-			if base < time.Second {
-				step = base
-				jitterMax = int64(10 * time.Millisecond)
-			}
-			cooldown := base + time.Duration(retry-1)*step
-			jitter := time.Duration(time.Now().UnixNano() % jitterMax)
-			sleepDur := cooldown + jitter
-			c.triggerWAFCooldown(sleepDur)
-			logger.Log("[SAPI] ⏳ AWS CloudFront WAF 403 detectado (%s %s). Pausando todas las peticiones durante %v para drenar WAF (%d/%d)...", req.Method, req.URL.Path, sleepDur.Round(time.Second), retry, maxWAFRetries)
-			resp.Body.Close()
-
-			// Liberar semáforo durante la espera WAF y re-adquirir con espaciado para evitar estampidas (convoy)
-			if holdingSlot {
-				c.releaseSlot()
-				holdingSlot = false
-			}
-			time.Sleep(sleepDur)
-			c.acquireSlot()
-			holdingSlot = true
-
-			var retryBody io.Reader
-			if req.GetBody != nil {
-				rb, err := req.GetBody()
-				if err != nil {
-					return nil, err
-				}
-				retryBody = rb
-			}
-			newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
-			if err != nil {
-				return nil, err
-			}
-			newReq.Header = req.Header.Clone()
-			respRetry, errRetry := c.httpClient.Do(newReq)
-			if errRetry != nil {
-				return nil, errRetry
-			}
-			c.processSAPIResponse(respRetry)
-			if !isCloudFrontWAFBlock(respRetry) {
-				logger.Log("[SAPI] ✔ Conexión con Movistar/O2 Cloud reanudada con éxito tras bloqueo WAF.")
-				return respRetry, nil
-			}
-			resp = respRetry
-		}
-	} else if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) &&
+	// Manejo de retroceso suave ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
+	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) &&
 		(req.Body == nil || req.GetBody != nil) {
 		const maxBackoffRetries = 4
 		for retry := 1; retry <= maxBackoffRetries; retry++ {
@@ -1684,19 +1535,6 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
-		// Manejo de retroceso ante CloudFront WAF 403
-		isWAF := resp.StatusCode == http.StatusForbidden && isCloudFrontWAFResponseBody(resp.Header, bStr)
-		if isWAF {
-			if attempt < maxRetries && canRetry {
-				cooldown := 30*time.Second + time.Duration((time.Now().UnixNano()%1000))*time.Millisecond
-				c.triggerWAFCooldown(cooldown)
-				logger.Log("[SAPI] ⏳ Subida pausada por CloudFront WAF 403. Pausando %v para drenar WAF (%d/%d)...", cooldown.Round(time.Second), attempt+1, maxRetries)
-				time.Sleep(cooldown)
-				continue
-			}
-			return nil, fmt.Errorf("upload failed: blocked by CloudFront WAF (HTTP 403) after %d retries: %s", maxRetries, bStr)
-		}
-
 		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 			if attempt < maxRetries && canRetry {
@@ -1711,6 +1549,10 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				continue
 			}
 			return nil, fmt.Errorf("upload failed: rate limited or service unavailable (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, bStr)
+		}
+
+		if resp.StatusCode == http.StatusRequestEntityTooLarge || strings.Contains(bStr, "MED-1020") {
+			return nil, ErrFileTooLarge
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
@@ -1733,6 +1575,10 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		}
 
 		_ = json.Unmarshal(b, &res)
+
+		if res.Error != nil && res.Error.Code == "MED-1020" {
+			return nil, ErrFileTooLarge
+		}
 
 		if res.Error != nil && res.Error.Code == "MED-1017" {
 			if attempt < maxRetries {
