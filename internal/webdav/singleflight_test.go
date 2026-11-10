@@ -66,8 +66,11 @@ func TestMovistarFS_StaleCacheFallbackOnRateLimit(t *testing.T) {
 		return nil, errors.New("HTTP 403: CloudFront WAF block")
 	})
 
-	// findMedia debe encontrar el archivo en la caché previa (stale cache)
-	item, ok := mfs.findMedia(folderID, "backup.db")
+	// findMedia debe encontrar el archivo en la caché previa (stale cache) sin error
+	item, ok, err := mfs.findMedia(folderID, "backup.db")
+	if err != nil {
+		t.Fatalf("expected nil error using stale cache, got %v", err)
+	}
 	if !ok || item == nil {
 		t.Fatalf("expected findMedia to succeed using stale cache, got found=%v", ok)
 	}

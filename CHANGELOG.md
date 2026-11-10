@@ -2,6 +2,21 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.11] - 2026-11-10
+
+### 🛡️ Propagación de Errores de Listado (Issue #24) y Eliminación de Spam de Cuota (Issue #23)
+
+- **Prevención de Falsos Listados Vacíos ante Errores de Red / WAF (Issue #24):**
+  - Cuando SAPI falla al listar subcarpetas o archivos en una caché fría (sin datos previos en memoria), el proxy ya no devuelve un `HTTP 207 Multi-Status` con 0 elementos.
+  - En su lugar, el error se propaga como `HTTP 500 Internal Server Error`, impidiendo que clientes de backup (Duplicati, restic, Synology HyperBackup, etc.) asuman erróneamente que los archivos remotos fueron eliminados (`MissingRemoteFiles`).
+  - Añadido test de integración exhaustivo `TestPropfindDoesNotReturnEmptySuccessWhenProviderFails`.
+  - Gracias a @Erdk2 por el análisis detallado y el caso de prueba reproducible en el Issue #24.
+
+- **Deduplicación (*Singleflight*) y Caché Autónoma de Cuota (Issue #23):**
+  - La consulta de espacio y cuota (`GetStorageSpace`) ahora utiliza *singleflight* y se almacena en caché durante 5 minutos, protegiendo SAPI de decenas de llamadas redundantes generadas por cada `PROPFIND` entrante al inyectar la cuota RFC 4331.
+  - Si SAPI devuelve 403 o error de red, se reutiliza la cuota previa o un fallback de 5 minutos, evitando reintentar inmediatamente contra el WAF.
+  - Se desacopla la cuota de la invalidación de archivos (`InvalidateCache` ya no descarta la cuota al crear o borrar ficheros).
+
 ## [v2.2.10] - 2026-11-09
 
 ### 🛡️ Solución Definitiva a Bloqueos AWS CloudFront WAF 403 (Issue #23)
