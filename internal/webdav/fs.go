@@ -336,7 +336,7 @@ func NewMovistarFS(client *sapi.Client) *MovistarFS {
 		deletedTombstones: make(map[string]time.Time),
 		folderCache:       make(map[int64]*cachedFolders),
 		mediaCache:        make(map[int64]*cachedMedia),
-		cacheTTL:          60 * time.Second,
+		cacheTTL:          120 * time.Second,
 		duplicatiStore:    NewDuplicatiProbeStore(),
 	}
 }
@@ -391,18 +391,17 @@ func (mfs *MovistarFS) GetStorageSpace() *sapi.StorageSpace {
 		return sp
 	}
 
-	// Si falló SAPI (por ejemplo WAF 403 o error de red), reusar la cuota previa si existe aunque esté caducada
-	mfs.cacheMu.RLock()
+	// Si falló SAPI (por ejemplo WAF 403 o error de red), reusar la cuota previa si existe y renovar su TTL
+	mfs.cacheMu.Lock()
 	if mfs.storageCache != nil && mfs.storageCache.space != nil {
+		mfs.storageCache.time = time.Now()
 		sp := mfs.storageCache.space
-		mfs.cacheMu.RUnlock()
+		mfs.cacheMu.Unlock()
 		return sp
 	}
-	mfs.cacheMu.RUnlock()
 
 	// Si no hay cuota previa, guardar un fallback durante 5 minutos para evitar martillear SAPI
 	fallback := &sapi.StorageSpace{TotalBytes: 0, UsedBytes: 0, NoLimit: true}
-	mfs.cacheMu.Lock()
 	mfs.storageCache = &cachedStorage{space: fallback, time: time.Now()}
 	mfs.cacheMu.Unlock()
 	return fallback
@@ -435,14 +434,15 @@ func (mfs *MovistarFS) getSubfolders(parentID int64) ([]sapi.FolderItem, error) 
 
 	if err != nil {
 		logger.Log("[WebDAV] ⚠️ Error listando subcarpetas de %d: %v", parentID, err)
-		mfs.cacheMu.RLock()
-		if ok && cached != nil {
-			folders := cached.folders
-			mfs.cacheMu.RUnlock()
+		mfs.cacheMu.Lock()
+		if c, exists := mfs.folderCache[parentID]; exists && c != nil {
+			c.time = time.Now()
+			folders := c.folders
+			mfs.cacheMu.Unlock()
 			logger.Log("[WebDAV] ℹ Sirviendo %d subcarpetas en caché previa para carpeta %d", len(folders), parentID)
 			return mfs.mergeCreatedFolders(parentID, folders), nil
 		}
-		mfs.cacheMu.RUnlock()
+		mfs.cacheMu.Unlock()
 		return nil, err
 	}
 
@@ -556,14 +556,15 @@ func (mfs *MovistarFS) getMedia(folderID int64) ([]sapi.MediaItem, error) {
 
 	if err != nil {
 		logger.Log("[WebDAV] ⚠️ Error listando media de %d: %v", folderID, err)
-		mfs.cacheMu.RLock()
-		if ok && cached != nil {
-			res := cached.media
-			mfs.cacheMu.RUnlock()
+		mfs.cacheMu.Lock()
+		if c, exists := mfs.mediaCache[folderID]; exists && c != nil {
+			c.time = time.Now()
+			res := c.media
+			mfs.cacheMu.Unlock()
 			logger.Log("[WebDAV] ℹ Sirviendo %d elementos en caché previa para carpeta %d", len(res), folderID)
 			return res, nil
 		}
-		mfs.cacheMu.RUnlock()
+		mfs.cacheMu.Unlock()
 		return nil, err
 	}
 

@@ -2,6 +2,7 @@ package sapi
 
 import (
 	"bytes"
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -29,6 +30,17 @@ func TestNewClient_MaxIdleConnsPerHost(t *testing.T) {
 	}
 	if transport.MaxIdleConnsPerHost != 20 {
 		t.Errorf("expected MaxIdleConnsPerHost = 20, got %d", transport.MaxIdleConnsPerHost)
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatalf("expected non-nil TLSClientConfig")
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 || transport.TLSClientConfig.MaxVersion != tls.VersionTLS12 {
+		t.Errorf("expected TLS 1.2 (0x%04x..0x%04x), got 0x%04x..0x%04x",
+			tls.VersionTLS12, tls.VersionTLS12,
+			transport.TLSClientConfig.MinVersion, transport.TLSClientConfig.MaxVersion)
+	}
+	if !transport.ForceAttemptHTTP2 {
+		t.Errorf("expected ForceAttemptHTTP2 = true")
 	}
 }
 

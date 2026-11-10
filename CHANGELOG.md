@@ -2,6 +2,20 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.12] - 2026-11-10
+
+### 🛡️ Solución Definitiva a Bloqueos AWS CloudFront WAF por Huella TLS (JA3/JA4) y Optimización para HyperBackup (Issues #23 y #26)
+
+- **Alineación de Huella TLS 1.2 + HTTP/2 con el Cliente Oficial de Windows (Causa Raíz de los 403 en el Arranque):**
+  - Se identificó mediante análisis de tráfico que AWS CloudFront WAF Bot Control bloqueaba con `HTTP 403 (The request could not be satisfied)` el `ClientHello` híbrido TLS 1.3/1.2 por defecto de `crypto/tls` en Go (firma JA3/JA4 catalogada como cliente automatizado cuando se combina con `User-Agent: omh windows client 32.0.7.1`).
+  - Se configura explícitamente `TLS 1.2` (`MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12`) junto con `ForceAttemptHTTP2: true` tanto en el transporte SAPI como en los clientes de login/renovación OAuth, igualando la negociación TLS del cliente oficial de escritorio de Windows y obteniendo respuestas `HTTP/2.0 200 OK` de forma inmediata y consistente desde el arranque.
+- **Eliminación del Efecto Convoy (Estampida) y Pacing Global Mutex:**
+  - Las peticiones que entran en pausa por enfriamiento WAF liberan ahora su slot de concurrencia (`sapiSem`) antes de dormir y lo re-adquieren de forma escalonada mediante un *pacer* global (`paceRequest`, configurable vía `SAPI_PACING_MS`, por defecto 50ms), impidiendo que múltiples goroutines despierten en el mismo milisegundo y re-disparen un bloqueo.
+- **Renovación de TTL al Servir Caché Previa (*Stale-While-Error*) y Cero Consultas Redundantes:**
+  - Cuando `getSubfolders`, `getMedia` o `GetStorageSpace` sirven datos de caché previa ante un error transitorio de red, se actualiza la marca temporal de la entrada en caché para evitar que cada segmento de ruta de HyperBackup vuelva a consultar SAPI repetidamente.
+  - Ampliado el TTL de caché de directorios y medios a 120 segundos (manteniendo invalidación instantánea en memoria ante operaciones `PUT`, `MKCOL`, `DELETE` y `MOVE`).
+  - El endpoint `/storage_info` del panel web comparte ahora la caché de cuota de `MovistarFS`, y `KeepAlive` omite sondeados si hay una ventana de enfriamiento WAF activa.
+
 ## [v2.2.11] - 2026-11-10
 
 ### 🛡️ Propagación de Errores de Listado (Issue #24) y Eliminación de Spam de Cuota (Issue #23)

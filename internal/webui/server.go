@@ -281,11 +281,18 @@ func (s *Server) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	space, err := s.client.GetStorageSpace()
-	if err != nil {
-		logger.Log("[WebUI] ⚠️ Error consultando espacio en almacenamiento: %v", err)
-		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "Error al consultar el espacio de almacenamiento en Movistar/O2 Cloud"})
-		return
+	var space *sapi.StorageSpace
+	if s.webdavServer != nil {
+		space = s.webdavServer.GetStorageSpace()
+	}
+	if space == nil || (space.TotalBytes == 0 && space.UsedBytes == 0 && space.Raw == nil) {
+		var err error
+		space, err = s.client.GetStorageSpace()
+		if err != nil {
+			logger.Log("[WebUI] ⚠️ Error consultando espacio en almacenamiento: %v", err)
+			jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "Error al consultar el espacio de almacenamiento en Movistar/O2 Cloud"})
+			return
+		}
 	}
 
 	formatBytes := func(b int64) string {

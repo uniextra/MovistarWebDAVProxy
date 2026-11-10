@@ -131,6 +131,13 @@ func (s *Server) InvalidateCache() {
 	}
 }
 
+func (s *Server) GetStorageSpace() *sapi.StorageSpace {
+	if s.fs != nil {
+		return s.fs.GetStorageSpace()
+	}
+	return nil
+}
+
 func (s *Server) IsRunning() bool {
 	return s.running.Load()
 }

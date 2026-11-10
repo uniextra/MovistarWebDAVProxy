@@ -243,6 +243,9 @@ type Client struct {
 	OnSessionExpired func(err error)
 
 	sapiSem          chan struct{}
+	pacingMu         sync.Mutex
+	lastReqTime      time.Time
+	pacingInterval   time.Duration
 	wafCooldownMu    sync.RWMutex
 	wafCooldownUntil time.Time
 	wafCooldownBase  time.Duration
@@ -255,6 +258,8 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 	}
 
 	transport := &http.Transport{
+		TLSClientConfig:   auth.NewDesktopTLSConfig(),
+		ForceAttemptHTTP2: true,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -282,6 +287,13 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		}
 	}
 
+	pacing := 50 * time.Millisecond
+	if envPacing := strings.TrimSpace(os.Getenv("SAPI_PACING_MS")); envPacing != "" {
+		if ms, err := strconv.Atoi(envPacing); err == nil && ms >= 0 {
+			pacing = time.Duration(ms) * time.Millisecond
+		}
+	}
+
 	c := &Client{
 		cfg:             cfg,
 		httpClient:      httpClient,
@@ -289,37 +301,48 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		uploadURL:       uploadURL,
 		maxUploadMB:     4096,
 		sapiSem:         make(chan struct{}, maxConcurrent),
+		pacingInterval:  pacing,
 		wafCooldownBase: 25 * time.Second,
 	}
 
-	// Inyectar cookies iniciales si existen
-	if c.cfg.ValidationKey != "" || c.cfg.JSessionID != "" {
-		cookieDomain := "micloud.movistar.es"
-		if strings.EqualFold(cfg.Provider, "o2") {
-			cookieDomain = "cloud.o2online.es"
-		}
-		sapiURL, _ := url.Parse("https://" + cookieDomain)
-		var cookies []*http.Cookie
-		if c.cfg.ValidationKey != "" {
-			cookies = append(cookies, &http.Cookie{
-				Name:   "validationkey",
-				Value:  c.cfg.ValidationKey,
-				Path:   "/",
-				Domain: cookieDomain,
-			})
-		}
-		if c.cfg.JSessionID != "" {
-			cookies = append(cookies, &http.Cookie{
-				Name:   "JSESSIONID",
-				Value:  c.cfg.JSessionID,
-				Path:   "/",
-				Domain: cookieDomain,
-			})
-		}
-		jar.SetCookies(sapiURL, cookies)
-	}
+	c.syncCookiesLocked()
 
 	return c, nil
+}
+
+func (c *Client) syncCookiesLocked() {
+	if c.httpClient == nil || c.httpClient.Jar == nil {
+		return
+	}
+	if c.cfg.ValidationKey == "" && c.cfg.JSessionID == "" {
+		return
+	}
+	cookieDomain := "micloud.movistar.es"
+	if strings.EqualFold(c.cfg.Provider, "o2") {
+		cookieDomain = "cloud.o2online.es"
+	}
+	sapiURL, err := url.Parse("https://" + cookieDomain)
+	if err != nil {
+		return
+	}
+	var cookies []*http.Cookie
+	if c.cfg.ValidationKey != "" {
+		cookies = append(cookies, &http.Cookie{
+			Name:   "validationkey",
+			Value:  c.cfg.ValidationKey,
+			Path:   "/",
+			Domain: cookieDomain,
+		})
+	}
+	if c.cfg.JSessionID != "" {
+		cookies = append(cookies, &http.Cookie{
+			Name:   "JSESSIONID",
+			Value:  c.cfg.JSessionID,
+			Path:   "/",
+			Domain: cookieDomain,
+		})
+	}
+	c.httpClient.Jar.SetCookies(sapiURL, cookies)
 }
 
 func (c *Client) GetConfig() config.AccountConfig {
@@ -335,6 +358,7 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 	c.baseURL = auth.GetSAPIBaseURL(cfg.Provider)
 	c.uploadURL = auth.GetUploadBaseURL(cfg.Provider)
 	c.rootFolderID = 0
+	c.syncCookiesLocked()
 }
 
 func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
@@ -415,6 +439,9 @@ func (c *Client) processSAPIResponse(resp *http.Response) {
 		}
 	}
 
+	if changed {
+		c.syncCookiesLocked()
+	}
 	cfgCopy := c.cfg
 	c.mu.Unlock()
 
@@ -461,6 +488,7 @@ func (c *Client) RefreshSession() bool {
 					c.cfg.RefreshToken = res.RefreshedOAuth.RefreshToken
 				}
 			}
+			c.syncCookiesLocked()
 			cfgCopy := c.cfg
 			c.mu.Unlock()
 
@@ -510,6 +538,7 @@ func (c *Client) RefreshSession() bool {
 						c.cfg.RefreshToken = res.RefreshedOAuth.RefreshToken
 					}
 				}
+				c.syncCookiesLocked()
 				cfgCopy2 := c.cfg
 				c.mu.Unlock()
 
@@ -573,13 +602,17 @@ func isCloudFrontWAFBlock(resp *http.Response) bool {
 	return isCloudFrontWAFResponseBody(resp.Header, string(sample))
 }
 
-func (c *Client) getWAFCooldownRemaining() time.Duration {
+func (c *Client) GetWAFCooldownRemaining() time.Duration {
 	c.wafCooldownMu.RLock()
 	defer c.wafCooldownMu.RUnlock()
 	if time.Now().Before(c.wafCooldownUntil) {
 		return time.Until(c.wafCooldownUntil)
 	}
 	return 0
+}
+
+func (c *Client) getWAFCooldownRemaining() time.Duration {
+	return c.GetWAFCooldownRemaining()
 }
 
 func (c *Client) triggerWAFCooldown(d time.Duration) {
@@ -605,20 +638,59 @@ func (c *Client) waitForWAFCooldown() {
 
 func (c *Client) SetWAFCooldownBase(d time.Duration) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.wafCooldownBase = d
+	c.mu.Unlock()
+	if d < time.Second {
+		c.SetPacingInterval(5 * time.Millisecond)
+	}
+}
+
+func (c *Client) SetPacingInterval(d time.Duration) {
+	c.pacingMu.Lock()
+	c.pacingInterval = d
+	c.pacingMu.Unlock()
+}
+
+func (c *Client) paceRequest() {
+	c.pacingMu.Lock()
+	defer c.pacingMu.Unlock()
+	if c.pacingInterval <= 0 {
+		return
+	}
+	now := time.Now()
+	if !c.lastReqTime.IsZero() {
+		elapsed := now.Sub(c.lastReqTime)
+		if elapsed < c.pacingInterval {
+			sleepDur := c.pacingInterval - elapsed
+			time.Sleep(sleepDur)
+			now = time.Now()
+		}
+	}
+	c.lastReqTime = now
+}
+
+func (c *Client) acquireSlot() {
+	c.waitForWAFCooldown()
+	if c.sapiSem != nil {
+		c.sapiSem <- struct{}{}
+	}
+	c.paceRequest()
+}
+
+func (c *Client) releaseSlot() {
+	if c.sapiSem != nil {
+		<-c.sapiSem
+	}
 }
 
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
-	// Respetar enfriamiento global si CloudFront WAF bloqueó previamente
-	c.waitForWAFCooldown()
-
-	// Control de concurrencia saliente hacia SAPI
-	if c.sapiSem != nil {
-		c.sapiSem <- struct{}{}
-		defer func() { <-c.sapiSem }()
-		time.Sleep(25 * time.Millisecond) // micro-espaciado para amortiguar ráfagas
-	}
+	c.acquireSlot()
+	holdingSlot := true
+	defer func() {
+		if holdingSlot {
+			c.releaseSlot()
+		}
+	}()
 
 	c.mu.RLock()
 	cfg := c.cfg
@@ -705,18 +777,34 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 	isWAF := isCloudFrontWAFBlock(resp)
 	if isWAF && (req.Body == nil || req.GetBody != nil) {
 		const maxWAFRetries = 3
+		c.mu.RLock()
 		base := c.wafCooldownBase
+		c.mu.RUnlock()
 		if base == 0 {
 			base = 25 * time.Second
 		}
 		for retry := 1; retry <= maxWAFRetries; retry++ {
-			cooldown := base + time.Duration((retry-1)*5)*time.Second
-			jitter := time.Duration((time.Now().UnixNano() % 1000)) * time.Millisecond
+			step := 5 * time.Second
+			jitterMax := int64(1000 * time.Millisecond)
+			if base < time.Second {
+				step = base
+				jitterMax = int64(10 * time.Millisecond)
+			}
+			cooldown := base + time.Duration(retry-1)*step
+			jitter := time.Duration(time.Now().UnixNano() % jitterMax)
 			sleepDur := cooldown + jitter
 			c.triggerWAFCooldown(sleepDur)
 			logger.Log("[SAPI] ⏳ AWS CloudFront WAF 403 detectado (%s %s). Pausando todas las peticiones durante %v para drenar WAF (%d/%d)...", req.Method, req.URL.Path, sleepDur.Round(time.Second), retry, maxWAFRetries)
 			resp.Body.Close()
+
+			// Liberar semáforo durante la espera WAF y re-adquirir con espaciado para evitar estampidas (convoy)
+			if holdingSlot {
+				c.releaseSlot()
+				holdingSlot = false
+			}
 			time.Sleep(sleepDur)
+			c.acquireSlot()
+			holdingSlot = true
 
 			var retryBody io.Reader
 			if req.GetBody != nil {
