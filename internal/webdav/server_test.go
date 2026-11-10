@@ -616,3 +616,66 @@ func TestWebDAV_StreamUploadLargeFile(t *testing.T) {
 		t.Fatalf("expected 1 upload to SAPI, got %d", n)
 	}
 }
+
+func TestWebDAV_SmallFileDownloadCachedInMemory(t *testing.T) {
+	var downloads int
+	mockSAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		action := r.URL.Query().Get("action")
+		switch {
+		case r.URL.Path == "/sapi/media/folder/root" && action == "get":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"folders": []map[string]interface{}{
+						{"id": 100, "name": "Root", "parentid": 0, "magic": true},
+					},
+				},
+			})
+		case r.URL.Path == "/sapi/media/folder" && action == "list":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{"folders": []map[string]interface{}{}},
+			})
+		case r.URL.Path == "/sapi/media" && action == "get":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"media": []map[string]interface{}{
+						{"id": "888", "name": "config", "size": 17, "folderid": 100, "url": "/sapi/download/file?id=888", "creationdate": "20260101T000000Z", "modificationdate": "20260101T000000Z"},
+					},
+				},
+			})
+		case r.URL.Path == "/sapi/download/file":
+			downloads++
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("restic-config-v2\n"))
+		default:
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	}))
+	defer mockSAPI.Close()
+
+	client, err := sapi.NewClient(config.AccountConfig{
+		Provider:      "movistar",
+		Phone:         "612345678",
+		AccessToken:   "test-access",
+		RefreshToken:  "test-refresh",
+		ValidationKey: "test-vk",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(mockSAPI.URL+"/sapi", mockSAPI.URL)
+	srv := NewServerWithAuth(client, config.AuthConfig{AuthDisabled: true})
+
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest("GET", "/config", nil)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Body.String() != "restic-config-v2\n" {
+			t.Fatalf("GET #%d failed: code=%d body=%q", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	if downloads != 1 {
+		t.Errorf("expected small file (/config) to be downloaded from SAPI only 1 time across 5 GETs, got %d", downloads)
+	}
+}

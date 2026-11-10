@@ -2,6 +2,18 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.13] - 2026-11-10
+
+### 🛡️ Caché en RAM de Descargas de Micro-Archivos (Backrest / restic), Pacing Conservador y Silencio Total en Pausa Manual (Issue #23)
+
+- **Caché en Memoria para Descargas de Archivos Pequeños (`<= 256 KB`):**
+  - Clientes como **Backrest / restic** y **Synology HyperBackup** descargan repetidamente los mismos archivos pequeños de configuración y claves (`config`, `keys/*`, `locks/*`, `_Syno_TaskConfig`, `version_info`) varias veces en pocos segundos durante las fases de verificación y desbloqueo de repositorio, disparando la regla por endpoint de `/sapi/download/file` en AWS CloudFront WAF.
+  - Ahora, cuando `WebDAVFileReader` descarga íntegramente un archivo pequeño (`<= 256 KB`), almacena automáticamente su contenido en la caché en memoria (`uploadCache`), sirviendo las siguientes lecturas `GET` desde RAM en `0 ms` sin realizar llamadas adicionales a `/sapi/download/file` (con invalidación automática inmediata ante cualquier `PUT`, `DELETE` o `MOVE`).
+- **Ajuste de Pacing y Concurrencia por Defecto contra Reglas de Tasa WAF:**
+  - Se incrementa el espaciado por defecto entre peticiones SAPI (`SAPI_PACING_MS`) de `50 ms` a `150 ms` (~6,5 req/s máx.) y se reduce la concurrencia por defecto (`SAPI_MAX_CONCURRENT`) de `3` a `2`, manteniendo las ráfagas de exploración inicial de directorios (`PROPFIND`) siempre por debajo del umbral de CloudFront.
+- **Silencio Absoluto durante la Pausa Manual del Usuario (`/stop`):**
+  - Cuando el usuario pausa manualmente el proxy desde el Panel de Control Web, tanto el worker `KeepAlive` en segundo plano como el endpoint `/storage_info` de la WebUI omiten cualquier petición saliente hacia Movistar/O2 Cloud hasta que el usuario pulse explícitamente **Reanudar** (`/start`).
+
 ## [v2.2.12] - 2026-11-10
 
 ### 🛡️ Solución Definitiva a Bloqueos AWS CloudFront WAF por Huella TLS (JA3/JA4) y Optimización para HyperBackup (Issues #23 y #26)

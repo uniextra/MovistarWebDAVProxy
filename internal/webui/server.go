@@ -282,16 +282,31 @@ func (s *Server) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var space *sapi.StorageSpace
-	if s.webdavServer != nil {
-		space = s.webdavServer.GetStorageSpace()
-	}
-	if space == nil || (space.TotalBytes == 0 && space.UsedBytes == 0 && space.Raw == nil) {
-		var err error
-		space, err = s.client.GetStorageSpace()
-		if err != nil {
-			logger.Log("[WebUI] ⚠️ Error consultando espacio en almacenamiento: %v", err)
-			jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "Error al consultar el espacio de almacenamiento en Movistar/O2 Cloud"})
+	if !s.IsRunning() {
+		if s.webdavServer != nil {
+			space = s.webdavServer.GetCachedStorageSpace()
+		}
+		if space == nil || (space.TotalBytes == 0 && space.UsedBytes == 0 && space.Raw == nil) {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"status":    "paused",
+				"message":   "Proxy pausado por el usuario",
+				"used_str":  "-",
+				"total_str": "-",
+			})
 			return
+		}
+	} else {
+		if s.webdavServer != nil {
+			space = s.webdavServer.GetStorageSpace()
+		}
+		if space == nil || (space.TotalBytes == 0 && space.UsedBytes == 0 && space.Raw == nil) {
+			var err error
+			space, err = s.client.GetStorageSpace()
+			if err != nil {
+				logger.Log("[WebUI] ⚠️ Error consultando espacio en almacenamiento: %v", err)
+				jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "Error al consultar el espacio de almacenamiento en Movistar/O2 Cloud"})
+				return
+			}
 		}
 	}
 

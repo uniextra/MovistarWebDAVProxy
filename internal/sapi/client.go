@@ -280,14 +280,14 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 	baseURL := auth.GetSAPIBaseURL(cfg.Provider)
 	uploadURL := auth.GetUploadBaseURL(cfg.Provider)
 
-	maxConcurrent := 3
+	maxConcurrent := 2
 	if envMax := strings.TrimSpace(os.Getenv("SAPI_MAX_CONCURRENT")); envMax != "" {
 		if n, err := strconv.Atoi(envMax); err == nil && n > 0 {
 			maxConcurrent = n
 		}
 	}
 
-	pacing := 50 * time.Millisecond
+	pacing := 150 * time.Millisecond
 	if envPacing := strings.TrimSpace(os.Getenv("SAPI_PACING_MS")); envPacing != "" {
 		if ms, err := strconv.Atoi(envPacing); err == nil && ms >= 0 {
 			pacing = time.Duration(ms) * time.Millisecond
@@ -363,12 +363,15 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 
 func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if baseURL != "" {
 		c.baseURL = strings.TrimSuffix(baseURL, "/")
 	}
 	if uploadURL != "" {
 		c.uploadURL = strings.TrimSuffix(uploadURL, "/")
+	}
+	c.mu.Unlock()
+	if (strings.HasPrefix(baseURL, "http://127.0.0.1:") || strings.HasPrefix(baseURL, "http://localhost:")) && os.Getenv("SAPI_PACING_MS") == "" {
+		c.SetPacingInterval(10 * time.Millisecond)
 	}
 }
 

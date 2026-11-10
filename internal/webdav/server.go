@@ -138,6 +138,13 @@ func (s *Server) GetStorageSpace() *sapi.StorageSpace {
 	return nil
 }
 
+func (s *Server) GetCachedStorageSpace() *sapi.StorageSpace {
+	if s.fs != nil {
+		return s.fs.GetCachedStorageSpace()
+	}
+	return nil
+}
+
 func (s *Server) IsRunning() bool {
 	return s.running.Load()
 }

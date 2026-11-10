@@ -66,13 +66,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1. Worker KeepAlive en segundo plano con Context para shutdown limpio
+	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
+	webdavServer := webdav.NewServerWithAuth(client, davAuth)
+
+	// 2. Worker KeepAlive en segundo plano con Context para shutdown limpio
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runKeepAlive(ctx, client)
+	go runKeepAlive(ctx, client, webdavServer.IsRunning)
 
-	// 2. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
-	webdavServer := webdav.NewServerWithAuth(client, davAuth)
 	webdavPort := "8080"
 	if p := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); p != "" {
 		webdavPort = p
@@ -181,7 +182,7 @@ func computeKeepAliveInterval(expiresInStr string, consecutiveFailures int) time
 	return 5 * time.Minute
 }
 
-func runKeepAlive(ctx context.Context, client *sapi.Client) {
+func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() bool) {
 	consecutiveFailures := 0
 	timer := time.NewTimer(5 * time.Minute)
 	defer timer.Stop()
@@ -191,6 +192,10 @@ func runKeepAlive(ctx context.Context, client *sapi.Client) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			if isRunning != nil && !isRunning() {
+				timer.Reset(5 * time.Minute)
+				continue
+			}
 			cfg := client.GetConfig()
 			if cfg.RefreshToken == "" && cfg.AccessToken == "" && cfg.ValidationKey == "" {
 				timer.Reset(5 * time.Minute)

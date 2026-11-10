@@ -360,6 +360,15 @@ func (mfs *MovistarFS) InvalidateCache(folderID int64) {
 	}
 }
 
+func (mfs *MovistarFS) GetCachedStorageSpace() *sapi.StorageSpace {
+	mfs.cacheMu.RLock()
+	defer mfs.cacheMu.RUnlock()
+	if mfs.storageCache != nil {
+		return mfs.storageCache.space
+	}
+	return nil
+}
+
 func (mfs *MovistarFS) GetStorageSpace() *sapi.StorageSpace {
 	mfs.cacheMu.RLock()
 	if mfs.storageCache != nil && time.Since(mfs.storageCache.time) < 5*time.Minute {
@@ -1748,6 +1757,7 @@ type WebDAVFileReader struct {
 	item     sapi.MediaItem
 	pos      int64
 	stream   io.ReadCloser
+	cacheBuf *bytes.Buffer
 	streamMu sync.Mutex
 }
 
@@ -1789,6 +1799,11 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 		} else {
 			r.stream = semStream
 			st = semStream
+			if pos == 0 && r.item.Size > 0 && r.item.Size <= 256*1024 {
+				r.cacheBuf = bytes.NewBuffer(make([]byte, 0, r.item.Size))
+			} else {
+				r.cacheBuf = nil
+			}
 		}
 		r.streamMu.Unlock()
 	}
@@ -1797,6 +1812,33 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 	if n > 0 {
 		r.streamMu.Lock()
 		r.pos += int64(n)
+		if r.cacheBuf != nil {
+			_, _ = r.cacheBuf.Write(p[:n])
+			if r.pos == r.item.Size && int64(r.cacheBuf.Len()) == r.item.Size {
+				data := append([]byte(nil), r.cacheBuf.Bytes()...)
+				r.cacheBuf = nil
+				now := time.Now()
+				r.mfs.cacheMu.Lock()
+				if _, isTomb := r.mfs.deletedTombstones[r.path]; !isTomb {
+					r.mfs.uploadCache[r.path] = &MemoryFile{
+						ID:       r.item.ID,
+						Name:     r.item.Name,
+						FolderID: r.item.FolderID,
+						Content:  data,
+						Size:     r.item.Size,
+						ModTime:  parseTime(r.item.ModificationDate),
+						CachedAt: now,
+						URL:      r.item.URL,
+					}
+				}
+				for pth, mem := range r.mfs.uploadCache {
+					if now.Sub(mem.CachedAt) > 15*time.Minute {
+						delete(r.mfs.uploadCache, pth)
+					}
+				}
+				r.mfs.cacheMu.Unlock()
+			}
+		}
 		r.streamMu.Unlock()
 	}
 	return n, err
@@ -1807,6 +1849,7 @@ func (r *WebDAVFileReader) Write(p []byte) (n int, err error) { return 0, fs.Err
 func (r *WebDAVFileReader) Close() error {
 	r.streamMu.Lock()
 	defer r.streamMu.Unlock()
+	r.cacheBuf = nil
 	if r.stream != nil {
 		err := r.stream.Close()
 		r.stream = nil
@@ -1840,6 +1883,7 @@ func (r *WebDAVFileReader) Seek(offset int64, whence int) (int64, error) {
 			_ = r.stream.Close()
 			r.stream = nil
 		}
+		r.cacheBuf = nil
 		r.pos = newPos
 	}
 	return newPos, nil
