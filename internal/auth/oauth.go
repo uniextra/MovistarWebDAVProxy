@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -28,12 +29,27 @@ const (
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
+func newDesktopTransport() *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			MaxVersion: tls.VersionTLS12,
+		},
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout: 15 * time.Second,
+		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 10,
+	}
+}
+
 var (
 	authCodeQueryRegex = regexp.MustCompile(`code=([A-Za-z0-9\-_.~]+)`)
 	validAuthCodeRegex = regexp.MustCompile(`^[A-Za-z0-9\-_.~]{1,512}$`)
 	stateQueryRegex    = regexp.MustCompile(`state=([A-Za-z0-9\-_.~%]+)`)
-	oauthHTTPClient    = &http.Client{Timeout: 30 * time.Second}
-	sapiLoginClient    = &http.Client{Timeout: 20 * time.Second}
+	oauthHTTPClient    = &http.Client{Timeout: 30 * time.Second, Transport: newDesktopTransport()}
+	sapiLoginClient    = &http.Client{Timeout: 20 * time.Second, Transport: newDesktopTransport()}
 )
 
 func GetOAuthAuthorizeURL(provider string) string {

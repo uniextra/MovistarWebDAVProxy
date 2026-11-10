@@ -3,6 +3,7 @@ package sapi
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -240,6 +241,7 @@ type Client struct {
 	uploadURL        string
 	maxUploadMB      int
 	rootFolderID     int64
+	sessionExpired   bool
 	OnSessionExpired func(err error)
 
 	sapiSem        chan struct{}
@@ -257,11 +259,19 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		return nil, err
 	}
 
+	// Alineado con el cliente oficial de escritorio Windows (Movistar Cloud-sync.exe / Qt 5.15 QNetworkAccessManager + OpenSSL 1.1.1):
+	// TLS 1.2 + HTTP/1.1 Keep-Alive puro (sin multiplexación HTTP/2 que dispara CloudFront WAF 403 cuando coinciden tramas).
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			MaxVersion: tls.VersionTLS12,
+		},
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
@@ -355,7 +365,14 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 	c.baseURL = auth.GetSAPIBaseURL(cfg.Provider)
 	c.uploadURL = auth.GetUploadBaseURL(cfg.Provider)
 	c.rootFolderID = 0
+	c.sessionExpired = false
 	c.syncCookiesLocked()
+}
+
+func (c *Client) IsSessionExpired() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.sessionExpired
 }
 
 func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
@@ -454,7 +471,12 @@ func (c *Client) RefreshSession() bool {
 
 	c.mu.RLock()
 	cfg := c.cfg
+	alreadyExpired := c.sessionExpired
 	c.mu.RUnlock()
+
+	if alreadyExpired {
+		return false
+	}
 
 	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
 		return false
@@ -468,6 +490,7 @@ func (c *Client) RefreshSession() bool {
 		res := auth.SAPILoginOAuth(c.httpClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
 		if res.StatusCode == http.StatusOK && (res.ValidationKey != "" || res.JSessionID != "") {
 			c.mu.Lock()
+			c.sessionExpired = false
 			if res.ValidationKey != "" {
 				c.cfg.ValidationKey = res.ValidationKey
 			}
@@ -503,6 +526,7 @@ func (c *Client) RefreshSession() bool {
 		refreshErr = err
 		if err == nil && tokens != nil && tokens.AccessToken != "" {
 			c.mu.Lock()
+			c.sessionExpired = false
 			c.cfg.AccessToken = tokens.AccessToken
 			if tokens.RefreshToken != "" {
 				c.cfg.RefreshToken = tokens.RefreshToken
@@ -518,6 +542,7 @@ func (c *Client) RefreshSession() bool {
 			res := auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
 			if res.StatusCode == http.StatusOK {
 				c.mu.Lock()
+				c.sessionExpired = false
 				if res.ValidationKey != "" {
 					c.cfg.ValidationKey = res.ValidationKey
 				}
@@ -551,8 +576,13 @@ func (c *Client) RefreshSession() bool {
 	}
 
 	if refreshErr != nil && (strings.Contains(refreshErr.Error(), "401") || strings.Contains(refreshErr.Error(), "invalid_grant")) {
-		logger.Log("[!] ⚠️ ERROR 401: No se pudo renovar la sesión automáticamente. Requiere revinculación en el panel web.")
-		if c.OnSessionExpired != nil {
+		c.mu.Lock()
+		wasExpired := c.sessionExpired
+		c.sessionExpired = true
+		c.mu.Unlock()
+
+		logger.Log("[!] ⚠️ ERROR 401: El refresh_token ha expirado o ha sido revocado. Pausando reintentos automáticos hasta revinculación en el panel web.")
+		if !wasExpired && c.OnSessionExpired != nil {
 			go c.OnSessionExpired(errors.New("sesión expirada (HTTP 401)"))
 		}
 	} else {
@@ -601,7 +631,10 @@ func (c *Client) releaseSlot() {
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 	c.acquireSlot()
 	defer c.releaseSlot()
+	return c.doRequestLocked(req)
+}
 
+func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	c.mu.RLock()
 	cfg := c.cfg
 	c.mu.RUnlock()
@@ -639,7 +672,7 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 		if req.Body != nil && req.GetBody == nil {
 			return resp, nil
 		}
-		if c.HasCredentials() {
+		if c.HasCredentials() && !c.IsSessionExpired() {
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			if c.RefreshSession() {

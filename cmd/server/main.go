@@ -201,6 +201,10 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 				timer.Reset(5 * time.Minute)
 				continue
 			}
+			if client.IsSessionExpired() {
+				timer.Reset(5 * time.Minute)
+				continue
+			}
 
 			space, err := client.GetStorageSpace()
 			if err == nil && space != nil {
@@ -211,14 +215,13 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 				if err != nil {
 					errStr = err.Error()
 				}
-				if strings.Contains(errStr, "401") || strings.Contains(errStr, "sesión expirada") || strings.Contains(errStr, "no autorizada") {
-					logger.Log("[KeepAlive] ⚠️ Sesión no autorizada (%v). Intentando renovar...", err)
-					if client.RefreshSession() {
-						consecutiveFailures = 0
-					} else {
-						consecutiveFailures++
-						logger.Log("[KeepAlive] ❌ Fallo al renovar sesión (intento consecutivo #%d).", consecutiveFailures)
-					}
+				if client.IsSessionExpired() {
+					consecutiveFailures = 0
+					logger.Log("[KeepAlive] ⏸️ Sesión expirada pendiente de revinculación en el panel web. Pausando comprobaciones periódicas.")
+				} else if strings.Contains(errStr, "401") || strings.Contains(errStr, "sesión expirada") || strings.Contains(errStr, "no autorizada") {
+					// GetStorageSpace -> DoRequest ya ejecutó RefreshSession() internamente al recibir 401.
+					consecutiveFailures++
+					logger.Log("[KeepAlive] ❌ Fallo al verificar/renovar sesión (intento consecutivo #%d): %v", consecutiveFailures, err)
 				} else {
 					logger.Log("[KeepAlive] ⚠️ Comprobación de cuota omitida por error transitorio o rate limit (%v). La sesión sigue activa.", err)
 				}

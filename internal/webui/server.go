@@ -280,6 +280,13 @@ func (s *Server) handleStorageInfo(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if s.client.IsSessionExpired() {
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{
+			"status":  "error",
+			"message": "Sesión expirada (HTTP 401): revincula tu cuenta en el panel web",
+		})
+		return
+	}
 
 	var space *sapi.StorageSpace
 	if !s.IsRunning() {

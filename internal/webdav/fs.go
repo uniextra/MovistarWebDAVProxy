@@ -1175,13 +1175,14 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 		if err != nil {
 			return nil, fmt.Errorf("moveByReupload download error: %w", err)
 		}
-		defer stream.Close()
 
 		if oldMedia.Size <= int64(GetUploadRAMBufferMaxBytes()) {
 			buf := bytes.NewBuffer(make([]byte, 0, oldMedia.Size))
 			if n, err = io.Copy(io.MultiWriter(buf, hasher), stream); err != nil {
+				_ = stream.Close()
 				return nil, fmt.Errorf("moveByReupload buffer error: %w", err)
 			}
+			_ = stream.Close()
 			reader = bytes.NewReader(buf.Bytes())
 			if oldMedia.Size <= 256*1024 {
 				cachedContent = buf.Bytes()
@@ -1189,6 +1190,7 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 		} else {
 			tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_reupload_*")
 			if err != nil {
+				_ = stream.Close()
 				return nil, fmt.Errorf("moveByReupload temp file error: %w", err)
 			}
 			tmpPath := tmp.Name()
@@ -1198,8 +1200,10 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 			}()
 
 			if n, err = io.Copy(io.MultiWriter(tmp, hasher), stream); err != nil {
+				_ = stream.Close()
 				return nil, fmt.Errorf("moveByReupload spool error: %w", err)
 			}
+			_ = stream.Close()
 			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 				return nil, fmt.Errorf("moveByReupload seek error: %w", err)
 			}
