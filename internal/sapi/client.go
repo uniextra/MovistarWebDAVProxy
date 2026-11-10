@@ -280,7 +280,7 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 	baseURL := auth.GetSAPIBaseURL(cfg.Provider)
 	uploadURL := auth.GetUploadBaseURL(cfg.Provider)
 
-	maxConcurrent := 2
+	maxConcurrent := 1
 	if envMax := strings.TrimSpace(os.Getenv("SAPI_MAX_CONCURRENT")); envMax != "" {
 		if n, err := strconv.Atoi(envMax); err == nil && n > 0 {
 			maxConcurrent = n

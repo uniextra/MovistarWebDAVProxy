@@ -2,6 +2,17 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.2.14] - 2026-11-10
+
+### 🛡️ Alineación 1:1 de Concurrencia con el Cliente Oficial de Escritorio de Windows (Issues #23 y #26)
+
+- **Serialización Completa de Transferencias y Peticiones SAPI (Concurrencia = 1):**
+  - Tras la investigación exhaustiva por ingeniería inversa sobre el binario nativo del cliente oficial (`Movistar Cloud-sync.exe` / Funambol Sync Engine), se demostró que el cliente oficial transfiere archivos y consulta metadatos en **serie estricta** (un único archivo a la vez mediante `Sync::ParallelPropagation::uploadFiles` / `downloadFiles` bloqueante).
+  - Se eliminan los desajustes entre la capa WebDAV local y la capa SAPI:
+    - Semáforos WebDAV alineados: `uploadSem = 1`, `downloadSem = 1`, `globalTransferSem = 1`, `uploadBufferSem = 1`.
+    - Semáforo SAPI por defecto alineado: `SAPI_MAX_CONCURRENT = 1`.
+  - Esto evita encolamientos invisibles, cancela el consumo inútil de buffers RAM para transferencias en espera y asegura un flujo idéntico al del cliente oficial de Windows, impidiendo que AWS CloudFront WAF detecte ráfagas anómalas.
+
 ## [v2.2.13] - 2026-11-10
 
 ### 🛡️ Caché en RAM de Descargas de Micro-Archivos (Backrest / restic), Pacing Conservador y Silencio Total en Pausa Manual (Issue #23)

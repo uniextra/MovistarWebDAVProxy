@@ -28,10 +28,10 @@ import (
 )
 
 var (
-	uploadSem           = make(chan struct{}, 4) // Hasta 4 subidas simultáneas (óptimo Duplicati)
-	downloadSem         = make(chan struct{}, 4) // Hasta 4 descargas simultáneas (óptimo restore)
-	globalTransferSem   = make(chan struct{}, 5) // Techo conjunto para no sobrepasar la cuota por token de SAPI
-	uploadBufferSem     = make(chan struct{}, 4) // Límite de ingestión PUT local
+	uploadSem           = make(chan struct{}, 1) // 1 subida simultánea (estricta serie como cliente oficial)
+	downloadSem         = make(chan struct{}, 1) // 1 descarga simultánea (estricta serie como cliente oficial)
+	globalTransferSem   = make(chan struct{}, 1) // Techo conjunto 1:1 para evitar ráfagas hacia SAPI/CloudFront
+	uploadBufferSem     = make(chan struct{}, 1) // Límite de ingestión PUT local alineado a 1
 	folderLocks         sync.Map
 	ErrUploadTooLarge   = errors.New("file exceeds maximum allowed upload size")
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
