@@ -1453,24 +1453,30 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		if mem.Size == 0 || len(mem.Content) > 0 {
 			return NewWebDAVMemoryReader(cleanPath, mem), nil
 		}
+		mfs.cacheMu.RLock()
+		knownURL := mem.URL
+		mfs.cacheMu.RUnlock()
 		item := sapi.MediaItem{
 			ID:               mem.ID,
 			Name:             mem.Name,
 			Size:             mem.Size,
-			URL:              mem.URL,
+			URL:              knownURL,
 			FolderID:         mem.FolderID,
 			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 		}
-		if !mfs.client.WebMode() {
-			item.URL = mem.downloadURL(mfs)
-			return NewWebDAVFileReader(mfs, cleanPath, item), nil
-		}
-		// Modo web: la subida no devuelve URL de descarga y la URL por defecto nunca
-		// sirve, así que hay que esperar a que SAPI indexe el archivo (unos segundos).
-		// Se espera en la primera lectura, no aquí, para no frenar los PROPFIND (que
-		// también abren el archivo).
+		// La URL de descarga se consulta a SAPI solo si de verdad se lee el contenido
+		// (primer Read), en los dos modos. x/net/webdav abre el archivo en cada PROPFIND
+		// solo para leer sus propiedades, y rclone hace un PROPFIND tras cada PUT:
+		// consultarla aquí suponía una petición extra a O2 por cada archivo subido (el
+		// doble de tráfico en una subida masiva, y más cerca del límite del WAF).
 		r := NewWebDAVFileReader(mfs, cleanPath, item)
-		r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		if mfs.client.WebMode() {
+			// Modo web: la subida no devuelve URL de descarga y la URL por defecto nunca
+			// sirve, así que hay que esperar a que SAPI indexe el archivo (unos segundos).
+			r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		} else {
+			r.resolveURL = func() string { return mem.downloadURL(mfs) }
+		}
 		return r, nil
 	}
 	mfs.cacheMu.RUnlock()

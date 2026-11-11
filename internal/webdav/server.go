@@ -426,6 +426,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1b. Bloqueo del cortafuegos de O2 (waf_breaker.go): mientras dure la pausa, las
+	// escrituras se rechazan con 503 + Retry-After sin llamar a O2. Antes llegaban al
+	// cliente como 409/500 genéricos y rclone las reintentaba una y otra vez, alargando el
+	// bloqueo. Las lecturas siguen sirviéndose desde la caché local de metadatos.
+	if s.rejectWriteDuringWAFBlock(lw, method) {
+		return
+	}
+
 	// 2. Rechazar PUT a colecciones según RFC 4918 §9.7.1 y validar límite de subida
 	if method == "PUT" {
 		if strings.HasSuffix(urlPath, "/") {
@@ -911,4 +919,28 @@ func isExpectedNotFound(method string, err error) bool {
 		return true
 	}
 	return false
+}
+
+// rejectWriteDuringWAFBlock responde 503 a los métodos que escriben en O2 mientras el
+// cliente SAPI está en pausa por un bloqueo del WAF. Devuelve true si ha respondido.
+func (s *Server) rejectWriteDuringWAFBlock(w http.ResponseWriter, method string) bool {
+	switch method {
+	case "PUT", "MKCOL", "DELETE", "MOVE", "COPY":
+	default:
+		return false
+	}
+	if s.fs == nil || s.fs.client == nil {
+		return false
+	}
+	until := s.fs.client.WAFBlockedUntil()
+	if until.IsZero() {
+		return false
+	}
+	secs := int(time.Until(until).Seconds()) + 1
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	http.Error(w, fmt.Sprintf("O2 Cloud firewall (WAF) block: writes paused until %s", until.Local().Format("15:04")), http.StatusServiceUnavailable)
+	return true
 }

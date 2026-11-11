@@ -282,6 +282,8 @@ type Client struct {
 	pacingMu       sync.Mutex
 	lastReqTime    time.Time
 	pacingInterval time.Duration
+
+	waf wafBreaker // pausa todas las llamadas a O2 tras un 403 del cortafuegos (waf_breaker.go)
 }
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
@@ -780,9 +782,24 @@ func (c *Client) releaseSlot() {
 }
 
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
+	if until := c.waf.blockedUntil(); !until.IsZero() {
+		return nil, wafBlockedError(until, req.Method, req.URL.Path)
+	}
 	c.acquireSlot()
 	defer c.releaseSlot()
-	return c.doRequestLocked(req)
+	// Las peticiones que esperaban turno cuando saltó el bloqueo tampoco se envían.
+	if until := c.waf.blockedUntil(); !until.IsZero() {
+		return nil, wafBlockedError(until, req.Method, req.URL.Path)
+	}
+	resp, err := c.doRequestLocked(req)
+	if err == nil && resp != nil {
+		if isWAFBlockResponse(resp) {
+			c.waf.trip()
+		} else if resp.StatusCode < 500 {
+			c.waf.ok()
+		}
+	}
+	return resp, err
 }
 
 func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
