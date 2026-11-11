@@ -27,17 +27,14 @@ const (
 )
 
 // isDuplicatiTestPath comprueba si una ruta o nombre de archivo corresponde al archivo sonda
-// de privilegios de Duplicati (duplicati-access-privileges-test.tmp) o a archivos .tmp de control.
+// de privilegios de Duplicati (duplicati-access-privileges-test.tmp) o a archivos duplicati-*.tmp.
 func isDuplicatiTestPath(rawPath string) bool {
 	base := strings.ToLower(path.Base(rawPath))
 	base = strings.TrimSpace(base)
 	if base == DuplicatiTestProbeFileName {
 		return true
 	}
-	if strings.HasPrefix(base, "duplicati") && strings.HasSuffix(base, ".tmp") {
-		return true
-	}
-	if strings.HasSuffix(base, ".tmp") {
+	if strings.HasPrefix(base, "duplicati-") && strings.HasSuffix(base, ".tmp") {
 		return true
 	}
 	return false

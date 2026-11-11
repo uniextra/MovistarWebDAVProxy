@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/net/webdav"
 
+	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/sapi"
@@ -64,12 +65,12 @@ func connIDFromContext(ctx context.Context) string {
 	return id
 }
 
-func NewServer(client *sapi.Client) *Server {
-	return NewServerWithAuth(client, config.LoadWebDAVAuthConfig())
+func NewServer(client *sapi.Client, metaStores ...*cache.MetadataStore) *Server {
+	return NewServerWithAuth(client, config.LoadWebDAVAuthConfig(), metaStores...)
 }
 
-func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig) *Server {
-	fs := NewMovistarFS(client)
+func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig, metaStores ...*cache.MetadataStore) *Server {
+	fs := NewMovistarFS(client, metaStores...)
 	s := &Server{
 		fs:             fs,
 		authCfg:        authCfg,
@@ -129,6 +130,27 @@ func (s *Server) InvalidateCache() {
 	if s.fs != nil {
 		s.fs.InvalidateCache(0)
 	}
+}
+
+func (s *Server) MetadataStore() *cache.MetadataStore {
+	if s == nil || s.fs == nil {
+		return nil
+	}
+	return s.fs.MetadataStore()
+}
+
+func (s *Server) SetMetadataStore(ms *cache.MetadataStore) {
+	if s == nil || s.fs == nil {
+		return
+	}
+	s.fs.SetMetadataStore(ms)
+}
+
+func (s *Server) FS() *MovistarFS {
+	if s == nil {
+		return nil
+	}
+	return s.fs
 }
 
 func (s *Server) GetStorageSpace() *sapi.StorageSpace {
@@ -381,6 +403,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 5. Interceptar PROPFIND para inyectar cuotas RFC 4331 si las solicitan (Hyper Backup / Duplicati)
 	if method == "PROPFIND" {
+		if s.fs != nil {
+			s.fs.MaybeTriggerSync()
+		}
 		rw := &responseInterceptor{
 			ResponseWriter: w,
 			body:           bytes.NewBuffer(nil),

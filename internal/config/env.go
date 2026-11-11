@@ -14,10 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
-	Version          = "v2.2.16"
+	Version          = "v2.3.0"
 	encryptedPrefix  = "enc:v1:"
 	tokensEncryptEnv = "TOKENS_ENCRYPTION_KEY"
 )
@@ -58,6 +59,20 @@ type AccountConfig struct {
 	TokenPath        string `json:"token_path"`
 	TelegramBotToken string `json:"telegram_bot_token"`
 	TelegramChatID   string `json:"telegram_chat_id"`
+}
+
+// GetSyncInterval returns the metadata delta sync interval configured via SYNC_INTERVAL_SEC.
+// Default: 60s, minimum: 15s.
+func GetSyncInterval() time.Duration {
+	if env := strings.TrimSpace(os.Getenv("SYNC_INTERVAL_SEC")); env != "" {
+		if sec, err := strconv.Atoi(env); err == nil {
+			if sec < 15 {
+				sec = 15
+			}
+			return time.Duration(sec) * time.Second
+		}
+	}
+	return 60 * time.Second
 }
 
 func SanitizePhone(phone string) string {

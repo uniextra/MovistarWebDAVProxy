@@ -8,12 +8,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"movistar-webdav-proxy/internal/auth"
+	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/notifier"
@@ -558,6 +561,25 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	s.client.SetConfig(cfg)
 	if s.webdavServer != nil {
 		s.webdavServer.InvalidateCache()
+		dbPath := filepath.Join(config.TokensDir, fmt.Sprintf("metadata_%s.db", phone))
+		newStore, err := cache.NewMetadataStore(dbPath)
+		if err != nil {
+			logger.Log("[Metadata] ⚠️ Error inicializando MetadataStore tras login: %v", err)
+		} else {
+			logger.Log("[Metadata] 🗄️ SQLite MetadataStore inicializado para %s en %s", logger.Mask(phone), maskDBPath(dbPath))
+			if oldStore := s.webdavServer.MetadataStore(); oldStore != nil && oldStore != newStore {
+				_ = oldStore.Close()
+			}
+			s.webdavServer.SetMetadataStore(newStore)
+			go func() {
+				logger.Log("[Metadata] 🔄 Sincronizando metadatos para nueva cuenta vinculada...")
+				if _, syncErr := newStore.SyncChanges(s.client, true); syncErr != nil {
+					logger.Log("[Metadata] ⚠️ Error en sincronización inicial: %v", syncErr)
+				} else {
+					logger.Log("[Metadata] ✔ Sincronización inicial completada para %s", logger.Mask(phone))
+				}
+			}()
+		}
 	}
 	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
 		s.notifier.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
@@ -697,14 +719,64 @@ func (s *Server) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	phone := config.SanitizePhone(body.Phone)
+	activePhone := config.SanitizePhone(s.client.GetConfig().Phone)
 	if phone == "" {
-		phone = s.client.GetConfig().Phone
+		phone = activePhone
 	}
 
-	_ = config.DeleteAccountConfig(phone)
-	s.client.SetConfig(config.AccountConfig{})
-	s.SetRunning(false)
+	isActive := (phone == "" || phone == activePhone)
 
-	logger.Log("[OAuth] 🗑️ Dispositivo desvinculado y credenciales eliminadas por el usuario.")
+	if isActive {
+		if s.webdavServer != nil {
+			s.webdavServer.InvalidateCache()
+			if ms := s.webdavServer.MetadataStore(); ms != nil {
+				dbPath := ms.Path()
+				_ = ms.Close()
+				s.webdavServer.SetMetadataStore(nil)
+				if dbPath != "" {
+					if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+						logger.Log("[WebUI] ⚠️ Error eliminando base de datos SQLite %s: %v", maskDBPath(dbPath), err)
+					}
+					_ = os.Remove(dbPath + "-wal")
+					_ = os.Remove(dbPath + "-shm")
+				}
+			}
+		}
+		if phone != "" {
+			dbPath := filepath.Join(config.TokensDir, fmt.Sprintf("metadata_%s.db", phone))
+			if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+				logger.Log("[WebUI] ⚠️ Error eliminando base de datos SQLite %s: %v", maskDBPath(dbPath), err)
+			}
+			_ = os.Remove(dbPath + "-wal")
+			_ = os.Remove(dbPath + "-shm")
+		}
+
+		_ = config.DeleteAccountConfig(phone)
+		s.client.SetConfig(config.AccountConfig{})
+		s.SetRunning(false)
+
+		logger.Log("[OAuth] 🗑️ Dispositivo desvinculado y credenciales eliminadas por el usuario.")
+	} else {
+		// Secondary account unlink: only delete its config and its metadata db
+		dbPath := filepath.Join(config.TokensDir, fmt.Sprintf("metadata_%s.db", phone))
+		if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+			logger.Log("[WebUI] ⚠️ Error eliminando base de datos SQLite secundaria %s: %v", maskDBPath(dbPath), err)
+		}
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+		_ = config.DeleteAccountConfig(phone)
+		logger.Log("[OAuth] 🗑️ Cuenta secundaria %s desvinculada y credenciales eliminadas.", logger.Mask(phone))
+	}
+
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+}
+
+func maskDBPath(p string) string {
+	base := filepath.Base(p)
+	dir := filepath.Dir(p)
+	if strings.HasPrefix(base, "metadata_") && strings.HasSuffix(base, ".db") {
+		phone := strings.TrimSuffix(strings.TrimPrefix(base, "metadata_"), ".db")
+		return filepath.Join(dir, fmt.Sprintf("metadata_%s.db", logger.Mask(phone)))
+	}
+	return p
 }

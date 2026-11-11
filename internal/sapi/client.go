@@ -3,7 +3,6 @@ package sapi
 import (
 	"bufio"
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,6 +128,7 @@ func (f *FolderItem) UnmarshalJSON(data []byte) error {
 	aux := struct {
 		ID       interface{} `json:"id"`
 		ParentID interface{} `json:"parentid"`
+		Date     FlexDate    `json:"date"`
 		*Alias
 	}{
 		Alias: (*Alias)(f),
@@ -164,6 +164,12 @@ func (f *FolderItem) UnmarshalJSON(data []byte) error {
 			}
 		}
 	}
+	if f.CreationDate == "" && aux.Date != "" {
+		f.CreationDate = aux.Date
+	}
+	if f.ModificationDate == "" && aux.Date != "" {
+		f.ModificationDate = aux.Date
+	}
 	return nil
 }
 
@@ -184,6 +190,8 @@ func (m *MediaItem) UnmarshalJSON(data []byte) error {
 		ID       interface{} `json:"id"`
 		Size     interface{} `json:"size"`
 		FolderID interface{} `json:"folderid"`
+		Folder   interface{} `json:"folder"`
+		Date     FlexDate    `json:"date"`
 		*Alias
 	}{
 		Alias: (*Alias)(m),
@@ -228,6 +236,25 @@ func (m *MediaItem) UnmarshalJSON(data []byte) error {
 				m.FolderID = n
 			}
 		}
+	} else if aux.Folder != nil {
+		switch v := aux.Folder.(type) {
+		case float64:
+			m.FolderID = int64(v)
+		case string:
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				m.FolderID = n
+			}
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				m.FolderID = n
+			}
+		}
+	}
+	if m.CreationDate == "" && aux.Date != "" {
+		m.CreationDate = aux.Date
+	}
+	if m.ModificationDate == "" && aux.Date != "" {
+		m.ModificationDate = aux.Date
 	}
 	return nil
 }
@@ -259,19 +286,14 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		return nil, err
 	}
 
-	// Alineado con el cliente oficial de escritorio Windows (Movistar Cloud-sync.exe / Qt 5.15 QNetworkAccessManager + OpenSSL 1.1.1):
-	// TLS 1.2 + HTTP/1.1 Keep-Alive puro (sin multiplexación HTTP/2 que dispara CloudFront WAF 403 cuando coinciden tramas).
+	// Transporte HTTP/2 nativo con ALPN y pooling de conexiones:
+	// CloudFront WAF requiere HTTP/2 (ALPN h2) para peticiones a la API SAPI (/sapi/*).
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			MaxVersion: tls.VersionTLS12,
-		},
-		ForceAttemptHTTP2:     false,
-		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 		IdleConnTimeout:       90 * time.Second,

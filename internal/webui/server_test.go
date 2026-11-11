@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -178,5 +180,94 @@ func TestWebUI_MethodsCSRFAndSecretsMasking(t *testing.T) {
 	handler.ServeHTTP(hugeRec, hugeReq)
 	if hugeRec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 on >1MB JSON body, got %d", hugeRec.Code)
+	}
+}
+
+func TestWebUI_UnlinkActiveAndSecondary(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := config.TokensDir
+	config.TokensDir = tmpDir
+	t.Cleanup(func() { config.TokensDir = origTokensDir })
+
+	// Create active account (612345678) and secondary account (699999999)
+	activeCfg := config.AccountConfig{
+		Provider: "movistar",
+		Phone:    "612345678",
+	}
+	if err := config.SaveAccountConfig(activeCfg); err != nil {
+		t.Fatalf("SaveAccountConfig active failed: %v", err)
+	}
+	secCfg := config.AccountConfig{
+		Provider: "o2",
+		Phone:    "699999999",
+	}
+	if err := config.SaveAccountConfig(secCfg); err != nil {
+		t.Fatalf("SaveAccountConfig secondary failed: %v", err)
+	}
+
+	// Create dummy metadata DB files for both
+	_ = os.WriteFile(filepath.Join(tmpDir, "metadata_612345678.db"), []byte("active-db"), 0600)
+	_ = os.WriteFile(filepath.Join(tmpDir, "metadata_699999999.db"), []byte("sec-db"), 0600)
+
+	client, err := sapi.NewClient(activeCfg)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	authCfg := config.AuthConfig{AuthDisabled: true}
+	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
+	handler := uiSrv.Routes()
+
+	// 1. Unlink secondary account (699999999)
+	unlinkSecBody := strings.NewReader(`{"phone":"699999999"}`)
+	unlinkSecReq := httptest.NewRequest("POST", "/unlink", unlinkSecBody)
+	unlinkSecReq.Header.Set("Content-Type", "application/json")
+	unlinkSecRec := httptest.NewRecorder()
+	handler.ServeHTTP(unlinkSecRec, unlinkSecReq)
+	if unlinkSecRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /unlink secondary, got %d: %s", unlinkSecRec.Code, unlinkSecRec.Body.String())
+	}
+
+	// Verify secondary config & DB files are removed
+	if _, err := os.Stat(filepath.Join(tmpDir, "account_699999999.env")); !os.IsNotExist(err) {
+		t.Errorf("expected secondary account config to be deleted")
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "metadata_699999999.db")); !os.IsNotExist(err) {
+		t.Errorf("expected secondary metadata DB to be deleted")
+	}
+
+	// Verify primary account is still intact and uiSrv client is still active
+	if _, err := os.Stat(filepath.Join(tmpDir, "account_612345678.env")); err != nil {
+		t.Errorf("expected primary account config to remain, got err: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "metadata_612345678.db")); err != nil {
+		t.Errorf("expected primary metadata DB to remain, got err: %v", err)
+	}
+	if uiSrv.client == nil || uiSrv.client.GetConfig().Phone != "612345678" {
+		t.Errorf("expected active client to remain active on secondary unlink, got: %v", uiSrv.client)
+	}
+
+	// 2. Unlink active account (612345678)
+	unlinkActBody := strings.NewReader(`{"phone":"612345678"}`)
+	unlinkActReq := httptest.NewRequest("POST", "/unlink", unlinkActBody)
+	unlinkActReq.Header.Set("Content-Type", "application/json")
+	unlinkActRec := httptest.NewRecorder()
+	handler.ServeHTTP(unlinkActRec, unlinkActReq)
+	if unlinkActRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /unlink active, got %d: %s", unlinkActRec.Code, unlinkActRec.Body.String())
+	}
+
+	// Verify active client config is cleared and proxy is stopped
+	if uiSrv.client != nil && uiSrv.client.GetConfig().Phone != "" {
+		t.Errorf("expected active client config to be cleared after active unlink, got: %v", uiSrv.client.GetConfig())
+	}
+	if uiSrv.IsRunning() {
+		t.Errorf("expected server to not be running after unlinking active account")
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "account_612345678.env")); !os.IsNotExist(err) {
+		t.Errorf("expected active account config to be deleted")
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "metadata_612345678.db")); !os.IsNotExist(err) {
+		t.Errorf("expected active metadata DB to be deleted")
 	}
 }

@@ -249,3 +249,25 @@ func TestTokensEncryptionKey_AESGCM(t *testing.T) {
 		t.Errorf("expected empty tokens when decryption key is wrong, got: %+v", wrongLoaded)
 	}
 }
+
+func TestGetSyncInterval(t *testing.T) {
+	t.Setenv("SYNC_INTERVAL_SEC", "")
+	if got := GetSyncInterval(); got != 60*time.Second {
+		t.Errorf("expected default 60s, got %v", got)
+	}
+
+	t.Setenv("SYNC_INTERVAL_SEC", "30")
+	if got := GetSyncInterval(); got != 30*time.Second {
+		t.Errorf("expected 30s, got %v", got)
+	}
+
+	t.Setenv("SYNC_INTERVAL_SEC", "5") // below min 15s
+	if got := GetSyncInterval(); got != 15*time.Second {
+		t.Errorf("expected clamped min 15s, got %v", got)
+	}
+
+	t.Setenv("SYNC_INTERVAL_SEC", "invalid")
+	if got := GetSyncInterval(); got != 60*time.Second {
+		t.Errorf("expected default 60s on invalid, got %v", got)
+	}
+}

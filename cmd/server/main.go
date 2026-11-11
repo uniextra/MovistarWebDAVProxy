@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/sapi"
@@ -66,13 +69,53 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
-	webdavServer := webdav.NewServerWithAuth(client, davAuth)
+	var metaStore *cache.MetadataStore
+	var dbPath string
+	if phoneClean := config.SanitizePhone(cfg.Phone); phoneClean != "" {
+		dbPath = filepath.Join(config.TokensDir, fmt.Sprintf("metadata_%s.db", phoneClean))
+	} else if cfg.RefreshToken != "" || cfg.DeviceID != "" || cfg.JSessionID != "" {
+		dbPath = filepath.Join(config.TokensDir, "metadata.db")
+	}
+	if dbPath != "" {
+		var msErr error
+		metaStore, msErr = cache.NewMetadataStore(dbPath)
+		if msErr != nil {
+			logger.Log("[WARN] Error inicializando SQLite MetadataStore en %s: %v", maskDBPath(dbPath), msErr)
+		} else {
+			logger.Log("[Metadata] 🗄️ SQLite MetadataStore inicializado en %s", maskDBPath(dbPath))
+			defer metaStore.Close()
+		}
+	}
 
-	// 2. Worker KeepAlive en segundo plano con Context para shutdown limpio
+	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
+	webdavServer := webdav.NewServerWithAuth(client, davAuth, metaStore)
+
+	syncInterval := config.GetSyncInterval()
+	logger.Log("[Metadata] ⏱️ Intervalo de sincronización periódica: %v (SYNC_INTERVAL_SEC)", syncInterval)
+	if fs := webdavServer.FS(); fs != nil {
+		fs.SetSyncInterval(syncInterval)
+	}
+
+	// 2. Sincronización inicial de metadatos en segundo plano si hay credenciales activas
+	if metaStore != nil && !client.IsSessionExpired() && (cfg.RefreshToken != "" || cfg.DeviceID != "" || cfg.JSessionID != "") {
+		go func() {
+			logger.Log("[Metadata] 🔄 Iniciando sincronización de metadatos en segundo plano...")
+			if _, syncErr := metaStore.SyncChanges(client, false); syncErr != nil {
+				logger.Log("[Metadata] ⚠️ Error en sincronización inicial de metadatos: %v", syncErr)
+			} else {
+				logger.Log("[Metadata] ✔ Sincronización inicial de metadatos completada.")
+				if fs := webdavServer.FS(); fs != nil {
+					fs.RecordSyncTime(time.Now())
+				}
+			}
+		}()
+	}
+
+	// 3. Workers KeepAlive y DeltaSync en segundo plano con Context para shutdown limpio
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go runKeepAlive(ctx, client, webdavServer.IsRunning)
+	go runDeltaSync(ctx, client, webdavServer.IsRunning, webdavServer.MetadataStore, webdavServer.FS, syncInterval)
 
 	webdavPort := "8080"
 	if p := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); p != "" {
@@ -231,4 +274,58 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 			timer.Reset(nextInterval)
 		}
 	}
+}
+
+func runDeltaSync(ctx context.Context, client *sapi.Client, isRunning func() bool, getMetaStore func() *cache.MetadataStore, getFS func() *webdav.MovistarFS, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if isRunning != nil && !isRunning() {
+				continue
+			}
+			if client == nil || client.IsSessionExpired() {
+				continue
+			}
+			cfg := client.GetConfig()
+			if cfg.RefreshToken == "" && cfg.AccessToken == "" && cfg.ValidationKey == "" {
+				continue
+			}
+
+			if getMetaStore != nil {
+				if ms := getMetaStore(); ms != nil {
+					changed, err := ms.SyncChanges(client, false)
+					if err != nil {
+						logger.Log("[DeltaSync] ⚠️ Sincronización periódica de metadatos falló: %v", err)
+					} else {
+						if getFS != nil {
+							if fs := getFS(); fs != nil {
+								fs.RecordSyncTime(time.Now())
+								if changed > 0 {
+									fs.InvalidateCache(0)
+								}
+							}
+						}
+						if changed > 0 {
+							logger.Log("[DeltaSync] 🔄 Sincronizados %d cambios en segundo plano.", changed)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func maskDBPath(p string) string {
+	base := filepath.Base(p)
+	dir := filepath.Dir(p)
+	if strings.HasPrefix(base, "metadata_") && strings.HasSuffix(base, ".db") {
+		phone := strings.TrimSuffix(strings.TrimPrefix(base, "metadata_"), ".db")
+		return filepath.Join(dir, fmt.Sprintf("metadata_%s.db", logger.Mask(phone)))
+	}
+	return p
 }

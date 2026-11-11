@@ -4,12 +4,12 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,12 +31,11 @@ const (
 
 func newDesktopTransport() *http.Transport {
 	return &http.Transport{
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			MaxVersion: tls.VersionTLS12,
-		},
-		ForceAttemptHTTP2:   false,
-		TLSNextProto:        make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 15 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
 		MaxIdleConns:        20,
