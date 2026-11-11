@@ -253,10 +253,12 @@ type MovistarFS struct {
 	sapiFallbackMu    sync.Mutex
 	sapiFallbackCD    map[int64]time.Time
 
-	lastSyncTime time.Time
-	syncInterval time.Duration
-	syncMu       sync.Mutex
-	isSyncing    atomic.Bool
+	lastSyncTime    time.Time
+	nextSyncAllowed time.Time
+	syncFailures    int
+	syncInterval    time.Duration
+	syncMu          sync.Mutex
+	isSyncing       atomic.Bool
 }
 
 type cachedFolders struct {
@@ -448,13 +450,15 @@ func (mfs *MovistarFS) GetSyncInterval() time.Duration {
 	return mfs.syncInterval
 }
 
-// RecordSyncTime updates the timestamp of the last successful sync run.
+// RecordSyncTime updates the timestamp of the last successful sync run and resets backoff.
 func (mfs *MovistarFS) RecordSyncTime(t time.Time) {
 	if mfs == nil {
 		return
 	}
 	mfs.syncMu.Lock()
 	mfs.lastSyncTime = t
+	mfs.syncFailures = 0
+	mfs.nextSyncAllowed = time.Time{}
 	mfs.syncMu.Unlock()
 }
 
@@ -479,7 +483,12 @@ func (mfs *MovistarFS) MaybeTriggerSync() {
 	interval := mfs.GetSyncInterval()
 
 	mfs.syncMu.Lock()
-	if !mfs.lastSyncTime.IsZero() && time.Since(mfs.lastSyncTime) < interval {
+	now := time.Now()
+	if !mfs.nextSyncAllowed.IsZero() && now.Before(mfs.nextSyncAllowed) {
+		mfs.syncMu.Unlock()
+		return
+	}
+	if !mfs.lastSyncTime.IsZero() && now.Sub(mfs.lastSyncTime) < interval {
 		mfs.syncMu.Unlock()
 		return
 	}
@@ -488,14 +497,24 @@ func (mfs *MovistarFS) MaybeTriggerSync() {
 		return
 	}
 	mfs.isSyncing.Store(true)
-	mfs.lastSyncTime = time.Now()
+	mfs.lastSyncTime = now
 	mfs.syncMu.Unlock()
 
 	go func() {
 		defer mfs.isSyncing.Store(false)
 		changed, err := ms.SyncChanges(client, false)
 		if err != nil {
-			logger.Log("[Metadata] ⚠️ Sincronización no bloqueante falló: %v", err)
+			mfs.syncMu.Lock()
+			mfs.syncFailures++
+			factor := 1 << mfs.syncFailures
+			if factor > 15 {
+				factor = 15
+			}
+			backoff := interval * time.Duration(factor)
+			mfs.nextSyncAllowed = time.Now().Add(backoff)
+			failures := mfs.syncFailures
+			mfs.syncMu.Unlock()
+			logger.Log("[Metadata] ⚠️ Sincronización no bloqueante falló: %v. Pausando sincronizaciones por %v (%d fallos consecutivos)", err, backoff, failures)
 		} else {
 			mfs.RecordSyncTime(time.Now())
 			if changed > 0 {
@@ -944,7 +963,7 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 		}
 	}
-	ms := mfs.MetadataStore()
+	ms := mfs.metaStore
 	mfs.cacheMu.RUnlock()
 
 	// When metaStore is nil, tombstones immediately suppress the path (transient 10-15s suppression)
@@ -1354,7 +1373,7 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 	if !isFolder && mediaInfo != nil {
 		logger.Log("[WebDAV] 🗑 Eliminando archivo: '%s' (ID: %s)...", mediaInfo.Name, mediaInfo.ID)
 		if mediaInfo.ID != "" {
-			if err := mfs.client.DeleteFile(mediaInfo.ID); err != nil {
+			if err := mfs.client.DeleteFile(mediaInfo.ID, mediaInfo.Name); err != nil {
 				logger.Log("[WebDAV] ❌ Error eliminando archivo '%s' (ID: %s): %v", mediaInfo.Name, mediaInfo.ID, err)
 				return err
 			}
@@ -1493,7 +1512,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 				// Borrar destino previo sólo tras completar la re-subida con éxito
 				if destToDelete != nil {
 					logger.Log("[WebDAV] ℹ Eliminando archivo destino previo '%s' (ID: %s) tras re-subida exitosa...", newClean, destToDelete.ID)
-					_ = mfs.client.DeleteFile(destToDelete.ID)
+					_ = mfs.client.DeleteFile(destToDelete.ID, destToDelete.Name)
 					if ms := mfs.MetadataStore(); ms != nil {
 						logMetaErr("DeleteMedia dest", ms.DeleteMedia(destToDelete.ID))
 					}
@@ -1516,7 +1535,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 				// Borrar destino previo sólo tras completar UpdateMedia con éxito
 				if destToDelete != nil {
 					logger.Log("[WebDAV] ℹ Eliminando archivo destino previo '%s' (ID: %s) tras UpdateMedia exitoso...", newClean, destToDelete.ID)
-					_ = mfs.client.DeleteFile(destToDelete.ID)
+					_ = mfs.client.DeleteFile(destToDelete.ID, destToDelete.Name)
 					if ms := mfs.MetadataStore(); ms != nil {
 						logMetaErr("DeleteMedia dest", ms.DeleteMedia(destToDelete.ID))
 					}
@@ -1737,7 +1756,7 @@ func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSe
 	}
 
 	// Confirmado: ya es seguro borrar el original.
-	if err := mfs.client.DeleteFile(oldMedia.ID); err != nil {
+	if err := mfs.client.DeleteFile(oldMedia.ID, oldMedia.Name); err != nil {
 		logger.Log("[WebDAV] ⚠️ Advertencia: No se pudo eliminar el archivo original '%s' tras re-subida: %v", oldMedia.Name, err)
 	}
 

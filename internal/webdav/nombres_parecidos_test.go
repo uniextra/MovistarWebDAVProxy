@@ -32,7 +32,7 @@ func o2ConFotos(t *testing.T, fotos [][2]string) (*Server, *atomic.Int32, func()
 					"url": "/sapi/media/content?id=" + f[1], "creationdate": "20260101T000000Z", "modificationdate": "20260101T000000Z"})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"media": media}})
-		case r.URL.Path == "/sapi/media" && action == "softdelete":
+		case (strings.HasPrefix(r.URL.Path, "/sapi/media/") && action == "delete") || (r.URL.Path == "/sapi/media" && action == "softdelete"):
 			borrados.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		default:

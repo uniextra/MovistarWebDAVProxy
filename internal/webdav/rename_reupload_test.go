@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -162,15 +163,26 @@ func (f *reuploadO2) handler(t *testing.T) http.Handler {
 			f.reads++
 			f.mu.Unlock()
 			jsonOut(w, map[string]interface{}{"error": map[string]interface{}{"code": "COM-1005", "message": "Unsupported operation"}})
-		case r.URL.Path == "/sapi/media" && action == "softdelete":
+		case (strings.HasPrefix(r.URL.Path, "/sapi/media/") && action == "delete") || (r.URL.Path == "/sapi/media" && action == "softdelete"):
 			id := q.Get("id")
+			if id == "" {
+				var body struct {
+					Data map[string][]interface{} `json:"data"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				for _, list := range body.Data {
+					for _, item := range list {
+						id = fmt.Sprintf("%v", item)
+					}
+				}
+			}
 			f.mu.Lock()
 			f.deleted = append(f.deleted, id)
 			delete(f.content, id)
 			delete(f.names, id)
 			delete(f.listed, id)
 			f.mu.Unlock()
-			jsonOut(w, map[string]interface{}{"data": map[string]interface{}{}})
+			jsonOut(w, map[string]interface{}{"success": "Files soft deleted successfully"})
 		default:
 			jsonOut(w, map[string]interface{}{"data": map[string]interface{}{}})
 		}

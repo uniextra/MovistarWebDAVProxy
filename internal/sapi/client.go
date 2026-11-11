@@ -690,6 +690,12 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 
 	c.processSAPIResponse(resp)
 
+	if resp.StatusCode == http.StatusForbidden {
+		if t, ok := c.httpClient.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+	}
+
 	if resp.StatusCode == http.StatusUnauthorized {
 		if req.Body != nil && req.GetBody == nil {
 			return resp, nil
@@ -1447,39 +1453,114 @@ func (c *Client) saveMediaMetadata(kind, mediaID, name string, folderID int64) e
 	return nil
 }
 
-func (c *Client) DeleteFile(mediaID string) error {
+func mediaPluralForKind(kind string) string {
+	switch kind {
+	case "picture":
+		return "pictures"
+	case "video":
+		return "videos"
+	case "audio":
+		return "audios"
+	default:
+		return "files"
+	}
+}
+
+func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 	const maxRetries = 10
 	const delay = 1500 * time.Millisecond
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, mediaID)
-		req, err := http.NewRequest("POST", u, bytes.NewReader([]byte("{}")))
-		if err != nil {
-			return err
+	kind := "file"
+	if len(nameOrKind) > 0 && nameOrKind[0] != "" {
+		cand := nameOrKind[0]
+		if strings.Contains(cand, ".") {
+			cand = mediaKindForName(cand)
 		}
-		resp, err := c.DoRequest(req)
-		if err != nil {
-			return err
+		if cand != "" {
+			kind = cand
 		}
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		_ = resp.Body.Close()
-
-		bStr := string(b)
-		if strings.Contains(bStr, "MED-1017") {
-			if attempt < maxRetries {
-				logger.Log("[SAPI] ⏳ Archivo en validación asíncrona (MED-1017) durante borrado. Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
-				time.Sleep(delay)
-				continue
-			}
-			return fmt.Errorf("delete file failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
-		}
-		return nil
 	}
-	return errors.New("delete file failed tras agotar reintentos")
+
+	kinds := []string{kind}
+	if kind != "file" {
+		kinds = append(kinds, "file")
+	}
+
+	var parsedID interface{} = mediaID
+	if idNum, err := strconv.ParseInt(mediaID, 10, 64); err == nil {
+		parsedID = idNum
+	}
+
+	var lastErr error
+	for _, k := range kinds {
+		plural := mediaPluralForKind(k)
+		u := fmt.Sprintf("%s/media/%s?action=delete&softdelete=true", c.baseURL, k)
+
+		payload := map[string]interface{}{
+			"data": map[string]interface{}{
+				plural: []interface{}{parsedID},
+			},
+		}
+		bodyBytes, _ := json.Marshal(payload)
+
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+
+			resp, err := c.DoRequest(req)
+			if err != nil {
+				lastErr = err
+				break
+			}
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			_ = resp.Body.Close()
+
+			bStr := string(b)
+			if strings.Contains(bStr, "MED-1017") {
+				if attempt < maxRetries {
+					logger.Log("[SAPI] ⏳ Archivo en validación asíncrona (MED-1017) durante borrado. Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
+					time.Sleep(delay)
+					continue
+				}
+				lastErr = fmt.Errorf("delete file failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
+				break
+			}
+
+			// MED-1022: "File already soft deleted" -> éxito idempotente (igual que la app oficial)
+			if strings.Contains(bStr, "MED-1022") {
+				return nil
+			}
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				lastErr = fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
+				break
+			}
+
+			var res struct {
+				Success interface{} `json:"success"`
+				Error   *struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
+				if res.Error.Code == "MED-1022" {
+					return nil
+				}
+				lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
+				break
+			}
+
+			return nil
+		}
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
 }
 
 // UploadFileToFolder sube un archivo. Si modTime no es cero, se envía como fecha de

@@ -277,31 +277,44 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 }
 
 func runDeltaSync(ctx context.Context, client *sapi.Client, isRunning func() bool, getMetaStore func() *cache.MetadataStore, getFS func() *webdav.MovistarFS, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
+	consecutiveFailures := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			if isRunning != nil && !isRunning() {
+				timer.Reset(interval)
 				continue
 			}
 			if client == nil || client.IsSessionExpired() {
+				timer.Reset(interval)
 				continue
 			}
 			cfg := client.GetConfig()
 			if cfg.RefreshToken == "" && cfg.AccessToken == "" && cfg.ValidationKey == "" {
+				timer.Reset(interval)
 				continue
 			}
 
+			nextInterval := interval
 			if getMetaStore != nil {
 				if ms := getMetaStore(); ms != nil {
 					changed, err := ms.SyncChanges(client, false)
 					if err != nil {
-						logger.Log("[DeltaSync] ⚠️ Sincronización periódica de metadatos falló: %v", err)
+						consecutiveFailures++
+						backoffFactor := 1 << consecutiveFailures
+						if backoffFactor > 15 {
+							backoffFactor = 15
+						}
+						nextInterval = interval * time.Duration(backoffFactor)
+						logger.Log("[DeltaSync] ⚠️ Sincronización periódica de metadatos falló: %v. Reintentando en %v (%d fallos consecutivos)", err, nextInterval, consecutiveFailures)
 					} else {
+						consecutiveFailures = 0
 						if getFS != nil {
 							if fs := getFS(); fs != nil {
 								fs.RecordSyncTime(time.Now())
@@ -316,6 +329,7 @@ func runDeltaSync(ctx context.Context, client *sapi.Client, isRunning func() boo
 					}
 				}
 			}
+			timer.Reset(nextInterval)
 		}
 	}
 }

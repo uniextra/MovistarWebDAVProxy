@@ -94,7 +94,7 @@ func newMockSAPIServer(t *testing.T) *httptest.Server {
 					"url":  "/sapi/media/content?id=777",
 				},
 			})
-		case path == "/sapi/media" && action == "softdelete":
+		case (strings.HasPrefix(path, "/sapi/media/") && action == "delete") || (path == "/sapi/media" && action == "softdelete"):
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case path == "/sapi/media/folder" && action == "softdelete":
 			if r.URL.Query().Get("id") == "" {
