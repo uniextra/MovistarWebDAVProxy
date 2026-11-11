@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
@@ -216,7 +217,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(indexHTML)
+	rendered := bytes.ReplaceAll(indexHTML, []byte("{{.Version}}"), []byte(config.Version))
+	_, _ = w.Write(rendered)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

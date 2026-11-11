@@ -58,6 +58,21 @@ func TestWebUI_AuthAndHealthExemption(t *testing.T) {
 		t.Fatalf("expected /health 200 without auth, got %d", healthRec.Code)
 	}
 
+	// 1b. GET / sirve index.html con la versión inyectada dinámicamente desde config.Version
+	indexReq := httptest.NewRequest("GET", "/", nil)
+	indexReq.SetBasicAuth("admin", "secretpassword")
+	indexRec := httptest.NewRecorder()
+	handler.ServeHTTP(indexRec, indexReq)
+	if indexRec.Code != http.StatusOK {
+		t.Fatalf("expected / 200 with auth, got %d", indexRec.Code)
+	}
+	if !strings.Contains(indexRec.Body.String(), config.Version+" (Go)") {
+		t.Errorf("expected index.html to contain dynamic version %s (Go), got: %s", config.Version, indexRec.Body.String()[:500])
+	}
+	if strings.Contains(indexRec.Body.String(), "{{.Version}}") {
+		t.Errorf("index.html contains unrendered template placeholder {{.Version}}")
+	}
+
 	// 2. /status sin credenciales -> 401
 	statusReq := httptest.NewRequest("GET", "/status", nil)
 	statusRec := httptest.NewRecorder()
