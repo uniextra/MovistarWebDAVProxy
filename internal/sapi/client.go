@@ -3,13 +3,11 @@ package sapi
 import (
 	"bufio"
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -287,21 +285,10 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		return nil, err
 	}
 
-	// Transporte HTTP/1.1 nativo igual al cliente oficial de Windows (Poco C++ Win32).
-	// Desactivamos HTTP/2 (TLSNextProto vacío) para replicar la negociación TLS/HTTP del cliente oficial.
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		ForceAttemptHTTP2:     false,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20,
-	}
+	// Transporte HTTP/2 con ClientHello emitido por uTLS, imitando un navegador
+	// convencional para no disparar el AWS CloudFront WAF Bot Control (403).
+	transport := auth.NewFingerprintedTransport()
+	logger.Log("[SAPI] 🔐 Huella TLS (uTLS): %s", auth.FingerprintName())
 
 	httpClient := &http.Client{
 		Jar:       jar,
@@ -508,7 +495,12 @@ func (c *Client) RefreshSession() bool {
 	sapiBase := auth.GetSAPIBaseURL(cfg.Provider)
 	if cfg.AccessToken != "" {
 		res := auth.SAPILoginOAuth(c.httpClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
-		if res.StatusCode == http.StatusOK && (res.ValidationKey != "" || res.JSessionID != "") {
+		// Un 200 con cookies NO garantiza que el access_token siga siendo válido:
+		// SAPI puede devolver cookies de sesión y un cuerpo de error. Exigimos además
+		// evidencia de una sesión OAuth real (credenciales rotadas o responsetime) para
+		// no dar por buena una renovación falsa y quedarnos en bucle de 401.
+		if res.StatusCode == http.StatusOK && (res.ValidationKey != "" || res.JSessionID != "") &&
+			(res.RefreshedOAuth != nil || res.LastRefreshDate > 0) {
 			c.mu.Lock()
 			c.sessionExpired = false
 			if res.ValidationKey != "" {
@@ -662,7 +654,7 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	// Inyectar cabeceras comunes
 	req.Header.Set("User-Agent", auth.DesktopUserAgent)
 	if req.Header.Get("Accept") == "" {
-		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("Accept", "*/*")
 	}
 	if cfg.DeviceID != "" {
 		req.Header.Set("X-deviceid", cfg.DeviceID)

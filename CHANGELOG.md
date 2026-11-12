@@ -2,6 +2,18 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.4.0] - 2026-11-12
+
+### 🛡️ Huella TLS uTLS + HTTP/2 real: fin de los 403 de CloudFront WAF (Issue #26)
+
+- **Causa raíz confirmada:** el ClientHello de `crypto/tls` de Go (JA3/JA4) era catalogado por AWS CloudFront WAF Bot Control como cliente automatizado, incluso enviando el `User-Agent` oficial (`omh windows client 32.0.7.1`). Los intentos previos (TLS 1.2 + HTTP/2, o HTTP/1.1 con el TLS de Go) seguían disparando 403 en ráfagas y descargas concurrentes.
+- **Solución:** el transporte SAPI usa ahora `github.com/refraction-networking/utls` para emitir un ClientHello de navegador convencional (Chrome por defecto) y `http2.Transport` real para `micloud.movistar.es`; las subidas a `upload.micloud.movistar.es` siguen por HTTP/1.1. Esto elimina también el error `malformed HTTP response "\x00\x00\x12\x04..."` que aparecía cuando uTLS negociaba h2 pero el transporte hablaba HTTP/1.x.
+- **Selección de huella configurable:** `UTLS_CLIENT_HELLO` (`chrome_auto` por defecto; `firefox_auto`, `safari_auto`, `ios`, `android`, `edge`, `chrome_120`, `golang`, `randomized`). El log de arranque muestra la huella activa: `[SAPI] 🔐 Huella TLS (uTLS): Chrome-133`.
+- **Renovación de sesión robusta:** `RefreshSession` ya no da por buena una renovación solo porque SAPI devuelva cookies; exige credenciales OAuth rotadas o `responsetime`, evitando bucles de 401 cuando el `access_token` ha expirado.
+- **Alineación con el cliente oficial de Windows:** `Accept: */*` y parámetros de `/sapi/profile/changes` (`type=picture,video,audio,file,folder`, `responsetime=true`, `sortby=creationdate`, `sortorder=descending`, `locked=true`) en lugar de `origin=omh,dropbox`.
+- **Validación en vivo (issue #26):** 274 peticiones en 30 s con 2 workers de metadatos y 4 descargas concurrentes: **274/274 OK, 0 HTTP 403, 0 HTTP 429, 0 errores 5xx**. Descargas completas simultáneas de 4 fragmentos de 8 MB: **32 MB en 1,49 s, 0 fallos**, con HTTP/2.0.
+- **Compatibilidad HyperBackup:** se mantiene la emulación local de los marcadores efímeros de control (`Control/@reader`, `@writer`, `lock_*`, `*.cinfo`) para no generar churn de crear/borrar en SAPI; los datos e índices reales del backup se siguen subiendo y verificando con sus checksums.
+
 ## [v2.2.15] - 2026-11-10
 
 ### 🛡️ Restauración del Transporte TLS Estándar, Eliminación de Pausas Artificiales WAF y Mapeo MED-1020 (Issues #17, #23 y #26)

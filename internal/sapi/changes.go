@@ -157,14 +157,14 @@ func isNumericCursor(s string) bool {
 
 // GetProfileChanges retrieves incremental profile changes since the given epoch milliseconds cursor 'from'.
 // If 'from' is empty or non-numeric, "0" is used.
-// The endpoint queried matches the official web and desktop app:
-// GET /sapi/profile/changes?action=get&from={from}&origin=omh,dropbox&locked=true
+// The endpoint queried matches the official Windows desktop client (Movistar Cloud-sync.exe):
+// GET /sapi/profile/changes?action=get&from={from}&type=picture,video,audio,file,folder&responsetime=true&sortby=creationdate&sortorder=descending&locked=true
 func (c *Client) GetProfileChanges(from string) (*ProfileChangesResponse, error) {
 	if !isNumericCursor(from) {
 		from = "0"
 	}
 
-	u := fmt.Sprintf("%s/profile/changes?action=get&from=%s&origin=omh,dropbox&locked=true",
+	u := fmt.Sprintf("%s/profile/changes?action=get&from=%s&type=picture,video,audio,file,folder&responsetime=true&sortby=creationdate&sortorder=descending&locked=true",
 		c.baseURL, url.QueryEscape(from))
 
 	req, err := http.NewRequest("GET", u, nil)

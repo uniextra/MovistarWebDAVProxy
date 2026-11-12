@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,18 +28,8 @@ const (
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
-func newDesktopTransport() *http.Transport {
-	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:   true,
-		TLSHandshakeTimeout: 15 * time.Second,
-		IdleConnTimeout:     90 * time.Second,
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 10,
-	}
+func newDesktopTransport() http.RoundTripper {
+	return NewFingerprintedTransport()
 }
 
 var (
@@ -457,7 +446,7 @@ func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken,
 	authHeader := BuildOAuthHeader(accessToken, refreshToken, lastRefreshDate, expiresIn)
 	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("User-Agent", DesktopUserAgent)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept", "*/*")
 	if deviceID != "" {
 		req.Header.Set("X-deviceid", deviceID)
 	}

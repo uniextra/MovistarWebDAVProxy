@@ -22,9 +22,17 @@ func TestNewClient_MaxIdleConnsPerHost(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	transport, ok := client.httpClient.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("expected *http.Transport, got %T", client.httpClient.Transport)
+	var transport *http.Transport
+	switch tr := client.httpClient.Transport.(type) {
+	case *http.Transport:
+		transport = tr
+	case interface{ HTTP1Transport() *http.Transport }:
+		transport = tr.HTTP1Transport()
+	default:
+		t.Fatalf("unexpected transport type %T", client.httpClient.Transport)
+	}
+	if transport == nil {
+		t.Fatal("expected a configured HTTP/1.1 transport, got nil")
 	}
 	if transport.MaxIdleConnsPerHost != 20 {
 		t.Errorf("expected MaxIdleConnsPerHost = 20, got %d", transport.MaxIdleConnsPerHost)
