@@ -46,25 +46,32 @@ type ProfileChangesData struct {
 }
 
 func (pcd *ProfileChangesData) UnmarshalJSON(data []byte) error {
-	var m map[string]ItemChanges
-	if err := json.Unmarshal(data, &m); err != nil {
-		return err
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[]")) || bytes.Equal(trimmed, []byte("null")) {
+		return nil
 	}
-	pcd.Raw = m
-	if pic, ok := m["picture"]; ok {
-		pcd.Picture = pic
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		return nil // Graceful si data no es un objeto
 	}
-	if vid, ok := m["video"]; ok {
-		pcd.Video = vid
-	}
-	if aud, ok := m["audio"]; ok {
-		pcd.Audio = aud
-	}
-	if fil, ok := m["file"]; ok {
-		pcd.File = fil
-	}
-	if fol, ok := m["folder"]; ok {
-		pcd.Folder = fol
+	pcd.Raw = make(map[string]ItemChanges)
+	for k, v := range rawMap {
+		var ic ItemChanges
+		if err := json.Unmarshal(v, &ic); err == nil {
+			pcd.Raw[k] = ic
+			switch k {
+			case "picture":
+				pcd.Picture = ic
+			case "video":
+				pcd.Video = ic
+			case "audio":
+				pcd.Audio = ic
+			case "file":
+				pcd.File = ic
+			case "folder":
+				pcd.Folder = ic
+			}
+		}
 	}
 	return nil
 }
@@ -135,16 +142,29 @@ func (p *ProfileChangesResponse) MediaChanges() ItemChanges {
 	return res
 }
 
-// GetProfileChanges retrieves incremental profile changes since the given timestamp cursor 'from'.
-// If 'from' is empty, "0" is used to query all initial changes.
-// The endpoint queried is:
-// GET /sapi/profile/changes?action=get&from={from}&type=picture,video,audio,file,folder&responsetime=true&sortby=creationdate&sortorder=descending&locked=true
+// isNumericCursor checks if the cursor string consists only of digits.
+func isNumericCursor(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// GetProfileChanges retrieves incremental profile changes since the given epoch milliseconds cursor 'from'.
+// If 'from' is empty or non-numeric, "0" is used.
+// The endpoint queried matches the official web and desktop app:
+// GET /sapi/profile/changes?action=get&from={from}&origin=omh,dropbox&locked=true
 func (c *Client) GetProfileChanges(from string) (*ProfileChangesResponse, error) {
-	if from == "" {
+	if !isNumericCursor(from) {
 		from = "0"
 	}
 
-	u := fmt.Sprintf("%s/profile/changes?action=get&from=%s&type=picture,video,audio,file,folder&responsetime=true&sortby=creationdate&sortorder=descending&locked=true",
+	u := fmt.Sprintf("%s/profile/changes?action=get&from=%s&origin=omh,dropbox&locked=true",
 		c.baseURL, url.QueryEscape(from))
 
 	req, err := http.NewRequest("GET", u, nil)

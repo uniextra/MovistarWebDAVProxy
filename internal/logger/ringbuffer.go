@@ -60,6 +60,17 @@ func Log(format string, args ...interface{}) {
 	DefaultLogger.Append(format, args...)
 }
 
+func IsDebugEnabled() bool {
+	lvl := strings.TrimSpace(os.Getenv("LOG_LEVEL"))
+	return strings.EqualFold(lvl, "debug")
+}
+
+func Debug(format string, args ...interface{}) {
+	if IsDebugEnabled() {
+		Log("[DEBUG] "+format, args...)
+	}
+}
+
 func GetLogs() []string {
 	return DefaultLogger.GetLines()
 }

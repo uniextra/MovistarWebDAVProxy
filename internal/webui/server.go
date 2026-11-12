@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -109,6 +110,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/unlink", s.handleUnlink)
 	mux.HandleFunc("/test_telegram", s.handleTestTelegram)
 	mux.HandleFunc("/save_telegram", s.handleSaveTelegram)
+	mux.HandleFunc("/api/diagnostic/compare", s.handleDiagnosticCompare)
+	mux.HandleFunc("/diagnostic/compare", s.handleDiagnosticCompare)
 
 	return s.securityMiddleware(mux)
 }
@@ -781,4 +784,203 @@ func maskDBPath(p string) string {
 		return filepath.Join(dir, fmt.Sprintf("metadata_%s.db", logger.Mask(phone)))
 	}
 	return p
+}
+
+func (s *Server) handleDiagnosticCompare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.webdavServer == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"status":  "error",
+			"message": "Servidor WebDAV no inicializado",
+		})
+		return
+	}
+
+	ms := s.webdavServer.MetadataStore()
+	if ms == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"status":  "error",
+			"message": "MetadataStore SQLite no inicializado",
+		})
+		return
+	}
+
+	reqPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if reqPath == "" {
+		reqPath = "/"
+	}
+	cleanPath := path.Clean("/" + reqPath)
+
+	folderInfo, _, isFolder, err := s.webdavServer.ResolvePath(cleanPath)
+	if err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]interface{}{
+			"status":  "error",
+			"message": fmt.Sprintf("Ruta no encontrada: %v", err),
+			"path":    cleanPath,
+		})
+		return
+	}
+	if !isFolder || folderInfo == nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+			"status":  "error",
+			"message": "La ruta indicada no es una carpeta",
+			"path":    cleanPath,
+		})
+		return
+	}
+
+	folderID := folderInfo.ID
+
+	// 1. SAPI calls direct
+	sapiFolders, errF := s.client.ListAllSubfolders(folderID)
+	if errF != nil {
+		jsonResponse(w, http.StatusBadGateway, map[string]interface{}{
+			"status":  "error",
+			"message": fmt.Sprintf("Error consultando subcarpetas en SAPI: %v", errF),
+		})
+		return
+	}
+	sapiMedia, errM := s.client.ListAllMediaInFolder(folderID)
+	if errM != nil {
+		jsonResponse(w, http.StatusBadGateway, map[string]interface{}{
+			"status":  "error",
+			"message": fmt.Sprintf("Error consultando archivos en SAPI: %v", errM),
+		})
+		return
+	}
+
+	// 2. SQLite queries
+	sqliteFolders, err := ms.ListSubfolders(folderID)
+	if err != nil {
+		sqliteFolders = nil
+	}
+	sqliteMedia, err := ms.ListMediaInFolder(folderID)
+	if err != nil {
+		sqliteMedia = nil
+	}
+	virtualFiles, err := ms.ListVirtualEmptyFilesInFolder(folderID)
+	if err != nil {
+		virtualFiles = nil
+	}
+
+	type sizeDiff struct {
+		Name       string `json:"name"`
+		SQLiteSize int64  `json:"sqlite_size"`
+		SAPISize   int64  `json:"sapi_size"`
+	}
+
+	sapiFolderNameMap := make(map[string]sapi.FolderItem)
+	sapiFolderDups := make([]string, 0)
+	for _, f := range sapiFolders {
+		k := strings.ToLower(f.Name)
+		if _, exists := sapiFolderNameMap[k]; exists {
+			sapiFolderDups = append(sapiFolderDups, f.Name)
+		} else {
+			sapiFolderNameMap[k] = f
+		}
+	}
+
+	sapiMediaNameMap := make(map[string]sapi.MediaItem)
+	sapiMediaDups := make([]string, 0)
+	for _, m := range sapiMedia {
+		k := strings.ToLower(m.Name)
+		if _, exists := sapiMediaNameMap[k]; exists {
+			sapiMediaDups = append(sapiMediaDups, m.Name)
+		} else {
+			sapiMediaNameMap[k] = m
+		}
+	}
+
+	sqliteFolderNameMap := make(map[string]sapi.FolderItem)
+	sqliteFolderDups := make([]string, 0)
+	for _, f := range sqliteFolders {
+		k := strings.ToLower(f.Name)
+		if _, exists := sqliteFolderNameMap[k]; exists {
+			sqliteFolderDups = append(sqliteFolderDups, f.Name)
+		} else {
+			sqliteFolderNameMap[k] = f
+		}
+	}
+
+	sqliteMediaNameMap := make(map[string]sapi.MediaItem)
+	sqliteMediaDups := make([]string, 0)
+	for _, m := range sqliteMedia {
+		k := strings.ToLower(m.Name)
+		if _, exists := sqliteMediaNameMap[k]; exists {
+			sqliteMediaDups = append(sqliteMediaDups, m.Name)
+		} else {
+			sqliteMediaNameMap[k] = m
+		}
+	}
+
+	virtualNames := make(map[string]bool)
+	virtualList := make([]string, 0, len(virtualFiles))
+	for _, vf := range virtualFiles {
+		virtualNames[strings.ToLower(vf.Name)] = true
+		virtualList = append(virtualList, vf.Name)
+	}
+
+	// Missing in SQLite (present in SAPI but missing in SQLite)
+	missingInSQLite := make([]string, 0)
+	for k, sf := range sapiFolderNameMap {
+		if _, ok := sqliteFolderNameMap[k]; !ok {
+			missingInSQLite = append(missingInSQLite, "[Carpeta] "+sf.Name)
+		}
+	}
+	for k, sm := range sapiMediaNameMap {
+		if _, ok := sqliteMediaNameMap[k]; !ok {
+			missingInSQLite = append(missingInSQLite, "[Archivo] "+sm.Name)
+		}
+	}
+
+	// Extra in SQLite (present in SQLite but missing in SAPI, excluding virtual empty files)
+	extraInSQLite := make([]string, 0)
+	for k, qf := range sqliteFolderNameMap {
+		if _, ok := sapiFolderNameMap[k]; !ok {
+			extraInSQLite = append(extraInSQLite, "[Carpeta] "+qf.Name)
+		}
+	}
+	for k, qm := range sqliteMediaNameMap {
+		if _, ok := sapiMediaNameMap[k]; !ok && !virtualNames[k] {
+			extraInSQLite = append(extraInSQLite, "[Archivo] "+qm.Name)
+		}
+	}
+
+	// Size mismatches
+	sizeMismatches := make([]sizeDiff, 0)
+	for k, sm := range sapiMediaNameMap {
+		if qm, ok := sqliteMediaNameMap[k]; ok {
+			if qm.Size != sm.Size {
+				sizeMismatches = append(sizeMismatches, sizeDiff{
+					Name:       sm.Name,
+					SQLiteSize: qm.Size,
+					SAPISize:   sm.Size,
+				})
+			}
+		}
+	}
+
+	allDupsSAPI := append(sapiFolderDups, sapiMediaDups...)
+	allDupsSQLite := append(sqliteFolderDups, sqliteMediaDups...)
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":                  "ok",
+		"path":                    cleanPath,
+		"folder_id":               folderID,
+		"missing_in_sqlite":       missingInSQLite,
+		"extra_in_sqlite":         extraInSQLite,
+		"duplicates_sapi":         allDupsSAPI,
+		"duplicates_sqlite":       allDupsSQLite,
+		"size_mismatches":         sizeMismatches,
+		"virtual_empty_files":     virtualList,
+		"sapi_subfolders_count":   len(sapiFolders),
+		"sapi_media_count":        len(sapiMedia),
+		"sqlite_subfolders_count": len(sqliteFolders),
+		"sqlite_media_count":      len(sqliteMedia),
+		"virtual_empty_count":     len(virtualFiles),
+	})
 }

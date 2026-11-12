@@ -190,6 +190,15 @@ func (s *MetadataStore) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_media_folder_name ON media (folder_id, name COLLATE NOCASE);
+
+	CREATE TABLE IF NOT EXISTS virtual_empty_files (
+		folder_id INTEGER NOT NULL,
+		name TEXT NOT NULL COLLATE NOCASE,
+		mod_time TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (folder_id, name COLLATE NOCASE)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_virtual_empty_folder ON virtual_empty_files (folder_id);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -501,6 +510,7 @@ func (s *MetadataStore) GetMediaByID(id string) (*sapi.MediaItem, error) {
 }
 
 // GetMediaByFolderAndName retrieves a media item by its parent folder ID and name (case-insensitive).
+// If duplicates exist, it deterministically picks the newest (modification_date DESC, id DESC) and logs a warning.
 // Returns nil, nil if not found.
 func (s *MetadataStore) GetMediaByFolderAndName(folderID int64, name string) (*sapi.MediaItem, error) {
 	if s == nil || s.db == nil {
@@ -515,20 +525,39 @@ func (s *MetadataStore) GetMediaByFolderAndName(folderID int64, name string) (*s
 		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
 		FROM media
 		WHERE folder_id = ? AND name = ? COLLATE NOCASE
-		LIMIT 1
+		ORDER BY modification_date DESC, id DESC
 	`
-	row := s.db.QueryRow(query, folderID, name)
-	m, err := scanMedia(row.Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	rows, err := s.db.Query(query, folderID, name)
 	if err != nil {
 		return nil, fmt.Errorf("query media %q in folder %d: %w", name, folderID, err)
 	}
-	return m, nil
+	defer rows.Close()
+
+	var items []sapi.MediaItem
+	for rows.Next() {
+		m, err := scanMedia(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan media: %w", err)
+		}
+		items = append(items, *m)
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if len(items) > 1 {
+		var ids []string
+		for _, itm := range items {
+			ids = append(ids, itm.ID)
+		}
+		logger.Log("[Metadata] ⚠️ Nombres duplicados detectados para '%s' en carpeta %d: IDs %v. Seleccionando el más reciente (%s, ID: %s)",
+			name, folderID, ids, items[0].ModificationDate, items[0].ID)
+	}
+	res := items[0]
+	return &res, nil
 }
 
 // ListMediaInFolder returns all media items in folderID, ordered alphabetically by name.
+// When duplicates exist, it deterministically keeps the newest and logs a warning with the IDs.
 func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -537,7 +566,7 @@ func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, err
 		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
 		FROM media
 		WHERE folder_id = ?
-		ORDER BY name COLLATE NOCASE ASC
+		ORDER BY name COLLATE NOCASE ASC, modification_date DESC, id DESC
 	`
 	rows, err := s.db.Query(query, folderID)
 	if err != nil {
@@ -546,17 +575,70 @@ func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, err
 	defer rows.Close()
 
 	items := make([]sapi.MediaItem, 0)
+	var lastLower string
+	var currentGroup []sapi.MediaItem
+
+	flushGroup := func() {
+		if len(currentGroup) == 0 {
+			return
+		}
+		items = append(items, currentGroup[0])
+		if len(currentGroup) > 1 {
+			var ids []string
+			for _, itm := range currentGroup {
+				ids = append(ids, itm.ID)
+			}
+			logger.Log("[Metadata] ⚠️ Nombres duplicados detectados para '%s' en carpeta %d: IDs %v. Seleccionando el más reciente (%s, ID: %s)",
+				currentGroup[0].Name, folderID, ids, currentGroup[0].ModificationDate, currentGroup[0].ID)
+		}
+		currentGroup = currentGroup[:0]
+	}
+
 	for rows.Next() {
 		m, err := scanMedia(rows.Scan)
 		if err != nil {
 			return nil, fmt.Errorf("scan media row in folder %d: %w", folderID, err)
 		}
-		items = append(items, *m)
+		low := strings.ToLower(m.Name)
+		if low != lastLower {
+			flushGroup()
+			lastLower = low
+		}
+		currentGroup = append(currentGroup, *m)
 	}
+	flushGroup()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("media rows error in folder %d: %w", folderID, err)
 	}
 	return items, nil
+}
+
+// GetDuplicateMediaInFolder returns all media rows with the same name in folderID, ordered newest first.
+func (s *MetadataStore) GetDuplicateMediaInFolder(folderID int64, name string) ([]sapi.MediaItem, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	query := `
+		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
+		FROM media
+		WHERE folder_id = ? AND name = ? COLLATE NOCASE
+		ORDER BY modification_date DESC, id DESC
+	`
+	rows, err := s.db.Query(query, folderID, strings.TrimSpace(name))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []sapi.MediaItem
+	for rows.Next() {
+		m, err := scanMedia(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *m)
+	}
+	return items, rows.Err()
 }
 
 // --- Write-Through / Mutation APIs ---
@@ -982,8 +1064,16 @@ func (s *MetadataStore) SyncChanges(client *sapi.Client, forceFullBootstrap bool
 	if err != nil {
 		return 0, fmt.Errorf("get last_sync_cursor: %w", err)
 	}
-	if cursor == "" || forceFullBootstrap {
-		cursor = "19700101T000000Z"
+	if cursor == "" || forceFullBootstrap || strings.Contains(cursor, "T") {
+		var count int
+		if s.db.QueryRow("SELECT COUNT(*) FROM media").Scan(&count) == nil && count > 0 {
+			// Si la base de datos ya tiene metadatos sincronizados, no re-descargar 73.000 items desde cero.
+			// Iniciamos el cursor en el momento actual para sincronizar únicamente cambios incrementales.
+			cursor = strconv.FormatInt(time.Now().UnixMilli(), 10)
+			_ = s.SetSyncState("last_sync_cursor", cursor)
+		} else {
+			cursor = "0"
+		}
 	}
 
 	resp, err := client.GetProfileChanges(cursor)
@@ -994,16 +1084,13 @@ func (s *MetadataStore) SyncChanges(client *sapi.Client, forceFullBootstrap bool
 		return 0, nil
 	}
 
-	// Calculate cursorVal from response requesttime
-	var t time.Time
-	if resp.RequestTime > 100000000000 {
-		t = time.UnixMilli(resp.RequestTime).UTC()
-	} else if resp.RequestTime > 0 {
-		t = time.Unix(resp.RequestTime, 0).UTC()
+	// Calculate cursorVal as epoch milliseconds (official SAPI format)
+	cursorVal := "0"
+	if resp.RequestTime > 0 {
+		cursorVal = strconv.FormatInt(resp.RequestTime, 10)
 	} else {
-		t = time.Now().UTC()
+		cursorVal = strconv.FormatInt(time.Now().UnixMilli(), 10)
 	}
-	cursorVal := t.Format("20060102T150405Z")
 
 	if !resp.HasChanges() {
 		// Even without changes, advance cursor so HasInitialSync becomes true
@@ -1153,4 +1240,142 @@ func dedupeInt64(in []int64) []int64 {
 		}
 	}
 	return out
+}
+
+// --- Virtual Empty Files (0-byte Emulation) ---
+
+// VirtualEmptyFileRecord represents an emulated 0-byte file in SQLite.
+type VirtualEmptyFileRecord struct {
+	FolderID int64  `json:"folder_id"`
+	Name     string `json:"name"`
+	ModTime  string `json:"mod_time"`
+}
+
+// VirtualEmptyFilePathRecord represents an emulated 0-byte file with its resolved path.
+type VirtualEmptyFilePathRecord struct {
+	Path    string `json:"path"`
+	ModTime string `json:"mod_time"`
+}
+
+func (s *MetadataStore) UpsertVirtualEmptyFile(folderID int64, name, modTime string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("virtual empty file name cannot be empty")
+	}
+	query := `
+		INSERT INTO virtual_empty_files (folder_id, name, mod_time)
+		VALUES (?, ?, ?)
+		ON CONFLICT(folder_id, name COLLATE NOCASE) DO UPDATE SET
+			mod_time = excluded.mod_time
+	`
+	_, err := s.db.Exec(query, folderID, name, modTime)
+	return err
+}
+
+func (s *MetadataStore) GetVirtualEmptyFile(folderID int64, name string) (*VirtualEmptyFileRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	query := `
+		SELECT folder_id, name, mod_time
+		FROM virtual_empty_files
+		WHERE folder_id = ? AND name = ? COLLATE NOCASE
+		LIMIT 1
+	`
+	var r VirtualEmptyFileRecord
+	err := s.db.QueryRow(query, folderID, name).Scan(&r.FolderID, &r.Name, &r.ModTime)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *MetadataStore) DeleteVirtualEmptyFile(folderID int64, name string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	query := `DELETE FROM virtual_empty_files WHERE folder_id = ? AND name = ? COLLATE NOCASE`
+	_, err := s.db.Exec(query, folderID, strings.TrimSpace(name))
+	return err
+}
+
+func (s *MetadataStore) DeleteVirtualEmptyFilesInFolder(folderID int64) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	query := `DELETE FROM virtual_empty_files WHERE folder_id = ?`
+	_, err := s.db.Exec(query, folderID)
+	return err
+}
+
+func (s *MetadataStore) ListVirtualEmptyFilesInFolder(folderID int64) ([]VirtualEmptyFileRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	query := `
+		SELECT folder_id, name, mod_time
+		FROM virtual_empty_files
+		WHERE folder_id = ?
+		ORDER BY name COLLATE NOCASE ASC
+	`
+	rows, err := s.db.Query(query, folderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []VirtualEmptyFileRecord
+	for rows.Next() {
+		var r VirtualEmptyFileRecord
+		if err := rows.Scan(&r.FolderID, &r.Name, &r.ModTime); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+func (s *MetadataStore) ListAllVirtualEmptyFiles() ([]VirtualEmptyFilePathRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	query := `
+		WITH RECURSIVE folder_path(id, path) AS (
+			SELECT id, '/' FROM folders WHERE parent_id = 0 OR magic = 1
+			UNION ALL
+			SELECT f.id, CASE WHEN fp.path = '/' THEN '/' || f.name ELSE fp.path || '/' || f.name END
+			FROM folders f
+			JOIN folder_path fp ON f.parent_id = fp.id
+			WHERE f.magic = 0
+		)
+		SELECT CASE WHEN fp.path = '/' THEN '/' || v.name ELSE fp.path || '/' || v.name END, v.mod_time
+		FROM virtual_empty_files v
+		JOIN folder_path fp ON v.folder_id = fp.id
+		ORDER BY 1 ASC
+	`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []VirtualEmptyFilePathRecord
+	for rows.Next() {
+		var r VirtualEmptyFilePathRecord
+		if err := rows.Scan(&r.Path, &r.ModTime); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }

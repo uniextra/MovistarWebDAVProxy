@@ -168,6 +168,40 @@ func isOSJunkPath(rawPath string) bool {
 	return false
 }
 
+// isControlOrLockFile comprueba si la ruta corresponde a un fichero o directorio efímero de control o bloqueo de Hyper Backup
+// (e.g. rutas dentro de "/Control/", "@reader", "@writer", "lock_keep_alive", archivos ".cinfo", "error_detect", etc.)
+func isControlOrLockFile(rawPath string) bool {
+	clean := strings.ToLower(path.Clean("/" + rawPath))
+	base := strings.ToLower(path.Base(clean))
+	return strings.Contains(clean, "/control/") ||
+		strings.HasSuffix(clean, "/control") ||
+		strings.HasPrefix(base, "@writer") ||
+		strings.HasPrefix(base, "@reader") ||
+		strings.HasPrefix(base, "lock_") ||
+		strings.HasSuffix(base, ".cinfo") ||
+		strings.Contains(base, "error_detect")
+}
+
+// isTolerantDelete comprueba si un error al borrar un archivo debe gestionarse de forma tolerante (204 en WebDAV)
+// para evitar que un 403 transitorio de CloudFront WAF o el borrado de índices obsoletos en remove_conflict
+// interrumpa y suspenda una tarea de copia de seguridad ya completada.
+func isTolerantDelete(rawPath string, err error) bool {
+	if isControlOrLockFile(rawPath) {
+		return true
+	}
+	clean := strings.ToLower(path.Clean("/" + rawPath))
+	if strings.Contains(clean, "/config/virtual_file.index/") || strings.HasSuffix(clean, ".idx") || strings.Contains(clean, "/control/") {
+		return true
+	}
+	if err != nil {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "403") || strings.Contains(errStr, "cloudfront") || strings.Contains(errStr, "request blocked") {
+			return true
+		}
+	}
+	return false
+}
+
 func acquireFolderLock(cleanPath string) func() {
 	val, _ := folderLocks.LoadOrStore(cleanPath, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
@@ -259,6 +293,8 @@ type MovistarFS struct {
 	syncInterval    time.Duration
 	syncMu          sync.Mutex
 	isSyncing       atomic.Bool
+
+	emptyFileManager *EmptyFileManager
 }
 
 type cachedFolders struct {
@@ -309,13 +345,31 @@ type cachedMedia struct {
 	time    time.Time
 }
 
+func isMoreRecentMedia(a, b sapi.MediaItem) bool {
+	if a.ModificationDate != b.ModificationDate {
+		return a.ModificationDate > b.ModificationDate
+	}
+	idA, errA := strconv.ParseInt(a.ID, 10, 64)
+	idB, errB := strconv.ParseInt(b.ID, 10, 64)
+	if errA == nil && errB == nil {
+		return idA > idB
+	}
+	return a.ID > b.ID
+}
+
 func newCachedMedia(media []sapi.MediaItem) *cachedMedia {
 	byExact := make(map[string]sapi.MediaItem, len(media))
 	byLower := make(map[string]sapi.MediaItem, len(media))
 	for _, m := range media {
-		byExact[m.Name] = m
 		lower := strings.ToLower(m.Name)
-		if _, exists := byLower[lower]; !exists {
+		if existing, exists := byLower[lower]; exists {
+			logger.Log("[WebDAV] ⚠️ Nombres duplicados en caché para '%s' (IDs: %s y %s). Seleccionando el más reciente.", m.Name, existing.ID, m.ID)
+			if isMoreRecentMedia(m, existing) {
+				byExact[m.Name] = m
+				byLower[lower] = m
+			}
+		} else {
+			byExact[m.Name] = m
 			byLower[lower] = m
 		}
 	}
@@ -362,9 +416,14 @@ func NewMovistarFS(client *sapi.Client, metaStores ...*cache.MetadataStore) *Mov
 		duplicatiStore:    NewDuplicatiProbeStore(),
 		syncInterval:      config.GetSyncInterval(),
 	}
+	fs.emptyFileManager = NewEmptyFileManager(fs)
 	if ms != nil {
 		ms.SetTombstoneCleaner(fs.ClearTombstone)
 		ms.SetTombstoneFilter(fs.HasTombstones)
+		go func() {
+			time.Sleep(2 * time.Second)
+			fs.emptyFileManager.BootstrapLoad()
+		}()
 	}
 	return fs
 }
@@ -395,6 +454,12 @@ func (mfs *MovistarFS) SetMetadataStore(ms *cache.MetadataStore) {
 	if ms != nil {
 		ms.SetTombstoneCleaner(mfs.ClearTombstone)
 		ms.SetTombstoneFilter(mfs.HasTombstones)
+		if mfs.emptyFileManager != nil {
+			go func() {
+				time.Sleep(2 * time.Second)
+				mfs.emptyFileManager.BootstrapLoad()
+			}()
+		}
 	}
 }
 
@@ -905,6 +970,69 @@ func (mfs *MovistarFS) getRootFolderID() (int64, error) {
 	return rootID, nil
 }
 
+// ensureFolderChain ensures all directory segments in dirPath exist in SQLite/SAPI and returns the final folder.
+func (mfs *MovistarFS) ensureFolderChain(dirPath string) (*sapi.FolderItem, error) {
+	cleanPath := path.Clean("/" + dirPath)
+	rootID, err := mfs.getRootFolderID()
+	if err != nil {
+		return nil, err
+	}
+	if cleanPath == "/" || cleanPath == "." {
+		return &sapi.FolderItem{ID: rootID, Name: "/", Magic: true}, nil
+	}
+	parts := strings.Split(strings.Trim(cleanPath, "/"), "/")
+	currentID := rootID
+	var currentFolder *sapi.FolderItem = &sapi.FolderItem{ID: rootID, Name: "/", Magic: true}
+	ms := mfs.MetadataStore()
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		var found *sapi.FolderItem
+		if ms != nil {
+			f, err := ms.GetFolderByParentAndName(currentID, part)
+			if err == nil && f != nil {
+				found = f
+			}
+		}
+		if found == nil {
+			subs, err := mfs.getSubfolders(currentID)
+			if err == nil {
+				for _, s := range subs {
+					if strings.EqualFold(s.Name, part) {
+						item := s
+						found = &item
+						if ms != nil {
+							_ = ms.UpsertFolder(item)
+						}
+						break
+					}
+				}
+			}
+		}
+		if found == nil {
+			created, err := mfs.client.CreateFolder(part, currentID)
+			if err != nil {
+				return nil, fmt.Errorf("create folder '%s' in %d: %w", part, currentID, err)
+			}
+			found = created
+			if ms != nil {
+				_ = ms.UpsertFolder(*created)
+			}
+			mfs.InvalidateCache(currentID)
+		}
+		currentID = found.ID
+		currentFolder = found
+	}
+	return currentFolder, nil
+}
+
+// ResolvePath resolves a path to folderInfo or mediaInfo.
+func (mfs *MovistarFS) ResolvePath(rawPath string) (*sapi.FolderItem, *sapi.MediaItem, bool, error) {
+	return mfs.resolvePath(rawPath)
+}
+
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	cleanPath := path.Clean("/" + rawPath)
 	lowerPath := strings.ToLower(cleanPath)
@@ -920,6 +1048,11 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 
 	// Archivos y rutas basura de SO (desktop.ini, .DS_Store, etc.)
 	if isOSJunkPath(cleanPath) {
+		return nil, nil, false, os.ErrNotExist
+	}
+
+	// Directorio interno del proxy (manifiesto de archivos vacíos, etc.)
+	if isInternalProxyPath(cleanPath) {
 		return nil, nil, false, os.ErrNotExist
 	}
 
@@ -1008,6 +1141,17 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 					mfs.ClearTombstone(lowerPath)
 					return nil, m, false, nil
 				}
+				if vf, vfErr := ms.GetVirtualEmptyFile(currentID, part); vfErr == nil && vf != nil {
+					mfs.ClearTombstone(lowerPath)
+					vMedia := &sapi.MediaItem{
+						ID:               fmt.Sprintf("virtual:%d:%s", currentID, vf.Name),
+						Name:             vf.Name,
+						FolderID:         currentID,
+						Size:             0,
+						ModificationDate: sapi.FlexDate(vf.ModTime),
+					}
+					return nil, vMedia, false, nil
+				}
 			}
 
 			// 3. Check active createdFolders in memory
@@ -1063,6 +1207,17 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 				if mErr == nil && m != nil {
 					mfs.ClearTombstone(lowerPath)
 					return nil, m, false, nil
+				}
+				if vf, vfErr := ms.GetVirtualEmptyFile(currentID, part); vfErr == nil && vf != nil {
+					mfs.ClearTombstone(lowerPath)
+					vMedia := &sapi.MediaItem{
+						ID:               fmt.Sprintf("virtual:%d:%s", currentID, vf.Name),
+						Name:             vf.Name,
+						FolderID:         currentID,
+						Size:             0,
+						ModificationDate: sapi.FlexDate(vf.ModTime),
+					}
+					return nil, vMedia, false, nil
 				}
 			}
 
@@ -1151,6 +1306,36 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 			mfs.cacheMu.Unlock()
 			return nil
 		}
+	}
+
+	// Si es una carpeta de control o lock de Hyper Backup (@reader.*, @writer.*, etc.), emularla
+	// localmente en SQLite y memoria para evitar llamadas innecesarias a SAPI que puedan provocar 403 de CloudFront WAF.
+	if isControlOrLockFile(cleanPath) {
+		syntheticID := -time.Now().UnixNano()
+		if syntheticID > 0 {
+			syntheticID = -syntheticID
+		}
+		if syntheticID == 0 {
+			syntheticID = -1
+		}
+		item := sapi.FolderItem{
+			ID:               syntheticID,
+			Name:             folderName,
+			ParentID:         parentFolder.ID,
+			CreationDate:     sapi.FlexDate(time.Now().UTC().Format("20060102T150405Z")),
+			ModificationDate: sapi.FlexDate(time.Now().UTC().Format("20060102T150405Z")),
+		}
+		logger.Log("[WebDAV] 📁 Carpeta de control/lock emulada localmente (sin SAPI): '%s' (ID virtual: %d)", folderName, syntheticID)
+		if ms := mfs.MetadataStore(); ms != nil {
+			logMetaErr("UpsertFolder", ms.UpsertFolder(item))
+			logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(parentFolder.ID, time.Now().UTC().Format("20060102T150405Z")))
+		}
+		mfs.cacheMu.Lock()
+		delete(mfs.uploadCache, lowerPath)
+		mfs.createdFolders[lowerPath] = &CreatedFolder{Info: item, Time: time.Now()}
+		mfs.cacheMu.Unlock()
+		mfs.InvalidateCache(parentFolder.ID)
+		return nil
 	}
 
 	logger.Log("[WebDAV] 📁 Creando carpeta: '%s' en ID %d...", folderName, parentFolder.ID)
@@ -1250,7 +1435,11 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 	}
 
 	if isFolder {
-		return NewWebDAVDirReader(mfs, cleanPath, folderInfo.ID), nil
+		var mt time.Time
+		if folderInfo != nil && string(folderInfo.ModificationDate) != "" {
+			mt = parseTime(folderInfo.ModificationDate)
+		}
+		return NewWebDAVDirReader(mfs, cleanPath, folderInfo.ID, mt), nil
 	}
 
 	// Comprobar memoria primero
@@ -1271,6 +1460,18 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		return NewWebDAVFileReader(mfs, cleanPath, item), nil
 	}
 	mfs.cacheMu.RUnlock()
+
+	if mediaInfo != nil && (mediaInfo.Size == 0 || strings.HasPrefix(mediaInfo.ID, "virtual:")) {
+		return NewWebDAVMemoryReader(cleanPath, &MemoryFile{
+			ID:       mediaInfo.ID,
+			Name:     mediaInfo.Name,
+			FolderID: mediaInfo.FolderID,
+			Content:  []byte{},
+			Size:     0,
+			ModTime:  parseTime(mediaInfo.ModificationDate),
+			CachedAt: time.Now(),
+		}), nil
+	}
 
 	return NewWebDAVFileReader(mfs, cleanPath, *mediaInfo), nil
 }
@@ -1345,21 +1546,36 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil // WebDAV idempotencia
+		if errors.Is(err, os.ErrNotExist) || isControlOrLockFile(cleanPath) {
+			mfs.cacheMu.Lock()
+			delete(mfs.uploadCache, lowerPath)
+			mfs.cacheMu.Unlock()
+			return nil // WebDAV idempotencia / lock file graceful
 		}
 		return err
 	}
 
 	if isFolder && folderInfo != nil {
 		logger.Log("[WebDAV] 🗑 Eliminando carpeta: '%s' (ID: %d)...", folderInfo.Name, folderInfo.ID)
-		if err := mfs.client.DeleteFolder(folderInfo.ID, false); err != nil {
-			logger.Log("[WebDAV] ❌ Error eliminando carpeta '%s' (ID: %d): %v", folderInfo.Name, folderInfo.ID, err)
-			return err
+		if folderInfo.ID < 0 || isControlOrLockFile(cleanPath) {
+			logger.Log("[WebDAV] ℹ️ Eliminando carpeta virtual/control '%s' (ID: %d) localmente (sin SAPI)", folderInfo.Name, folderInfo.ID)
+		} else {
+			if err := mfs.client.DeleteFolder(folderInfo.ID, false); err != nil {
+				if isControlOrLockFile(cleanPath) {
+					logger.Log("[WebDAV] ℹ️ Carpeta de control/lock '%s' (ID: %d) gestionada de forma tolerante: %v", folderInfo.Name, folderInfo.ID, err)
+				} else {
+					logger.Log("[WebDAV] ❌ Error eliminando carpeta '%s' (ID: %d): %v", folderInfo.Name, folderInfo.ID, err)
+					return err
+				}
+			}
 		}
 		if ms := mfs.MetadataStore(); ms != nil {
 			logMetaErr("DeleteFolder", ms.DeleteFolder(folderInfo.ID))
+			logMetaErr("DeleteVirtualEmptyFilesInFolder", ms.DeleteVirtualEmptyFilesInFolder(folderInfo.ID))
 			logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(folderInfo.ParentID, time.Now().UTC().Format("20060102T150405Z")))
+			if !isControlOrLockFile(cleanPath) && mfs.emptyFileManager != nil {
+				mfs.emptyFileManager.ScheduleSave()
+			}
 		}
 		mfs.cacheMu.Lock()
 		delete(mfs.createdFolders, lowerPath)
@@ -1367,15 +1583,59 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 		mfs.deletedTombstones[lowerPath] = time.Now().Add(15 * time.Second)
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(folderInfo.ParentID)
+		mfs.InvalidateCache(folderInfo.ID)
 		return nil
 	}
 
 	if !isFolder && mediaInfo != nil {
+		if strings.HasPrefix(mediaInfo.ID, "virtual:") {
+			logger.Log("[WebDAV] 🗑 Eliminando archivo vacío emulado: '%s'...", mediaInfo.Name)
+			if ms := mfs.MetadataStore(); ms != nil {
+				logMetaErr("DeleteVirtualEmptyFile", ms.DeleteVirtualEmptyFile(mediaInfo.FolderID, mediaInfo.Name))
+				logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(mediaInfo.FolderID, time.Now().UTC().Format("20060102T150405Z")))
+				if !isControlOrLockFile(cleanPath) && mfs.emptyFileManager != nil {
+					mfs.emptyFileManager.ScheduleSave()
+				}
+			}
+			mfs.cacheMu.Lock()
+			delete(mfs.uploadCache, lowerPath)
+			mfs.deletedTombstones[lowerPath] = time.Now().Add(15 * time.Second)
+			mfs.cacheMu.Unlock()
+			mfs.InvalidateCache(mediaInfo.FolderID)
+			return nil
+		}
+
 		logger.Log("[WebDAV] 🗑 Eliminando archivo: '%s' (ID: %s)...", mediaInfo.Name, mediaInfo.ID)
 		if mediaInfo.ID != "" {
+			// Si el archivo fue subido hace apenas unos segundos, Telefónica aún está procesándolo
+			// de forma asíncrona (MED-1017). Para evitar reintentos continuos que activen el rate-limit
+			// de AWS CloudFront WAF, esperamos de forma proactiva a que cumpla una ventana mínima (6s)
+			// desde la subida antes de lanzar la petición de borrado a SAPI.
+			mfs.cacheMu.RLock()
+			var waitTime time.Duration
+			if mem, ok := mfs.uploadCache[lowerPath]; ok && !mem.CachedAt.IsZero() {
+				if elapsed := time.Since(mem.CachedAt); elapsed < 6*time.Second {
+					waitTime = 6*time.Second - elapsed
+				}
+			}
+			mfs.cacheMu.RUnlock()
+
+			if waitTime > 0 {
+				logger.Log("[WebDAV] ⏳ Archivo '%s' recién subido. Esperando %v antes de borrar para permitir validación en nube...", mediaInfo.Name, waitTime.Round(time.Millisecond))
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(waitTime):
+				}
+			}
+
 			if err := mfs.client.DeleteFile(mediaInfo.ID, mediaInfo.Name); err != nil {
-				logger.Log("[WebDAV] ❌ Error eliminando archivo '%s' (ID: %s): %v", mediaInfo.Name, mediaInfo.ID, err)
-				return err
+				if isTolerantDelete(cleanPath, err) {
+					logger.Log("[WebDAV] ℹ️ Fichero '%s' (ID: %s) gestionado de forma tolerante ante error de borrado SAPI: %v", mediaInfo.Name, mediaInfo.ID, err)
+				} else {
+					logger.Log("[WebDAV] ❌ Error eliminando archivo '%s' (ID: %s): %v", mediaInfo.Name, mediaInfo.ID, err)
+					return fs.ErrPermission
+				}
 			}
 		}
 		if ms := mfs.MetadataStore(); ms != nil {
@@ -1471,6 +1731,53 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 	}
 
 	if !isF && oldMedia != nil {
+		if strings.HasPrefix(oldMedia.ID, "virtual:") {
+			var destToDelete *sapi.MediaItem
+			_, destMedia, destIsFolder, destErr := mfs.resolvePath(newClean)
+			if destErr == nil && !destIsFolder && destMedia != nil && destMedia.ID != "" {
+				destToDelete = destMedia
+			}
+			if destToDelete != nil {
+				if strings.HasPrefix(destToDelete.ID, "virtual:") {
+					if ms := mfs.MetadataStore(); ms != nil {
+						_ = ms.DeleteVirtualEmptyFile(destToDelete.FolderID, destToDelete.Name)
+					}
+				} else {
+					_ = mfs.client.DeleteFile(destToDelete.ID, destToDelete.Name)
+					if ms := mfs.MetadataStore(); ms != nil {
+						_ = ms.DeleteMedia(destToDelete.ID)
+					}
+				}
+			}
+			nowMod := time.Now().UTC().Format("20060102T150405Z")
+			if ms := mfs.MetadataStore(); ms != nil {
+				_ = ms.DeleteVirtualEmptyFile(oldMedia.FolderID, oldMedia.Name)
+				_ = ms.UpsertVirtualEmptyFile(parentFolder.ID, newBaseName, nowMod)
+				_ = ms.UpdateFolderModificationDate(oldMedia.FolderID, nowMod)
+				_ = ms.UpdateFolderModificationDate(parentFolder.ID, nowMod)
+			}
+			mfs.cacheMu.Lock()
+			delete(mfs.uploadCache, oldLower)
+			delete(mfs.deletedTombstones, newLower)
+			mfs.deletedTombstones[oldLower] = time.Now().Add(15 * time.Second)
+			mfs.uploadCache[newLower] = &MemoryFile{
+				ID:       fmt.Sprintf("virtual:%d:%s", parentFolder.ID, newBaseName),
+				Name:     newBaseName,
+				FolderID: parentFolder.ID,
+				Content:  []byte{},
+				Size:     0,
+				ModTime:  time.Now(),
+				CachedAt: time.Now(),
+			}
+			mfs.cacheMu.Unlock()
+			mfs.InvalidateCache(oldMedia.FolderID)
+			mfs.InvalidateCache(parentFolder.ID)
+			if mfs.emptyFileManager != nil {
+				mfs.emptyFileManager.ScheduleSave()
+			}
+			return nil
+		}
+
 		// Comprobar si el destino ya existe en Movistar Cloud para borrarlo SOLO tras completar el movimiento con éxito
 		var destToDelete *sapi.MediaItem
 		_, destMedia, destIsFolder, destErr := mfs.resolvePath(newClean)
@@ -1518,6 +1825,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 					}
 				}
 				if ms := mfs.MetadataStore(); ms != nil {
+					_ = ms.DeleteVirtualEmptyFile(parentFolder.ID, newBaseName)
 					logMetaErr("DeleteMedia old", ms.DeleteMedia(oldMedia.ID))
 					logMetaErr("UpsertMedia reuploaded", ms.UpsertMedia(sapi.MediaItem{
 						ID:               reuploaded.ID,
@@ -1541,6 +1849,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 					}
 				}
 				if ms := mfs.MetadataStore(); ms != nil {
+					_ = ms.DeleteVirtualEmptyFile(parentFolder.ID, newBaseName)
 					logMetaErr("MoveMedia", ms.MoveMedia(oldMedia.ID, parentFolder.ID, newBaseName))
 					nowMod := time.Now().UTC().Format("20060102T150405Z")
 					logMetaErr("UpdateFolderModificationDate old", ms.UpdateFolderModificationDate(oldMedia.FolderID, nowMod))
@@ -1797,7 +2106,7 @@ func (mfs *MovistarFS) Stat(ctx context.Context, name string) (os.FileInfo, erro
 	}
 
 	if isFolder {
-		modTime := time.Now()
+		var modTime time.Time
 		if folderInfo != nil && string(folderInfo.ModificationDate) != "" {
 			if t := parseTime(folderInfo.ModificationDate); !t.IsZero() {
 				modTime = t
@@ -1917,7 +2226,7 @@ func (w *WebDAVFileWriter) releasePathLock() {
 }
 
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
-	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil {
+	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 || isControlOrLockFile(w.path) {
 		return
 	}
 	w.ensurePathLock()
@@ -2085,6 +2394,72 @@ func (w *WebDAVFileWriter) Close() error {
 	// de modo que la subida y la actualización de caché no se crucen con ellos.
 	w.ensurePathLock()
 
+	// Emular archivos de 0 bytes o ficheros de control/bloqueo en SQLite y memoria sin subir a Telefónica SAPI
+	if w.size == 0 || w.parentFolderID < 0 || isControlOrLockFile(w.path) {
+		w.cleanupTemp()
+		now := time.Now()
+		modTime := now
+		if !w.modTime.IsZero() {
+			modTime = w.modTime
+		}
+		modTimeStr := modTime.UTC().Format("20060102T150405Z")
+
+		virtualID := fmt.Sprintf("virtual:%d:%s", w.parentFolderID, w.name)
+		var cachedContent []byte
+		if w.buf != nil {
+			cachedContent = w.buf.Bytes()
+		}
+
+		if w.size == 0 {
+			if ms := w.mfs.MetadataStore(); ms != nil {
+				logMetaErr("UpsertVirtualEmptyFile", ms.UpsertVirtualEmptyFile(w.parentFolderID, w.name, modTimeStr))
+				logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(w.parentFolderID, modTimeStr))
+				if w.existingID != "" && !strings.HasPrefix(w.existingID, "virtual:") {
+					_ = w.mfs.client.DeleteFile(w.existingID)
+					_ = ms.DeleteMedia(w.existingID)
+				}
+			}
+		} else {
+			// Archivo de control con contenido (e.g. v1.cformat)
+			item := sapi.MediaItem{
+				ID:               virtualID,
+				Name:             w.name,
+				Size:             w.size,
+				FolderID:         w.parentFolderID,
+				CreationDate:     sapi.FlexDate(modTimeStr),
+				ModificationDate: sapi.FlexDate(modTimeStr),
+			}
+			if ms := w.mfs.MetadataStore(); ms != nil {
+				logMetaErr("UpsertMedia", ms.UpsertMedia(item))
+				logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(w.parentFolderID, modTimeStr))
+			}
+		}
+
+		lowerPath := strings.ToLower(w.path)
+		w.mfs.cacheMu.Lock()
+		delete(w.mfs.deletedTombstones, lowerPath)
+		w.mfs.uploadCache[lowerPath] = &MemoryFile{
+			ID:       virtualID,
+			Name:     w.name,
+			FolderID: w.parentFolderID,
+			Content:  cachedContent,
+			Size:     w.size,
+			ModTime:  modTime,
+			CachedAt: now,
+		}
+		w.mfs.cacheMu.Unlock()
+		w.mfs.InvalidateCache(w.parentFolderID)
+		if w.size == 0 && !isControlOrLockFile(w.path) && w.mfs.emptyFileManager != nil {
+			w.mfs.emptyFileManager.ScheduleSave()
+		}
+		if w.size == 0 {
+			logger.Log("[WebDAV] Archivo vacío emulado: '%s'", w.path)
+		} else {
+			logger.Log("[WebDAV] Archivo de control emulado en memoria: '%s' (%d bytes)", w.path, w.size)
+		}
+		return nil
+	}
+
 	sizeMB := float64(w.size) / (1024 * 1024)
 	var media *sapi.MediaItem
 	var err error
@@ -2188,8 +2563,21 @@ func (w *WebDAVFileWriter) Close() error {
 	w.mfs.cacheMu.Unlock()
 
 	if ms := w.mfs.MetadataStore(); ms != nil && media != nil {
+		_ = ms.DeleteVirtualEmptyFile(w.parentFolderID, w.name)
+		if !isControlOrLockFile(w.path) && w.mfs.emptyFileManager != nil {
+			w.mfs.emptyFileManager.ScheduleSave()
+		}
 		logMetaErr("UpsertMedia", ms.UpsertMedia(*media))
 		logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(w.parentFolderID, time.Now().UTC().Format("20060102T150405Z")))
+		if strings.EqualFold(os.Getenv("DEDUPE_ON_OVERWRITE"), "true") && w.parentFolderID > 0 {
+			if dups, err := ms.GetDuplicateMediaInFolder(w.parentFolderID, w.name); err == nil && len(dups) > 1 {
+				for _, oldDup := range dups[1:] {
+					logger.Log("[WebDAV] 🧹 DEDUPE_ON_OVERWRITE: eliminando duplicado antiguo '%s' (ID: %s)", oldDup.Name, oldDup.ID)
+					_ = w.mfs.client.DeleteFile(oldDup.ID)
+					_ = ms.DeleteMedia(oldDup.ID)
+				}
+			}
+		}
 	}
 	w.mfs.InvalidateCache(w.parentFolderID)
 
@@ -2427,14 +2815,19 @@ type WebDAVDirReader struct {
 	mfs      *MovistarFS
 	path     string
 	folderID int64
+	modTime  time.Time
 	entries  []os.FileInfo
 	readPos  int
 	loaded   bool
 	mu       sync.Mutex
 }
 
-func NewWebDAVDirReader(mfs *MovistarFS, path string, folderID int64) *WebDAVDirReader {
-	return &WebDAVDirReader{mfs: mfs, path: path, folderID: folderID}
+func NewWebDAVDirReader(mfs *MovistarFS, path string, folderID int64, modTimes ...time.Time) *WebDAVDirReader {
+	var mt time.Time
+	if len(modTimes) > 0 {
+		mt = modTimes[0]
+	}
+	return &WebDAVDirReader{mfs: mfs, path: path, folderID: folderID, modTime: mt}
 }
 
 func (d *WebDAVDirReader) Read(p []byte) (n int, err error) { return 0, io.EOF }
@@ -2453,7 +2846,13 @@ func (d *WebDAVDirReader) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (d *WebDAVDirReader) Stat() (os.FileInfo, error) {
-	return &VirtualFileInfo{name: path.Base(d.path), size: 0, mode: os.ModeDir | 0755, modTime: time.Now(), isDir: true}, nil
+	mt := d.modTime
+	if mt.IsZero() && d.mfs != nil {
+		if folderInfo, _, isFolder, err := d.mfs.resolvePath(d.path); err == nil && isFolder && folderInfo != nil && string(folderInfo.ModificationDate) != "" {
+			mt = parseTime(folderInfo.ModificationDate)
+		}
+	}
+	return &VirtualFileInfo{name: path.Base(d.path), size: 0, mode: os.ModeDir | 0755, modTime: mt, isDir: true}, nil
 }
 
 func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
@@ -2478,6 +2877,9 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 		d.mfs.cacheMu.RLock()
 		var tombstonesToClear []string
 		for _, s := range subs {
+			if strings.EqualFold(s.Name, ProxyInternalDir) {
+				continue
+			}
 			childPath := path.Clean(path.Join(d.path, s.Name))
 			childLower := strings.ToLower(childPath)
 			if exp, isTomb := d.mfs.deletedTombstones[childLower]; isTomb && now.Before(exp) {
@@ -2522,6 +2924,26 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			}
 		}
 		d.mfs.cacheMu.RUnlock()
+
+		if ms != nil {
+			if vFiles, vErr := ms.ListVirtualEmptyFilesInFolder(d.folderID); vErr == nil {
+				d.mfs.cacheMu.RLock()
+				for _, vf := range vFiles {
+					childPath := path.Clean(path.Join(d.path, vf.Name))
+					childLower := strings.ToLower(childPath)
+					if exp, isTomb := d.mfs.deletedTombstones[childLower]; isTomb && now.Before(exp) {
+						continue
+					}
+					name := vf.Name
+					if !seen[name] && !isOSJunk(name) && !isDuplicatiTestPath(name) {
+						seen[name] = true
+						modTime := parseTime(sapi.FlexDate(vf.ModTime))
+						list = append(list, &VirtualFileInfo{name: name, size: 0, mode: 0644, modTime: modTime, isDir: false})
+					}
+				}
+				d.mfs.cacheMu.RUnlock()
+			}
+		}
 
 		if len(tombstonesToClear) > 0 {
 			d.mfs.cacheMu.Lock()

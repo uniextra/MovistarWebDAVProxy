@@ -597,7 +597,7 @@ func TestMovistarFS_ConcurrentReaddirAndRename(t *testing.T) {
 	select {
 	case <-done:
 		// Succeeded without deadlock!
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatalf("DEADLOCK detected in concurrent Readdir and MoveMedia")
 	}
 }

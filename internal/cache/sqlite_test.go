@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/sapi"
@@ -410,11 +409,11 @@ func TestSyncChanges_MockSAPI(t *testing.T) {
 		if strings.Contains(r.URL.Path, "/profile/changes") {
 			capturedFrom = r.URL.Query().Get("from")
 
-			if capturedFrom == "19700101T000000Z" {
+			if capturedFrom == "0" || capturedFrom == "19700101T000000Z" {
 				// Initial full bootstrap changes
 				resp := map[string]interface{}{
-					"requesttime":  1794389693000,
-					"responsetime": 1794389695000,
+					"requesttime":  int64(1794389693000),
+					"responsetime": int64(1794389695000),
 					"data": map[string]interface{}{
 						"folder": map[string]interface{}{
 							"N": []int64{10, 20},
@@ -433,8 +432,8 @@ func TestSyncChanges_MockSAPI(t *testing.T) {
 
 			// Incremental change
 			resp := map[string]interface{}{
-				"requesttime":  1794389700000,
-				"responsetime": 1794389701000,
+				"requesttime":  int64(1794389700000),
+				"responsetime": int64(1794389701000),
 				"data": map[string]interface{}{
 					"folder": map[string]interface{}{
 						"D": []int64{20},
@@ -501,8 +500,8 @@ func TestSyncChanges_MockSAPI(t *testing.T) {
 		t.Fatalf("expected 4 changed items in bootstrap, got %d", changed)
 	}
 
-	if capturedFrom != "19700101T000000Z" {
-		t.Errorf("expected cursor '19700101T000000Z', got %q", capturedFrom)
+	if capturedFrom != "0" {
+		t.Errorf("expected cursor '0', got %q", capturedFrom)
 	}
 
 	// Verify items stored
@@ -521,12 +520,12 @@ func TestSyncChanges_MockSAPI(t *testing.T) {
 		t.Fatalf("media 101 not synced: %+v (err=%v)", m101, err)
 	}
 
-	// Verify cursor was updated to formatted time
+	// Verify cursor was updated to epoch ms
 	cursor, err := store.GetSyncState("last_sync_cursor")
 	if err != nil || cursor == "" {
 		t.Fatalf("last_sync_cursor not updated: %q (err=%v)", cursor, err)
 	}
-	expectedTime := time.UnixMilli(1794389693000).UTC().Format("20060102T150405Z")
+	expectedTime := "1794389693000"
 	if cursor != expectedTime {
 		t.Errorf("expected cursor %q, got %q", expectedTime, cursor)
 	}
@@ -557,7 +556,7 @@ func TestSyncChanges_MockSAPI(t *testing.T) {
 
 	// Cursor updated to second requesttime
 	newCursor, _ := store.GetSyncState("last_sync_cursor")
-	expectedTime2 := time.UnixMilli(1794389700000).UTC().Format("20060102T150405Z")
+	expectedTime2 := "1794389700000"
 	if newCursor != expectedTime2 {
 		t.Errorf("expected updated cursor %q, got %q", expectedTime2, newCursor)
 	}
@@ -566,8 +565,8 @@ func TestSyncChanges_MockSAPI(t *testing.T) {
 	noChangesHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
-			"requesttime":  1794389710000,
-			"responsetime": 1794389711000,
+			"requesttime":  int64(1794389710000),
+			"responsetime": int64(1794389711000),
 			"data":         map[string]interface{}{},
 		}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -633,8 +632,8 @@ func TestSyncChanges_UpdatesParentFolderModificationDateAndClearsTombstones(t *t
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "profile/changes") {
 			resp := map[string]interface{}{
-				"requesttime":  1794389800000,
-				"responsetime": 1794389801000,
+				"requesttime":  int64(1794389800000),
+				"responsetime": int64(1794389801000),
 				"data": map[string]interface{}{
 					"file": map[string]interface{}{
 						"N": []int64{500},
@@ -683,7 +682,7 @@ func TestSyncChanges_UpdatesParentFolderModificationDateAndClearsTombstones(t *t
 	if err != nil || f10 == nil {
 		t.Fatalf("GetFolderByID(10) failed: %v", err)
 	}
-	expectedMod := time.UnixMilli(1794389800000).UTC().Format("20060102T150405Z")
+	expectedMod := "1794389800000"
 	if string(f10.ModificationDate) != expectedMod {
 		t.Errorf("expected parent folder modification_date %q, got %q", expectedMod, f10.ModificationDate)
 	}

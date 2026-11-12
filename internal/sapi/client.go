@@ -3,6 +3,7 @@ package sapi
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -286,19 +287,20 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		return nil, err
 	}
 
-	// Transporte HTTP/2 nativo con ALPN y pooling de conexiones:
-	// CloudFront WAF requiere HTTP/2 (ALPN h2) para peticiones a la API SAPI (/sapi/*).
+	// Transporte HTTP/1.1 nativo igual al cliente oficial de Windows (Poco C++ Win32).
+	// Desactivamos HTTP/2 (TLSNextProto vacío) para replicar la negociación TLS/HTTP del cliente oficial.
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2:     true,
+		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20, // <- IMPRESCINDIBLE: evita destruir sockets idle hacia micloud.movistar.es
+		MaxIdleConnsPerHost:   20,
 	}
 
 	httpClient := &http.Client{
@@ -317,7 +319,7 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		}
 	}
 
-	var pacing time.Duration
+	pacing := 100 * time.Millisecond
 	if envPacing := strings.TrimSpace(os.Getenv("SAPI_PACING_MS")); envPacing != "" {
 		if ms, err := strconv.Atoi(envPacing); err == nil && ms >= 0 {
 			pacing = time.Duration(ms) * time.Millisecond
@@ -419,19 +421,15 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	vk := c.cfg.ValidationKey
 	c.mu.RUnlock()
 
-	if vk == "" {
+	if vk == "" || strings.Contains(rawURL, "validationkey=") {
 		return rawURL
 	}
 
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
+	sep := "?"
+	if strings.Contains(rawURL, "?") {
+		sep = "&"
 	}
-
-	q := u.Query()
-	q.Set("validationkey", vk)
-	u.RawQuery = q.Encode()
-	return u.String()
+	return rawURL + sep + "validationkey=" + url.QueryEscape(vk)
 }
 
 func (c *Client) processSAPIResponse(resp *http.Response) {
@@ -675,6 +673,16 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	if cfg.AccessToken != "" {
 		req.Header.Set("Authorization", auth.BuildOAuthHeader(cfg.AccessToken, cfg.RefreshToken, cfg.LastRefreshDate, cfg.ExpiresIn))
 	}
+	if req.Header.Get("Cookie") == "" && (cfg.ValidationKey != "" || cfg.JSessionID != "") {
+		var parts []string
+		if cfg.JSessionID != "" {
+			parts = append(parts, "JSESSIONID="+cfg.JSessionID)
+		}
+		if cfg.ValidationKey != "" {
+			parts = append(parts, "validationkey="+cfg.ValidationKey)
+		}
+		req.Header.Set("Cookie", strings.Join(parts, "; "))
+	}
 
 	// Asegurar validationkey en la URL si no está presente
 	req.URL, _ = url.Parse(c.appendValidationKey(req.URL.String()))
@@ -689,12 +697,6 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	}
 
 	c.processSAPIResponse(resp)
-
-	if resp.StatusCode == http.StatusForbidden {
-		if t, ok := c.httpClient.Transport.(*http.Transport); ok {
-			t.CloseIdleConnections()
-		}
-	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		if req.Body != nil && req.GetBody == nil {
@@ -726,6 +728,16 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 				}
 				newReq.Header = req.Header.Clone()
 				newReq.Header.Set("Authorization", auth.BuildOAuthHeader(newCfg.AccessToken, newCfg.RefreshToken, newCfg.LastRefreshDate, newCfg.ExpiresIn))
+				if newCfg.ValidationKey != "" || newCfg.JSessionID != "" {
+					var parts []string
+					if newCfg.JSessionID != "" {
+						parts = append(parts, "JSESSIONID="+newCfg.JSessionID)
+					}
+					if newCfg.ValidationKey != "" {
+						parts = append(parts, "validationkey="+newCfg.ValidationKey)
+					}
+					newReq.Header.Set("Cookie", strings.Join(parts, "; "))
+				}
 				newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
 
 				resp2, err2 := c.httpClient.Do(newReq)
@@ -1289,26 +1301,25 @@ func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
 		action = "delete"
 	}
 	u := fmt.Sprintf("%s/media/folder?action=%s&id=%d", c.baseURL, action, folderID)
-	payload := map[string]interface{}{
-		"data": map[string]interface{}{
-			"folders": []int64{folderID},
-		},
-	}
-	bodyBytes, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequest("POST", u, strings.NewReader(""))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 	resp, err := c.DoRequest(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("delete folder failed (%d): %s", resp.StatusCode, string(b))
+	bStr := string(b)
+	if strings.Contains(bStr, "MED-1022") {
+		return nil
 	}
 
 	var res struct {
@@ -1318,8 +1329,16 @@ func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
+		if res.Error.Code == "MED-1022" {
+			return nil
+		}
 		return fmt.Errorf("delete folder API error: %s (%s)", res.Error.Message, res.Error.Code)
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("delete folder failed (%d): %s", resp.StatusCode, bStr)
+	}
+
 	return nil
 }
 
@@ -1466,99 +1485,92 @@ func mediaPluralForKind(kind string) string {
 	}
 }
 
+var (
+	deleteRetries      = 5
+	deleteRetryBackoff = func(attempt int) time.Duration {
+		return time.Duration(2500+attempt*1500) * time.Millisecond
+	}
+	delete403Backoff = func(attempt int) time.Duration {
+		return time.Duration(3+attempt*2) * time.Second
+	}
+)
+
 func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
-	const maxRetries = 10
-	const delay = 1500 * time.Millisecond
-
-	kind := "file"
-	if len(nameOrKind) > 0 && nameOrKind[0] != "" {
-		cand := nameOrKind[0]
-		if strings.Contains(cand, ".") {
-			cand = mediaKindForName(cand)
-		}
-		if cand != "" {
-			kind = cand
-		}
-	}
-
-	kinds := []string{kind}
-	if kind != "file" {
-		kinds = append(kinds, "file")
-	}
-
-	var parsedID interface{} = mediaID
-	if idNum, err := strconv.ParseInt(mediaID, 10, 64); err == nil {
-		parsedID = idNum
-	}
+	maxRetries := deleteRetries
+	u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, mediaID)
 
 	var lastErr error
-	for _, k := range kinds {
-		plural := mediaPluralForKind(k)
-		u := fmt.Sprintf("%s/media/%s?action=delete&softdelete=true", c.baseURL, k)
-
-		payload := map[string]interface{}{
-			"data": map[string]interface{}{
-				plural: []interface{}{parsedID},
-			},
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", u, strings.NewReader(""))
+		if err != nil {
+			return err
 		}
-		bodyBytes, _ := json.Marshal(payload)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 
-		for attempt := 0; attempt <= maxRetries; attempt++ {
-			req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
-			if err != nil {
-				return err
-			}
-			req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+		resp, err := c.DoRequest(req)
+		if err != nil {
+			lastErr = err
+			break
+		}
 
-			resp, err := c.DoRequest(req)
-			if err != nil {
-				lastErr = err
-				break
-			}
-			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode == http.StatusNotFound {
 			_ = resp.Body.Close()
+			return nil
+		}
 
-			bStr := string(b)
-			if strings.Contains(bStr, "MED-1017") {
-				if attempt < maxRetries {
-					logger.Log("[SAPI] ⏳ Archivo en validación asíncrona (MED-1017) durante borrado. Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
-					time.Sleep(delay)
-					continue
-				}
-				lastErr = fmt.Errorf("delete file failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
-				break
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+
+		bStr := string(b)
+		if strings.Contains(bStr, "MED-1017") {
+			if attempt < maxRetries {
+				// Validación asíncrona dura entre 5 y 15s. Un backoff progresivo (2.5s, 4s, 5.5s, 7s, 8.5s)
+				// evita activar la regla de rate-limiting (403) de AWS CloudFront WAF por ráfagas de POSTs idénticos.
+				backoff := deleteRetryBackoff(attempt)
+				logger.Log("[SAPI] ⏳ Archivo en validación asíncrona (MED-1017) durante borrado. Reintentando en %v (%d/%d)...", backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
 			}
+			lastErr = fmt.Errorf("delete file failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
+			break
+		}
 
-			// MED-1022: "File already soft deleted" -> éxito idempotente (igual que la app oficial)
-			if strings.Contains(bStr, "MED-1022") {
+		// MED-1022: "File already soft deleted" -> éxito idempotente (igual que la app oficial)
+		if strings.Contains(bStr, "MED-1022") {
+			return nil
+		}
+
+		// Si CloudFront devuelve 403 (posible rate limit WAF), reintentar con backoff
+		if resp.StatusCode == http.StatusForbidden {
+			if attempt < maxRetries {
+				backoff := delete403Backoff(attempt)
+				logger.Log("[SAPI] ⚠️ 403 de CloudFront al borrar '%s'. Esperando %v (%d/%d)...", mediaID, backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+		}
+
+		var res struct {
+			Success interface{} `json:"success"`
+			Error   *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
+			if res.Error.Code == "MED-1022" {
 				return nil
 			}
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				lastErr = fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
-				break
-			}
-
-			var res struct {
-				Success interface{} `json:"success"`
-				Error   *struct {
-					Code    string `json:"code"`
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
-				if res.Error.Code == "MED-1022" {
-					return nil
-				}
-				lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
-				break
-			}
-
-			return nil
+			lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
+			break
 		}
-		if lastErr == nil {
-			return nil
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
+			break
 		}
+
+		return nil
 	}
 	return lastErr
 }
@@ -1598,8 +1610,8 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 	}
 	metaBytes, _ := json.Marshal(meta)
 
-	const maxRetries = 14
-	const retryDelay = 1500 * time.Millisecond
+	const maxRetries = 5
+	const retryDelay = 2500 * time.Millisecond
 	_, canRetry := reader.(io.ReadSeeker)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -1664,8 +1676,9 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		// MED-1017 check: Media is being validated asynchronously (~4-10s)
 		if strings.Contains(bStr, "MED-1017") || strings.Contains(strings.ToLower(bStr), "media not validated") {
 			if attempt < maxRetries && canRetry {
-				logger.Log("[SAPI] ⏳ Servidor validando media asíncronamente (MED-1017). Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
-				time.Sleep(retryDelay)
+				backoff := 2500*time.Millisecond + time.Duration(attempt)*1500*time.Millisecond
+				logger.Log("[SAPI] ⏳ Servidor validando media asíncronamente (MED-1017). Reintentando en %v (%d/%d)...", backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
 				continue
 			}
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
@@ -1718,8 +1731,9 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 
 		if res.Error != nil && res.Error.Code == "MED-1017" {
 			if attempt < maxRetries {
-				logger.Log("[SAPI] ⏳ Servidor validando asíncronamente (MED-1017 en error body). Reintentando en 1.5s (%d/%d)...", attempt+1, maxRetries)
-				time.Sleep(retryDelay)
+				backoff := 2500*time.Millisecond + time.Duration(attempt)*1500*time.Millisecond
+				logger.Log("[SAPI] ⏳ Servidor validando asíncronamente (MED-1017 en error body). Reintentando en %v (%d/%d)...", backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
 				continue
 			}
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)

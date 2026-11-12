@@ -34,7 +34,40 @@ var (
 	re200Lower      = regexp.MustCompile(`(?i)</d:prop>\s*<d:status>HTTP/1\.1 200 OK</d:status>`)
 	reRespUpper     = regexp.MustCompile(`(?i)</D:response>`)
 	reRespLower     = regexp.MustCompile(`(?i)</d:response>`)
+	reResponseTag   = regexp.MustCompile(`(?i)<[dD]:response[\s>]`)
 )
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode        int
+	bytesWritten      int64
+	propfindResponses int
+	isPropfind        bool
+}
+
+func (lw *loggingResponseWriter) WriteHeader(code int) {
+	lw.statusCode = code
+	lw.ResponseWriter.WriteHeader(code)
+}
+
+func (lw *loggingResponseWriter) Write(p []byte) (int, error) {
+	if lw.statusCode == 0 {
+		lw.statusCode = http.StatusOK
+	}
+	n, err := lw.ResponseWriter.Write(p)
+	lw.bytesWritten += int64(n)
+	if lw.isPropfind && len(p) > 0 {
+		matches := reResponseTag.FindAllIndex(p, -1)
+		lw.propfindResponses += len(matches)
+	}
+	return n, err
+}
+
+func (lw *loggingResponseWriter) Flush() {
+	if f, ok := lw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 
 type Server struct {
 	handler        *webdav.Handler
@@ -153,6 +186,13 @@ func (s *Server) FS() *MovistarFS {
 	return s.fs
 }
 
+func (s *Server) ResolvePath(rawPath string) (*sapi.FolderItem, *sapi.MediaItem, bool, error) {
+	if s == nil || s.fs == nil {
+		return nil, nil, false, errors.New("webdav server or fs not initialized")
+	}
+	return s.fs.ResolvePath(rawPath)
+}
+
 func (s *Server) GetStorageSpace() *sapi.StorageSpace {
 	if s.fs != nil {
 		return s.fs.GetStorageSpace()
@@ -217,20 +257,64 @@ func (s *Server) ConnState(c net.Conn, state http.ConnState) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !s.IsRunning() {
-		http.Error(w, "WebDAV Server Paused", http.StatusServiceUnavailable)
-		return
-	}
-
+	start := time.Now()
 	clientIP := config.ExtractClientIP(r)
 	method := r.Method
 	urlPath := r.URL.Path
+	isPropfind := method == "PROPFIND"
+
+	var propfindReqBody []byte
+	if isPropfind && r.Body != nil {
+		bodyBuf := make([]byte, 2048)
+		n, _ := io.ReadFull(r.Body, bodyBuf)
+		if n > 0 {
+			propfindReqBody = bodyBuf[:n]
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(propfindReqBody), r.Body))
+		}
+	}
+
+	lw := &loggingResponseWriter{
+		ResponseWriter: w,
+		isPropfind:     isPropfind,
+	}
+
+	defer func() {
+		dur := time.Since(start)
+		code := lw.statusCode
+		if code == 0 {
+			code = http.StatusOK
+		}
+		depth := r.Header.Get("Depth")
+		if depth == "" {
+			depth = "-"
+		}
+		if isPropfind {
+			logger.Log("[WebDAV] ⚡ %s -> %s %s [Depth: %s] => %d (%d responses, %d bytes, %v)",
+				clientIP, method, urlPath, depth, code, lw.propfindResponses, lw.bytesWritten, dur)
+		} else {
+			logger.Log("[WebDAV] ⚡ %s -> %s %s => %d (%d bytes, %v)",
+				clientIP, method, urlPath, code, lw.bytesWritten, dur)
+		}
+
+		if code == http.StatusNotFound && (method == "PROPFIND" || method == "GET") && logger.IsDebugEnabled() {
+			if isPropfind {
+				logger.Log("[WebDAV][DEBUG] 404 Not Found en %s %s | Requested Props: %s", method, urlPath, string(propfindReqBody))
+			} else {
+				logger.Log("[WebDAV][DEBUG] 404 Not Found en %s %s", method, urlPath)
+			}
+		}
+	}()
+
+	if !s.IsRunning() {
+		http.Error(lw, "WebDAV Server Paused", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Informar al cliente Windows que es un servidor WebDAV oficial.
 	// Nota: Windows WebClient (Mini-Redirector) envía OPTIONS sin credenciales
 	// durante el descubrimiento inicial de la unidad de red antes de enviar Basic Auth.
 	if method == "OPTIONS" {
-		w.Header().Set("MS-Author-Via", "DAV")
+		lw.Header().Set("MS-Author-Via", "DAV")
 	}
 
 	// 1. Validación Basic Auth / NTLMv2 y rate-limit por IP (salvo OPTIONS sin credenciales para discovery)
@@ -244,7 +328,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if config.IsNTLMHeader(authHeader) {
 			if s.rateLimiter.IsBlocked(clientIP) {
 				logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
-				http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
+				http.Error(lw, "Too Many Authentication Failures", http.StatusTooManyRequests)
 				return
 			}
 			challenge, isType1, ntlmUser, ok := s.ntlmAuth.HandleHandshake(connKey, clientIP, authHeader, s.authCfg)
@@ -252,8 +336,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if r.Body != nil {
 					_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
 				}
-				w.Header().Set("WWW-Authenticate", challenge)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				lw.Header().Set("WWW-Authenticate", challenge)
+				http.Error(lw, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 			if !ok {
@@ -264,11 +348,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					s.rateLimiter.RecordFailure(clientIP)
 					logger.Log("[WebDAV] 🔒 Intento de acceso NTLM fallido desde %s (usuario: %s)", clientIP, logger.Mask(ntlmUser))
 				}
-				w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+				lw.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
 				if s.shouldOfferNTLM(r) {
-					w.Header().Add("WWW-Authenticate", "NTLM")
+					lw.Header().Add("WWW-Authenticate", "NTLM")
 				}
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				http.Error(lw, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 			s.rateLimiter.Reset(clientIP)
@@ -281,7 +365,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !connAuthed && (method != "OPTIONS" || hasAuth) {
 				if s.rateLimiter.IsBlocked(clientIP) {
 					logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
-					http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
+					http.Error(lw, "Too Many Authentication Failures", http.StatusTooManyRequests)
 					return
 				}
 				if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
@@ -292,11 +376,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						s.rateLimiter.RecordFailure(clientIP)
 						logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s, %s)", clientIP, logger.Mask(rawUser), config.DescribeCredentialShape(rawUser, pass))
 					}
-					w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+					lw.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
 					if s.shouldOfferNTLM(r) {
-						w.Header().Add("WWW-Authenticate", "NTLM")
+						lw.Header().Add("WWW-Authenticate", "NTLM")
 					}
-					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					http.Error(lw, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
 				s.rateLimiter.Reset(clientIP)
@@ -307,33 +391,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Eliminar la cabecera Authorization tras validarla para que x/net/webdav la procese limpiamente
 	r.Header.Del("Authorization")
 
-	// Log de operaciones WebDAV
-	if method == "OPTIONS" || method == "PUT" || method == "GET" || method == "DELETE" || method == "MOVE" ||
-		method == "MKCOL" || method == "PROPFIND" || method == "HEAD" || method == "LOCK" || method == "UNLOCK" {
-		logger.Log("[WebDAV] ⚡ %s -> %s %s", clientIP, method, urlPath)
-	}
-
 	// Interceptar sondas de prueba de Duplicati (duplicati-access-privileges-test.tmp)
 	// para absorberlas completamente en memoria sin enviar extensiones .tmp a Telefónica SAPI
-	if s.handleDuplicatiProbe(w, r, urlPath) {
+	if s.handleDuplicatiProbe(lw, r, urlPath) {
 		return
 	}
 
 	// 2. Rechazar PUT a colecciones según RFC 4918 §9.7.1 y validar límite de subida
 	if method == "PUT" {
 		if strings.HasSuffix(urlPath, "/") {
-			http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
+			http.Error(lw, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
 			return
 		}
 		if folder, _, isFolder, err := s.fs.resolvePath(urlPath); err == nil && isFolder && folder != nil {
 			logger.Log("[WebDAV] ℹ️ Rechazado PUT sobre carpeta existente: '%s' (RFC 4918 405 Method Not Allowed)", urlPath)
-			http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
+			http.Error(lw, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
 			return
 		}
 		maxBytes := GetMaxUploadBytes()
 		if maxBytes > 0 && r.ContentLength > maxBytes {
 			logger.Log("[WebDAV] ❌ Subida rechazada por superar límite (%d bytes > %d bytes): '%s'", r.ContentLength, maxBytes, urlPath)
-			http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+			http.Error(lw, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -352,9 +430,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer s.activeWG.Done()
 
 		// Conservar la fecha de modificación original si el cliente envía X-OC-Mtime
-		r = withOCMtime(w, r)
+		r = withOCMtime(lw, r)
 
-		pw := &putStatusInterceptor{ResponseWriter: w, exceededFlag: &exceededFlag, guard: guard}
+		pw := &putStatusInterceptor{ResponseWriter: lw, exceededFlag: &exceededFlag, guard: guard}
 		s.handler.ServeHTTP(pw, r)
 		if r.Context().Err() != nil && s.lockSys != nil {
 			s.lockSys.unlockPath(time.Now(), urlPath)
@@ -372,7 +450,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				logger.Log("[WebDAV] 🔓 Liberado bloqueo huérfano antes de DELETE sobre '%s'", urlPath)
 			}
 		}
-		s.handler.ServeHTTP(w, r)
+		s.handler.ServeHTTP(lw, r)
 		// RFC 4918 §7.4: eliminar un recurso debe eliminar todos sus bloqueos
 		if s.lockSys != nil {
 			s.lockSys.unlockPath(time.Now(), urlPath)
@@ -387,7 +465,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
-		w.Header().Set("Content-Type", ct)
+		lw.Header().Set("Content-Type", ct)
 
 		// Vigilar que el cuerpo llegue entero: si O2 responde 200/206 con la longitud
 		// anunciada pero no entrega ni un byte (p. ej. un archivo recién subido que aún
@@ -395,19 +473,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 200/206 truncado que el cliente tomaría por bueno. Un cuerpo corto (truncado
 		// a mitad de la transmisión) se deja como está: el cliente ya lo detecta con
 		// 'unexpected EOF', igual que hasta ahora.
-		g := &getBodyGuard{ResponseWriter: w, isHEAD: method == "HEAD"}
+		g := &getBodyGuard{ResponseWriter: lw, isHEAD: method == "HEAD"}
 		s.handler.ServeHTTP(g, r)
 		g.finish()
 		return
 	}
 
 	// 5. Interceptar PROPFIND para inyectar cuotas RFC 4331 si las solicitan (Hyper Backup / Duplicati)
-	if method == "PROPFIND" {
+	if isPropfind {
 		if s.fs != nil {
 			s.fs.MaybeTriggerSync()
 		}
 		rw := &responseInterceptor{
-			ResponseWriter: w,
+			ResponseWriter: lw,
 			body:           bytes.NewBuffer(nil),
 			fs:             s.fs,
 		}
@@ -416,7 +494,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.handler.ServeHTTP(w, r)
+	s.handler.ServeHTTP(lw, r)
 }
 
 // getBodyGuard envuelve el ResponseWriter de un GET/HEAD y retrasa el envío de la
@@ -591,21 +669,20 @@ func (r *responseInterceptor) flush() {
 		// 2. Limpiar cualquier <D:propstat> 404 que haya quedado con <D:prop></D:prop> vacío
 		rawXML = empty404Regex.ReplaceAllString(rawXML, "")
 
-		// 3. Inyectar quotaXML
-		has200OK := strings.Contains(strings.ToLower(rawXML), "http/1.1 200 ok")
-		if has200OK {
-			if re200.MatchString(rawXML) {
-				rawXML = re200.ReplaceAllString(rawXML, quotaXML+"</"+prefix+":prop><"+prefix+":status>HTTP/1.1 200 OK</"+prefix+":status>")
+		// 3. Inyectar quotaXML SOLO en el primer <response> (el recurso solicitado)
+		if locResp := reResp.FindStringIndex(rawXML); locResp != nil {
+			firstResp := rawXML[:locResp[1]]
+			restXML := rawXML[locResp[1]:]
+
+			if loc200 := re200.FindStringIndex(firstResp); loc200 != nil {
+				firstResp = firstResp[:loc200[0]] + quotaXML + "</" + prefix + ":prop><" + prefix + ":status>HTTP/1.1 200 OK</" + prefix + ":status>" + firstResp[loc200[1]:]
+			} else if idxProp := strings.Index(firstResp, "</"+prefix+":prop>"); idxProp != -1 {
+				firstResp = firstResp[:idxProp] + quotaXML + firstResp[idxProp:]
 			} else {
-				// Fallback: reemplazar en el primer </D:prop>
-				rawXML = strings.Replace(rawXML, "</"+prefix+":prop>", quotaXML+"</"+prefix+":prop>", 1)
+				newPropstat := fmt.Sprintf("<%[1]s:propstat><%[1]s:prop>%[2]s</%[1]s:prop><%[1]s:status>HTTP/1.1 200 OK</%[1]s:status></%[1]s:propstat>", prefix, quotaXML)
+				firstResp = firstResp[:locResp[0]] + newPropstat + firstResp[locResp[0]:]
 			}
-		} else {
-			// Inyectar un bloque completo propstat 200 OK antes del primer </D:response>
-			newPropstat := fmt.Sprintf("<%[1]s:propstat><%[1]s:prop>%[2]s</%[1]s:prop><%[1]s:status>HTTP/1.1 200 OK</%[1]s:status></%[1]s:propstat>", prefix, quotaXML)
-			if loc := reResp.FindStringIndex(rawXML); loc != nil {
-				rawXML = rawXML[:loc[0]] + newPropstat + rawXML[loc[0]:]
-			}
+			rawXML = firstResp + restXML
 		}
 	}
 
