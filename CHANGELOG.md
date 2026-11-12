@@ -2,6 +2,13 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.4.1] - 2026-11-12
+
+### 🛠️ Corrección de PAPI-0000 al reescribir archivos vacíos y zona horaria de logs
+
+- **PAPI-0000 / HTTP 405 en `storage_statistics.db.*` (HyperBackup):** cuando HyperBackup hacía un primer PUT de 0 bytes, el proxy emulaba el archivo y guardaba un ID `virtual:...`; el siguiente PUT con contenido reutilizaba ese ID virtual como `existingMediaID`, que SAPI rechazaba con `PAPI-0000: Unknown exception`. Ahora los IDs virtuales nunca se envían a SAPI (`sapiExistingID()`), el archivo real se sube como nuevo y se limpia la entrada virtual. Añadido test de regresión `TestVirtualEmptyFiles_OverwriteTransition`.
+- **Hora de los logs:** el contenedor arrancaba en UTC y los logs mostraban una hora menos en España. El `Dockerfile` y `docker-compose.yml` fijan `TZ=Europe/Madrid` (configurable con `TZ`), por lo que los timestamps coinciden con la hora local.
+
 ## [v2.4.0] - 2026-11-12
 
 ### 🛡️ Huella TLS uTLS + HTTP/2 real: fin de los 403 de CloudFront WAF (Issue #26)

@@ -2225,6 +2225,16 @@ func (w *WebDAVFileWriter) releasePathLock() {
 	}
 }
 
+// sapiExistingID devuelve el ID real de SAPI que se puede sobrescribir. Los IDs
+// virtual:<folder>:<name> existen solo en SQLite/memoria; enviarlos a SAPI provoca
+// PAPI-0000 / HTTP 405 al convertir un archivo vacío emulado en uno con contenido.
+func (w *WebDAVFileWriter) sapiExistingID() string {
+	if strings.HasPrefix(w.existingID, "virtual:") {
+		return ""
+	}
+	return w.existingID
+}
+
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 || isControlOrLockFile(w.path) {
 		return
@@ -2245,7 +2255,7 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 			<-globalTransferSem
 			<-uploadSem
 		}()
-		media, err := w.mfs.client.UploadFileToFolder(w.name, pr, expectedSize, w.parentFolderID, mimeType, w.existingID, w.modTime)
+		media, err := w.mfs.client.UploadFileToFolder(w.name, pr, expectedSize, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
 		_ = pr.Close()
 		w.streamDone <- streamUploadResult{media: media, err: err}
 	}()
@@ -2507,7 +2517,7 @@ func (w *WebDAVFileWriter) Close() error {
 		}
 
 		mimeType := mime.TypeByExtension(filepath.Ext(w.name))
-		media, err = w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.existingID, w.modTime)
+		media, err = w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
 		<-globalTransferSem
 		<-uploadSem
 		if err != nil {

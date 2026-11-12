@@ -13,6 +13,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /movistar-pr
 # Etapa 2: Imagen Mínima Final (~20 MB)
 FROM alpine:3.21
 
+ENV TZ=Europe/Madrid
+
 RUN apk add --no-cache ca-certificates tzdata su-exec && \
     adduser -D -u 10001 app && \
     mkdir -p /app/tokens && \

@@ -18,6 +18,10 @@ import (
 	"movistar-webdav-proxy/internal/sapi"
 )
 
+// lastUploadDataID captura el "id" enviado en el multipart de la última subida
+// para comprobar que nunca se reenvía a SAPI un ID virtual:...
+var lastUploadDataID string
+
 func setupTestWebDAVServerWithDB(t *testing.T) (*Server, *cache.MetadataStore, string, func()) {
 	t.Helper()
 
@@ -79,15 +83,31 @@ func setupTestWebDAVServerWithDB(t *testing.T) (*Server, *cache.MetadataStore, s
 			})
 		case p == "/sapi/upload" && action == "save":
 			uploadsCount.Add(1)
-			name := r.URL.Query().Get("name")
-			bodyBytes, _ := io.ReadAll(r.Body)
-			if strings.EqualFold(name, ManifestFileName) {
-				manifestData = bodyBytes
+			var uploadName, uploadID string
+			if err := r.ParseMultipartForm(10 << 20); err == nil {
+				var meta struct {
+					Data struct {
+						ID   interface{} `json:"id"`
+						Name string      `json:"name"`
+					} `json:"data"`
+				}
+				_ = json.Unmarshal([]byte(r.FormValue("data")), &meta)
+				uploadName = meta.Data.Name
+				if s, ok := meta.Data.ID.(string); ok {
+					uploadID = s
+				}
+				if strings.EqualFold(uploadName, ManifestFileName) {
+					if f, _, err := r.FormFile("file"); err == nil {
+						manifestData, _ = io.ReadAll(f)
+						_ = f.Close()
+					}
+				}
 			}
+			lastUploadDataID = uploadID
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
 					"id":   "888",
-					"name": name,
+					"name": uploadName,
 					"url":  "/sapi/media/content?id=888",
 				},
 			})
@@ -274,11 +294,18 @@ func TestVirtualEmptyFiles_OverwriteTransition(t *testing.T) {
 	}
 
 	// 2. Sobrescribir con archivo NO vacío (10 bytes)
+	lastUploadDataID = ""
 	putNonEmpty := httptest.NewRequest("PUT", "/Backups/file.bin", strings.NewReader("0123456789"))
 	recNonEmpty := httptest.NewRecorder()
 	srv.ServeHTTP(recNonEmpty, putNonEmpty)
 	if recNonEmpty.Code != http.StatusCreated && recNonEmpty.Code != http.StatusOK && recNonEmpty.Code != http.StatusNoContent {
 		t.Fatalf("Non-empty overwrite PUT failed: %d", recNonEmpty.Code)
+	}
+	if strings.HasPrefix(lastUploadDataID, "virtual:") {
+		t.Fatalf("non-empty overwrite sent virtual ID to SAPI: %q", lastUploadDataID)
+	}
+	if lastUploadDataID != "" {
+		t.Fatalf("expected empty existing ID for virtual→real overwrite, got %q", lastUploadDataID)
 	}
 
 	// La entrada virtual debe haberse borrado
