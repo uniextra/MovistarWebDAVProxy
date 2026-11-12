@@ -283,6 +283,8 @@ type Client struct {
 	lastReqTime    time.Time
 	pacingInterval time.Duration
 
+	refreshFn func() bool // solo para pruebas: sustituye a RefreshSession (que llama a O2 de verdad)
+
 	waf       wafBreaker // pausa las llamadas a la API de O2 tras un 403 del cortafuegos (waf_breaker.go)
 	wafUpload wafBreaker // pausa las subidas (servidor de subidas) tras un 403 del cortafuegos en ese servidor
 }
@@ -782,6 +784,13 @@ func (c *Client) releaseSlot() {
 	}
 }
 
+func (c *Client) refreshSession() bool {
+	if c.refreshFn != nil {
+		return c.refreshFn()
+	}
+	return c.RefreshSession()
+}
+
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 	freno, que, quien := c.breakerFor(req)
 	if until := freno.blockedUntil(); !until.IsZero() {
@@ -864,6 +873,13 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		if req.Body != nil && req.GetBody == nil {
+			// Cuerpo en flujo (una subida): no se puede repetir aquí, pero sí renovar la sesión
+			// para que el reintento del llamante (la subida desde disco) ya vaya con credenciales
+			// válidas. Antes solo la renovaban las llamadas a la API; con la API en pausa por el
+			// WAF nadie la renovaba y cada subida daba 401 (12/11/2026).
+			if c.HasCredentials() && !c.IsSessionExpired() {
+				c.refreshSession()
+			}
 			return resp, nil
 		}
 		if c.HasCredentials() && !c.IsSessionExpired() {

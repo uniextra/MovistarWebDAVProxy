@@ -180,3 +180,31 @@ func TestWAFBreaker_SubidasYAPIPorSeparado(t *testing.T) {
 		t.Fatalf("con las subidas en pausa: esperado ErrWAFBlocked, obtenido %v", err)
 	}
 }
+
+// Una subida (cuerpo en flujo, sin GetBody) que recibe 401 no se puede repetir, pero debe
+// renovar la sesión para que el reintento desde disco funcione. Antes la renovaban solo
+// las llamadas a la API, y con la API en pausa por el WAF cada subida daba 401.
+func TestSubidaCon401RenuevaLaSesion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(config.AccountConfig{AccessToken: "a", RefreshToken: "r", ValidationKey: "vk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetBaseURLs(srv.URL+"/sapi", srv.URL)
+	var renovaciones int32
+	c.refreshFn = func() bool { atomic.AddInt32(&renovaciones, 1); return true }
+
+	cuerpo := io.MultiReader(strings.NewReader("foto")) // sin GetBody, como una subida en flujo
+	req, _ := http.NewRequest("POST", c.uploadURL+"/sapi/upload?action=save", cuerpo)
+	resp, err := c.DoRequest(req)
+	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("esperado el 401 devuelto al llamante: resp=%v err=%v", resp, err)
+	}
+	if n := atomic.LoadInt32(&renovaciones); n != 1 {
+		t.Fatalf("una subida con 401 debe renovar la sesión una vez; renovaciones=%d", n)
+	}
+}
