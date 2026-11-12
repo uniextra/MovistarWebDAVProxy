@@ -1,0 +1,64 @@
+name: "💡 Proponer una mejora"
+description: "Sugiere nuevas funcionalidades o mejoras para el proyecto."
+title: "[FEATURE] "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por contribuir a mejorar MovistarWebDAVProxy.
+
+        Utiliza este formulario para proponer nuevas funcionalidades, mejoras o cambios en el comportamiento actual del proyecto.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "¿Qué problema o necesidad resuelve?"
+      description: "Explica qué limitación has encontrado o qué necesidad tienes."
+      placeholder: "Actualmente no es posible..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Mejora o funcionalidad propuesta"
+      description: "Describe cómo te gustaría que funcionase."
+      placeholder: "Me gustaría poder..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternativas consideradas"
+      description: "¿Has probado alguna otra solución? ¿Existe alguna alternativa?"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: "Categoría de la propuesta"
+      description: "Selecciona el área relacionada con tu propuesta."
+      options:
+        - Autenticación y seguridad
+        - WebDAV y compatibilidad
+        - Movistar Cloud / O2 Cloud
+        - Docker y despliegue
+        - Rendimiento y estabilidad
+        - Interfaz y configuración
+        - Monitorización y logs
+        - Documentación
+        - Otra
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Información adicional"
+      description: "Añade ejemplos, capturas, referencias o cualquier otro detalle."
+    validations:
+      required: false

@@ -1,0 +1,72 @@
+name: "🐛 Reportar un error"
+description: "Informa de un problema o comportamiento inesperado."
+title: "[BUG] "
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por informar de un problema en MovistarWebDAVProxy.
+
+        Antes de continuar, comprueba que estás utilizando la última versión disponible y que el problema no ha sido reportado anteriormente.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Descripción del problema"
+      description: "Explica qué ocurre y cuál es el comportamiento inesperado."
+      placeholder: "Al intentar acceder a..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: "Pasos para reproducir el problema"
+      description: "Indica los pasos necesarios para reproducir el error."
+      placeholder: |
+        1. Iniciar el contenedor...
+        2. Conectar mediante WebDAV...
+        3. Intentar acceder a...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Comportamiento esperado"
+      description: "¿Qué debería ocurrir?"
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: "Entorno"
+      description: "Indica las versiones y plataformas utilizadas."
+      value: |
+        - MovistarWebDAVProxy:
+        - Sistema operativo:
+        - NAS / Servidor:
+        - Docker:
+        - Cliente WebDAV:
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs y mensajes de error"
+      description: "Incluye los logs relevantes. Elimina previamente contraseñas, tokens y datos personales."
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Información adicional"
+      description: "Capturas de pantalla, configuraciones o cualquier otro detalle relevante."
+    validations:
+      required: false
