@@ -283,7 +283,8 @@ type Client struct {
 	lastReqTime    time.Time
 	pacingInterval time.Duration
 
-	waf wafBreaker // pausa todas las llamadas a O2 tras un 403 del cortafuegos (waf_breaker.go)
+	waf       wafBreaker // pausa las llamadas a la API de O2 tras un 403 del cortafuegos (waf_breaker.go)
+	wafUpload wafBreaker // pausa las subidas (servidor de subidas) tras un 403 del cortafuegos en ese servidor
 }
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
@@ -782,21 +783,22 @@ func (c *Client) releaseSlot() {
 }
 
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
-	if until := c.waf.blockedUntil(); !until.IsZero() {
+	freno, que, quien := c.breakerFor(req)
+	if until := freno.blockedUntil(); !until.IsZero() {
 		return nil, wafBlockedError(until, req.Method, req.URL.Path)
 	}
 	c.acquireSlot()
 	defer c.releaseSlot()
 	// Las peticiones que esperaban turno cuando saltó el bloqueo tampoco se envían.
-	if until := c.waf.blockedUntil(); !until.IsZero() {
+	if until := freno.blockedUntil(); !until.IsZero() {
 		return nil, wafBlockedError(until, req.Method, req.URL.Path)
 	}
 	resp, err := c.doRequestLocked(req)
 	if err == nil && resp != nil {
 		if isWAFBlockResponse(resp) {
-			c.waf.trip()
+			freno.trip(que)
 		} else if resp.StatusCode < 500 {
-			c.waf.ok()
+			freno.ok(quien)
 		}
 	}
 	return resp, err

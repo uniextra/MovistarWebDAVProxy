@@ -427,10 +427,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1b. Bloqueo del cortafuegos de O2 (waf_breaker.go): mientras dure la pausa, las
-	// escrituras se rechazan con 503 + Retry-After sin llamar a O2. Antes llegaban al
-	// cliente como 409/500 genéricos y rclone las reintentaba una y otra vez, alargando el
-	// bloqueo. Las lecturas siguen sirviéndose desde la caché local de metadatos.
-	if s.rejectWriteDuringWAFBlock(lw, method) {
+	// escrituras que necesitan el servidor bloqueado se rechazan con 503 + Retry-After sin
+	// llamar a O2. Antes llegaban al cliente como 409/500 genéricos y rclone las reintentaba
+	// una y otra vez, alargando el bloqueo. Las lecturas se sirven de la caché local.
+	if s.rejectWriteDuringWAFBlock(lw, method, urlPath) {
 		return
 	}
 
@@ -921,18 +921,33 @@ func isExpectedNotFound(method string, err error) bool {
 	return false
 }
 
-// rejectWriteDuringWAFBlock responde 503 a los métodos que escriben en O2 mientras el
-// cliente SAPI está en pausa por un bloqueo del WAF. Devuelve true si ha respondido.
-func (s *Server) rejectWriteDuringWAFBlock(w http.ResponseWriter, method string) bool {
-	switch method {
-	case "PUT", "MKCOL", "DELETE", "MOVE", "COPY":
-	default:
-		return false
-	}
+// rejectWriteDuringWAFBlock responde 503 + Retry-After a las escrituras que necesitan un
+// servidor de O2 que está en pausa por un bloqueo del WAF. Devuelve true si ha respondido.
+//   - PUT: solo necesita el servidor de subidas (la consulta "¿existe ya?" a la API se
+//     salta sola si la API está en pausa). Se rechaza solo si están en pausa las subidas.
+//   - MKCOL: si la carpeta ya existe se resuelve en local (rclone hace un MKCOL antes de
+//     cada subida); solo crear una carpeta nueva necesita la API.
+//   - DELETE, MOVE, COPY: necesitan la API.
+func (s *Server) rejectWriteDuringWAFBlock(w http.ResponseWriter, method, urlPath string) bool {
 	if s.fs == nil || s.fs.client == nil {
 		return false
 	}
-	until := s.fs.client.WAFBlockedUntil()
+	var until time.Time
+	switch method {
+	case "PUT":
+		until = s.fs.client.WAFUploadBlockedUntil()
+	case "MKCOL":
+		until = s.fs.client.WAFBlockedUntil()
+		if !until.IsZero() {
+			if _, _, isFolder, err := s.fs.resolvePath(urlPath); err == nil && isFolder {
+				return false
+			}
+		}
+	case "DELETE", "MOVE", "COPY":
+		until = s.fs.client.WAFBlockedUntil()
+	default:
+		return false
+	}
 	if until.IsZero() {
 		return false
 	}
@@ -941,6 +956,6 @@ func (s *Server) rejectWriteDuringWAFBlock(w http.ResponseWriter, method string)
 		secs = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	http.Error(w, fmt.Sprintf("O2 Cloud firewall (WAF) block: writes paused until %s", until.Local().Format("15:04")), http.StatusServiceUnavailable)
+	http.Error(w, fmt.Sprintf("O2 Cloud firewall (WAF) block: %s paused until %s", strings.ToLower(method), until.Local().Format("15:04")), http.StatusServiceUnavailable)
 	return true
 }

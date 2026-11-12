@@ -145,3 +145,38 @@ func TestWAFBreaker_403DeSAPINoEsElCortafuegos(t *testing.T) {
 		t.Errorf("esperadas 3 peticiones a O2, hubo %d", n)
 	}
 }
+
+// La API y el servidor de subidas tienen frenos separados: con la API en pausa, una
+// subida sale; un 403 del WAF en las subidas pausa solo las subidas.
+func TestWAFBreaker_SubidasYAPIPorSeparado(t *testing.T) {
+	var modo atomic.Value
+	var hits int32
+	modo.Store("waf")
+	c := wafTestServer(t, &modo, &hits)
+
+	_, _ = get(t, c) // 403 en la API
+	if c.WAFBlockedUntil().IsZero() || !c.WAFUploadBlockedUntil().IsZero() {
+		t.Fatal("un 403 de la API debe pausar solo la API")
+	}
+
+	modo.Store("ok")
+	antes := atomic.LoadInt32(&hits)
+	req, _ := http.NewRequest("POST", c.uploadURL+"/sapi/upload?action=save", strings.NewReader("x"))
+	if resp, err := c.DoRequest(req); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("con la API en pausa la subida debe salir: resp=%v err=%v", resp, err)
+	}
+	if n := atomic.LoadInt32(&hits); n != antes+1 {
+		t.Fatalf("esperada 1 petición de subida, hubo %d", n-antes)
+	}
+
+	modo.Store("waf")
+	req, _ = http.NewRequest("POST", c.uploadURL+"/sapi/upload?action=save", strings.NewReader("x"))
+	_, _ = c.DoRequest(req)
+	if c.WAFUploadBlockedUntil().IsZero() {
+		t.Fatal("un 403 del WAF en las subidas debe pausar las subidas")
+	}
+	req, _ = http.NewRequest("POST", c.uploadURL+"/sapi/upload?action=save", strings.NewReader("x"))
+	if _, err := c.DoRequest(req); !errors.Is(err, ErrWAFBlocked) {
+		t.Fatalf("con las subidas en pausa: esperado ErrWAFBlocked, obtenido %v", err)
+	}
+}
