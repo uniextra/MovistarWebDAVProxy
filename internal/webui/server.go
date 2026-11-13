@@ -2,10 +2,13 @@ package webui
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/subtle"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,12 +32,32 @@ import (
 //go:embed templates/index.html
 var indexHTML []byte
 
+//go:embed templates/login.html
+var loginHTML []byte
+
+var loginTmpl = template.Must(template.New("login").Parse(string(loginHTML)))
+
 const (
-	maxBodyBytes    = 1 << 20 // 1 MB
-	loginStateTTL   = 10 * time.Minute
-	maxPendingLogin = 50
-	panelCSP        = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	maxBodyBytes       = 1 << 20 // 1 MB
+	loginStateTTL      = 10 * time.Minute
+	maxPendingLogin    = 50
+	sessionCookieName  = "mc_webui_session"
+	defaultSessionTTL  = 24 * time.Hour
+	rememberSessionTTL = 30 * 24 * time.Hour
+	panelCSP           = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
 )
+
+type webSession struct {
+	Username  string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
+type loginPageData struct {
+	Version  string
+	Error    string
+	Username string
+}
 
 type Server struct {
 	client       *sapi.Client
@@ -44,6 +67,8 @@ type Server struct {
 	loginState   map[string]*pendingLogin
 	authCfg      config.AuthConfig
 	rateLimiter  *config.AuthRateLimiter
+	sessionMu    sync.RWMutex
+	sessions     map[string]*webSession
 }
 
 type pendingLogin struct {
@@ -66,6 +91,7 @@ func NewServerWithAuth(client *sapi.Client, webdavServer *webdav.Server, authCfg
 		loginState:   make(map[string]*pendingLogin),
 		authCfg:      authCfg,
 		rateLimiter:  config.NewAuthRateLimiter(10, time.Minute),
+		sessions:     make(map[string]*webSession),
 	}
 
 	if client != nil {
@@ -97,6 +123,8 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/login", s.handleLogin)
+	mux.HandleFunc("/logout", s.handleLogout)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/status", s.handleStatus)
@@ -129,40 +157,93 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.authCfg.IsEnabled() {
-			clientIP := config.ExtractClientIP(r)
-			if s.rateLimiter.IsBlocked(clientIP) {
-				logger.Log("[WebUI] 🚫 IP bloqueada temporalmente por fallos de autenticación: %s", clientIP)
-				http.Error(w, "Too Many Authentication Failures", http.StatusTooManyRequests)
-				return
-			}
-			rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
-			if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
-				if hasAuth && (rawUser != "" || pass != "") {
-					s.rateLimiter.RecordFailure(clientIP)
-					logger.Log("[WebUI] 🔒 Intento de acceso fallido al panel desde %s (usuario: %s)", clientIP, logger.Mask(rawUser))
-				}
-				w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			s.rateLimiter.Reset(clientIP)
+		// Rutas públicas de autenticación web
+		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
+			next.ServeHTTP(w, r)
+			return
 		}
 
-		next.ServeHTTP(w, r)
+		if !s.authCfg.IsEnabled() {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if s.isAuthenticated(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// No autenticado
+		clientIP := config.ExtractClientIP(r)
+
+		// 1. Si el cliente envió cabecera de Basic Auth (e.g. curl o scripts automáticos con credenciales erróneas)
+		rawUser, _, _, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
+		if hasAuth {
+			s.rateLimiter.RecordFailure(clientIP)
+			logger.Log("[WebUI] 🔒 Intento de acceso Basic Auth fallido al panel desde %s (usuario: %s)", clientIP, logger.Mask(rawUser))
+			w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// 2. Si es una petición de navegación web (GET a "/" o con Accept: text/html)
+		accept := strings.ToLower(r.Header.Get("Accept"))
+		if r.Method == http.MethodGet && (r.URL.Path == "/" || strings.Contains(accept, "text/html")) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		// 3. Para peticiones AJAX / API sin cabecera de autenticación, devolver 401 Unauthorized sin WWW-Authenticate para evitar el popup del navegador
+		jsonResponse(w, http.StatusUnauthorized, map[string]interface{}{
+			"status":  "error",
+			"message": "Autenticación requerida. Inicia sesión en /login",
+		})
 	})
+}
+
+func isLoopbackHost(h string) bool {
+	h = strings.Trim(strings.ToLower(h), "[]")
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateSameOrigin(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
+	fwdHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+
+	if origin != "" {
+		if strings.EqualFold(origin, "null") {
+			logger.Log("[WebUI] 🚫 CSRF bloqueado: Origin='null' (contexto aislado o no confiable)")
+			return false
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			logger.Log("[WebUI] 🚫 CSRF bloqueado: Origin='%s' no válido", origin)
+			return false
+		}
+		if equalHost(u.Host, r.Host) || (fwdHost != "" && equalHost(u.Host, fwdHost)) {
+			return true
+		}
+		logger.Log("[WebUI] 🚫 CSRF bloqueado: Origin='%s' no coincide con Host='%s'", origin, r.Host)
 		return false
 	}
-	return equalHost(u.Host, r.Host)
+
+	referer := strings.TrimSpace(r.Header.Get("Referer"))
+	if referer != "" {
+		u, err := url.Parse(referer)
+		if err == nil && u.Host != "" {
+			if equalHost(u.Host, r.Host) || (fwdHost != "" && equalHost(u.Host, fwdHost)) {
+				return true
+			}
+			logger.Log("[WebUI] 🚫 CSRF bloqueado: Referer='%s' no coincide con Host='%s'", referer, r.Host)
+			return false
+		}
+	}
+
+	return true
 }
 
 func equalHost(a, b string) bool {
@@ -170,11 +251,29 @@ func equalHost(a, b string) bool {
 		return true
 	}
 	ha, pa, errA := net.SplitHostPort(a)
-	hb, pb, errB := net.SplitHostPort(b)
-	if errA == nil && errB == nil {
-		return strings.EqualFold(ha, hb) && pa == pb
+	if errA != nil {
+		ha = a
+		pa = ""
 	}
-	return false
+	hb, pb, errB := net.SplitHostPort(b)
+	if errB != nil {
+		hb = b
+		pb = ""
+	}
+
+	// Si ambos son loopback (localhost, 127.0.0.1, ::1, 0.0.0.0), se consideran equivalentes
+	if isLoopbackHost(ha) && isLoopbackHost(hb) {
+		if pa != "" && pb != "" {
+			return pa == pb
+		}
+		return true
+	}
+
+	if pa != "" && pb != "" && pa != pb {
+		return false
+	}
+
+	return strings.EqualFold(ha, hb)
 }
 
 func requirePost(w http.ResponseWriter, r *http.Request) bool {
@@ -224,6 +323,296 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(rendered)
 }
 
+func generateSessionToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func (s *Server) createSession(username string, remember bool) (string, time.Duration, error) {
+	token, err := generateSessionToken()
+	if err != nil {
+		return "", 0, err
+	}
+	ttl := defaultSessionTTL
+	if remember {
+		ttl = rememberSessionTTL
+	}
+	now := time.Now()
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	s.cleanupExpiredSessionsLocked(now)
+	s.sessions[token] = &webSession{
+		Username:  username,
+		CreatedAt: now,
+		ExpiresAt: now.Add(ttl),
+	}
+	return token, ttl, nil
+}
+
+func (s *Server) cleanupExpiredSessionsLocked(now time.Time) {
+	for token, sess := range s.sessions {
+		if now.After(sess.ExpiresAt) {
+			delete(s.sessions, token)
+		}
+	}
+}
+
+func (s *Server) validateSession(token string) bool {
+	if token == "" {
+		return false
+	}
+	now := time.Now()
+	s.sessionMu.RLock()
+	sess, ok := s.sessions[token]
+	s.sessionMu.RUnlock()
+	if !ok || sess == nil {
+		return false
+	}
+	if now.After(sess.ExpiresAt) {
+		s.sessionMu.Lock()
+		delete(s.sessions, token)
+		s.sessionMu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (s *Server) destroySession(token string) {
+	if token == "" {
+		return
+	}
+	s.sessionMu.Lock()
+	delete(s.sessions, token)
+	s.sessionMu.Unlock()
+}
+
+func isHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func (s *Server) getSessionToken(r *http.Request) string {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie == nil {
+		return ""
+	}
+	return strings.TrimSpace(cookie.Value)
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, ttl time.Duration) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(ttl.Seconds()),
+		Expires:  time.Now().Add(ttl),
+		Secure:   isHTTPS(r),
+	})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		Secure:   isHTTPS(r),
+	})
+}
+
+func (s *Server) isAuthenticated(r *http.Request) bool {
+	if !s.authCfg.IsEnabled() {
+		return true
+	}
+	token := s.getSessionToken(r)
+	if token != "" && s.validateSession(token) {
+		return true
+	}
+	_, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
+	if hasAuth && s.authCfg.Validate(cleanUser, pass) {
+		return true
+	}
+	return false
+}
+
+func isJSONRequest(r *http.Request) bool {
+	ct := strings.ToLower(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(ct, "application/json") {
+		return true
+	}
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	return strings.Contains(accept, "application/json") && !strings.Contains(accept, "text/html")
+}
+
+func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg, username string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	data := loginPageData{
+		Version:  config.Version,
+		Error:    errMsg,
+		Username: username,
+	}
+	if err := loginTmpl.Execute(w, data); err != nil {
+		logger.Log("[WebUI] ❌ Error renderizando plantilla de login: %v", err)
+	}
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.authCfg.IsEnabled() {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		if s.isAuthenticated(r) {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		clientIP := config.ExtractClientIP(r)
+		var errMsg string
+		if s.rateLimiter.IsBlocked(clientIP) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			errMsg = "Demasiados intentos fallidos. Por seguridad, tu IP ha sido bloqueada temporalmente. Espera unos minutos."
+		}
+		s.renderLoginPage(w, r, errMsg, "")
+
+	case http.MethodPost:
+		if !validateSameOrigin(r) {
+			if isJSONRequest(r) {
+				jsonResponse(w, http.StatusForbidden, map[string]interface{}{"status": "error", "message": "Origen no permitido (CSRF)"})
+			} else {
+				w.WriteHeader(http.StatusForbidden)
+				s.renderLoginPage(w, r, "Origen de solicitud no permitido (CSRF)", "")
+			}
+			return
+		}
+
+		clientIP := config.ExtractClientIP(r)
+		if s.rateLimiter.IsBlocked(clientIP) {
+			logger.Log("[WebUI] 🚫 IP bloqueada temporalmente por fallos de autenticación: %s", clientIP)
+			w.Header().Set("Retry-After", "60")
+			if isJSONRequest(r) {
+				jsonResponse(w, http.StatusTooManyRequests, map[string]interface{}{
+					"status":  "error",
+					"message": "Demasiados intentos de acceso fallidos. Por seguridad, tu IP ha sido bloqueada temporalmente.",
+				})
+				return
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+			s.renderLoginPage(w, r, "Demasiados intentos fallidos. Por seguridad, tu IP ha sido bloqueada temporalmente. Espera unos minutos.", "")
+			return
+		}
+
+		var username, password string
+		var remember bool
+
+		ct := strings.ToLower(r.Header.Get("Content-Type"))
+		if strings.HasPrefix(ct, "application/json") {
+			var body struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+				Remember bool   `json:"remember"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body); err != nil {
+				jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+					"status":  "error",
+					"message": "Datos de formulario inválidos",
+				})
+				return
+			}
+			username = body.Username
+			password = body.Password
+			remember = body.Remember
+		} else {
+			if err := r.ParseForm(); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				s.renderLoginPage(w, r, "Error al procesar el formulario", "")
+				return
+			}
+			username = r.FormValue("username")
+			password = r.FormValue("password")
+			rememberVal := strings.ToLower(strings.TrimSpace(r.FormValue("remember")))
+			remember = rememberVal == "1" || rememberVal == "true" || rememberVal == "on" || rememberVal == "yes"
+		}
+
+		cleanUser := config.NormalizeUsername(username)
+		if cleanUser == "" || password == "" || !s.authCfg.Validate(cleanUser, password) {
+			s.rateLimiter.RecordFailure(clientIP)
+			logger.Log("[WebUI] 🔒 Intento de login web fallido desde %s (usuario: %s)", clientIP, logger.Mask(username))
+			if isJSONRequest(r) {
+				jsonResponse(w, http.StatusUnauthorized, map[string]interface{}{
+					"status":  "error",
+					"message": "Usuario o contraseña incorrectos",
+				})
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			s.renderLoginPage(w, r, "Usuario o contraseña incorrectos", username)
+			return
+		}
+
+		s.rateLimiter.Reset(clientIP)
+		token, ttl, err := s.createSession(cleanUser, remember)
+		if err != nil {
+			logger.Log("[WebUI] ❌ Error generando token de sesión: %v", err)
+			if isJSONRequest(r) {
+				jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{
+					"status":  "error",
+					"message": "Error interno al iniciar sesión",
+				})
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			s.renderLoginPage(w, r, "Error interno del servidor", username)
+			return
+		}
+
+		s.setSessionCookie(w, r, token, ttl)
+		logger.Log("[WebUI] 🔓 Sesión web iniciada para %s desde %s", logger.Mask(cleanUser), clientIP)
+
+		if isJSONRequest(r) {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"status":   "ok",
+				"redirect": "/",
+			})
+			return
+		}
+
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	token := s.getSessionToken(r)
+	if token != "" {
+		s.destroySession(token)
+		s.clearSessionCookie(w, r)
+		logger.Log("[WebUI] 🔒 Sesión cerrada correctamente")
+	}
+	if isJSONRequest(r) {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"status":   "ok",
+			"redirect": "/login",
+		})
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "version": config.Version})
 }
@@ -239,8 +628,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status = "running"
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"status": status,
-		"phone":  logger.Mask(cfg.Phone),
+		"status":       status,
+		"phone":        logger.Mask(cfg.Phone),
+		"auth_enabled": s.authCfg.IsEnabled(),
 	})
 }
 
