@@ -49,7 +49,7 @@ func main() {
 		logger.Log("[WARNING] ⚠️ Configura WEBDAV_USER y WEBDAV_PASSWORD en tu entorno para proteger el acceso.")
 		logger.Log("=====================================================")
 	} else {
-		logger.Log("[Security] 🔒 Basic Auth habilitado para WebDAV (usuario: %s) y Panel Web (usuario: %s)", logger.Mask(davAuth.Username), logger.Mask(uiAuth.Username))
+		logger.Log("[Security] 🔒 Autenticación habilitada para WebDAV (Basic Auth: %s) y Panel Web (Formulario Web: %s)", logger.Mask(davAuth.Username), logger.Mask(uiAuth.Username))
 	}
 
 	cfg := config.LoadAccountConfig("")
