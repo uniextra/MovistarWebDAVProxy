@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -75,5 +76,37 @@ func TestBuildAndParseOAuthHeader(t *testing.T) {
 
 	if ParseOAuthResponseHeader("Bearer invalid") != nil {
 		t.Error("expected nil for non-oauth header")
+	}
+}
+
+func TestBuildOAuthHeaderMatchesOfficialClientFieldOrder(t *testing.T) {
+	header := BuildOAuthHeader("acc-123", "ref-456", 1700000000, "3600")
+	encoded := strings.TrimPrefix(header, "oauth ")
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode OAuth header: %v", err)
+	}
+
+	want := `{"data":{"accesstoken":"acc-123","lastrefreshdate":1700000000000,"expiresin":"3600","refreshtoken":"ref-456","platform":"windows"}}`
+	if string(decoded) != want {
+		t.Fatalf("OAuth header payload = %s, want %s", decoded, want)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(decoded, &parsed); err != nil {
+		t.Fatalf("OAuth header is not valid JSON: %v", err)
+	}
+}
+
+func TestDesktopUserAgentMatchesCurrentWindowsClient(t *testing.T) {
+	const want = "omh windows client 32.1.3.0"
+	if DesktopUserAgent != want {
+		t.Fatalf("DesktopUserAgent = %q, want %q", DesktopUserAgent, want)
+	}
+}
+
+func TestSAPIUserAgentUsesEdgeBrowserProfile(t *testing.T) {
+	if got := GetSAPIUserAgent(); !strings.Contains(got, "Edg/157.0.0.0") {
+		t.Fatalf("GetSAPIUserAgent() = %q, want Edge profile", got)
 	}
 }

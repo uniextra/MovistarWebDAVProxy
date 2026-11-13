@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"regexp"
@@ -24,12 +25,22 @@ const (
 	OAuthClientSecret = "e22fdd6b-636a-4bfc-bb4a-aa8ed6d131d8"
 	OAuthRedirectURI  = "https://micloud.movistar.es/ui/html/clientoauth.html"
 	ClientPlatform    = "windows"
-	DesktopUserAgent  = "omh windows client 32.0.7.1"
+	DesktopUserAgent  = "omh windows client 32.1.3.0"
+	SAPIUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0"
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
 func newDesktopTransport() http.RoundTripper {
 	return NewFingerprintedTransport()
+}
+
+// GetSAPIUserAgent permite cambiar la huella de navegador de SAPI sin
+// recompilar cuando CloudFront vuelve a endurecer sus reglas.
+func GetSAPIUserAgent() string {
+	if value := strings.TrimSpace(os.Getenv("SAPI_USER_AGENT")); value != "" {
+		return value
+	}
+	return SAPIUserAgent
 }
 
 var (
@@ -87,6 +98,74 @@ func GetOAuthRedirectURI(provider string) string {
 	return "https://micloud.movistar.es/ui/html/clientoauth.html"
 }
 
+// NewSAPILoginSession prepara un cliente con cookies compartidas entre la
+// página web de retorno y /sapi/login/oauth. El cliente oficial mantiene esa
+// misma sesión de navegador durante ambos pasos.
+func NewSAPILoginSession(provider string) (*http.Client, string, error) {
+	client, cookies, err := NewSAPILoginSessionAt(provider, GetOAuthRedirectURI(provider))
+	return client, cookies.JSessionID, err
+}
+
+// NewSAPILoginSessionAt imita mejor al webview oficial: carga la URL final
+// clientoauth.html, con code/state, antes de canjear el código OAuth.
+func NewSAPILoginSessionAt(provider, sessionURL string) (*http.Client, SAPILoginSessionCookies, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, SAPILoginSessionCookies{}, err
+	}
+
+	client := &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: newDesktopTransport(),
+		Jar:       jar,
+	}
+	if strings.TrimSpace(sessionURL) == "" {
+		sessionURL = GetOAuthRedirectURI(provider)
+	}
+	cookies, err := primeSAPILoginSession(client, sessionURL)
+	return client, cookies, err
+}
+
+func primeSAPILoginSession(client *http.Client, sessionURL string) (SAPILoginSessionCookies, error) {
+	parsedURL, err := url.Parse(sessionURL)
+	if err != nil {
+		return SAPILoginSessionCookies{}, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, sessionURL, nil)
+	if err != nil {
+		return SAPILoginSessionCookies{}, err
+	}
+	req.Header.Set("User-Agent", GetSAPIUserAgent())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Referer", parsedURL.Scheme+"://"+parsedURL.Host+"/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return SAPILoginSessionCookies{}, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return SAPILoginSessionCookies{}, fmt.Errorf("prepare SAPI login session: HTTP %d", resp.StatusCode)
+	}
+
+	var cookies SAPILoginSessionCookies
+	if client.Jar != nil {
+		for _, cookie := range client.Jar.Cookies(parsedURL) {
+			cookies.Names = append(cookies.Names, cookie.Name)
+			switch {
+			case strings.EqualFold(cookie.Name, "JSESSIONID"):
+				cookies.JSessionID = cookie.Value
+			case strings.EqualFold(cookie.Name, "validationkey"):
+				cookies.ValidationKey = cookie.Value
+			}
+		}
+	}
+	return cookies, nil
+}
+
 func GetSAPIBaseURL(provider string) string {
 	if strings.EqualFold(provider, "o2") {
 		return "https://cloud.o2online.es/sapi"
@@ -111,10 +190,10 @@ type OAuthTokens struct {
 
 type OAuthCredentialData struct {
 	AccessToken     string `json:"accesstoken"`
-	ExpiresIn       string `json:"expiresin"`
 	LastRefreshDate int64  `json:"lastrefreshdate"`
-	Platform        string `json:"platform"`
+	ExpiresIn       string `json:"expiresin"`
 	RefreshToken    string `json:"refreshtoken"`
+	Platform        string `json:"platform"`
 }
 
 type OAuthCredentialHeader struct {
@@ -129,13 +208,46 @@ type RotatedOAuth struct {
 }
 
 type SAPILoginResult struct {
-	StatusCode      int
-	ValidationKey   string
-	JSessionID      string
-	RefreshedOAuth  *RotatedOAuth
-	LastRefreshDate int64
-	RawResponse     string
-	Error           error
+	StatusCode          int
+	ValidationKey       string
+	JSessionID          string
+	RefreshedOAuth      *RotatedOAuth
+	LastRefreshDate     int64
+	RawResponse         string
+	RequestURL          string
+	Protocol            string
+	ContentType         string
+	Server              string
+	XCache              string
+	CloudFrontRequestID string
+	WWWAuthenticate     string
+	ResponseCookieNames []string
+	BodyPreview         string
+	Error               error
+}
+
+type SAPILoginSessionCookies struct {
+	JSessionID    string
+	ValidationKey string
+	Names         []string
+}
+
+var sensitiveLoginBodyRegex = regexp.MustCompile(`(?i)(accesstoken|access_token|refreshtoken|refresh_token|validationkey|jsessionid)([=:]\s*["']?)[^&"'\s<]+`)
+
+func summarizeSAPILoginBody(body []byte, secrets ...string) string {
+	preview := strings.ToValidUTF8(string(body), "?")
+	for _, secret := range secrets {
+		if len(secret) >= 4 {
+			preview = strings.ReplaceAll(preview, secret, "<redacted>")
+		}
+	}
+	preview = sensitiveLoginBodyRegex.ReplaceAllString(preview, `${1}${2}<redacted>`)
+	preview = strings.Join(strings.Fields(preview), " ")
+	const maxPreview = 600
+	if len(preview) > maxPreview {
+		preview = preview[:maxPreview] + "…"
+	}
+	return preview
 }
 
 func mustRandRead(b []byte) {
@@ -427,6 +539,17 @@ func ParseOAuthResponseHeader(headerVal string) *RotatedOAuth {
 }
 
 func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken, deviceID, deviceName string, lastRefreshDate int64, expiresIn string) SAPILoginResult {
+	authHeader := BuildOAuthHeader(accessToken, refreshToken, lastRefreshDate, expiresIn)
+	return sapiLoginOAuthRequest(client, sapiBaseURL, authHeader, GetSAPIUserAgent(), accessToken, refreshToken, deviceID, deviceName)
+}
+
+// SAPILoginOAuthWithAuthorization permite probar la misma petición con una
+// cabecera o User-Agent alternativos sin duplicar la lógica de diagnóstico.
+func SAPILoginOAuthWithAuthorization(client *http.Client, sapiBaseURL, authorization, userAgent string) SAPILoginResult {
+	return sapiLoginOAuthRequest(client, sapiBaseURL, authorization, userAgent, "", "", "", "")
+}
+
+func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, userAgent, previewSecretOne, previewSecretTwo, deviceID, deviceName string) SAPILoginResult {
 	if client == nil {
 		client = sapiLoginClient
 	}
@@ -443,9 +566,13 @@ func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken,
 		return SAPILoginResult{Error: err}
 	}
 
-	authHeader := BuildOAuthHeader(accessToken, refreshToken, lastRefreshDate, expiresIn)
-	req.Header.Set("Authorization", authHeader)
-	req.Header.Set("User-Agent", DesktopUserAgent)
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	if userAgent == "" {
+		userAgent = GetSAPIUserAgent()
+	}
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "*/*")
 	if deviceID != "" {
 		req.Header.Set("X-deviceid", deviceID)
@@ -466,8 +593,16 @@ func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken,
 	}
 
 	result := SAPILoginResult{
-		StatusCode:  resp.StatusCode,
-		RawResponse: string(bodyBytes),
+		StatusCode:          resp.StatusCode,
+		RawResponse:         string(bodyBytes),
+		RequestURL:          targetURL,
+		Protocol:            resp.Proto,
+		ContentType:         resp.Header.Get("Content-Type"),
+		Server:              resp.Header.Get("Server"),
+		XCache:              resp.Header.Get("X-Cache"),
+		CloudFrontRequestID: resp.Header.Get("X-Amz-Cf-Id"),
+		WWWAuthenticate:     resp.Header.Get("WWW-Authenticate"),
+		BodyPreview:         summarizeSAPILoginBody(bodyBytes, previewSecretOne, previewSecretTwo),
 	}
 
 	// 1. Extraer cabecera Authorization rotada si existe
@@ -477,6 +612,7 @@ func SAPILoginOAuth(client *http.Client, sapiBaseURL, accessToken, refreshToken,
 
 	// 2. Extraer cookies de sesión
 	for _, cookie := range resp.Cookies() {
+		result.ResponseCookieNames = append(result.ResponseCookieNames, cookie.Name)
 		if cookie.Name == "validationkey" {
 			result.ValidationKey = cookie.Value
 		} else if cookie.Name == "JSESSIONID" {

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Movistar & O2 WebDAV Proxy (Go)</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%232563eb'/%3E%3Cpath d='M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z' fill='white'/%3E%3C/svg%3E">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -73,13 +74,6 @@
                     <input type="text" id="phone" placeholder="Ej: 611223344" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono">
                 </div>
 
-                <div id="device-info-box" class="hidden mb-4 p-3 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-900 space-y-1">
-                    <div class="font-semibold flex items-center">
-                        <span class="mr-1">✔</span> Cliente Oficial de Escritorio Registrado (Windows):
-                    </div>
-                    <div class="font-mono text-[11px] text-blue-700 break-all" id="device-id-text">Device ID: -</div>
-                    <div class="text-[11px] text-blue-600">Tokens permanentes OAuth2 activos. Inmune a desconexiones al iniciar sesión en otros dispositivos.</div>
-                </div>
             </div>
 
             <div class="pt-4 border-t border-slate-100 mt-2 flex items-center space-x-2">
@@ -101,12 +95,8 @@
 
                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs space-y-1.5">
                     <div class="flex justify-between text-slate-600">
-                        <span class="font-medium">Puerto WebDAV interno:</span>
-                        <span class="font-mono font-semibold">8080 (host: 5050)</span>
-                    </div>
-                    <div class="flex justify-between text-slate-600">
-                        <span class="font-medium">Motor de Ejecución:</span>
-                        <span class="font-semibold text-emerald-700">Go Nativo (Zero-Copy Streaming)</span>
+                        <span class="font-medium">Puerto WebDAV (host):</span>
+                        <span id="webdav-host-port" class="font-mono font-semibold">5050</span>
                     </div>
                     <div class="flex justify-between text-slate-600">
                         <span class="font-medium">Espacio en la Nube:</span>
@@ -266,8 +256,6 @@
         const stopBtn = document.getElementById('stopBtn');
         const terminal = document.getElementById('terminal');
         const statusBadge = document.getElementById('proxy-status');
-        const deviceInfoBox = document.getElementById('device-info-box');
-        const deviceIdText = document.getElementById('device-id-text');
         const oauthModal = document.getElementById('oauthModal');
         const oauthLinkBtn = document.getElementById('oauthLinkBtn');
         const oauthInputCode = document.getElementById('oauthInputCode');
@@ -369,11 +357,8 @@
                         if (tgChat) tgChat.value = data.telegram_chat_id;
                     }
                     if (data.has_credentials || data.has_device_token) {
-                        deviceInfoBox.classList.remove('hidden');
-                        deviceIdText.textContent = 'Device ID: ' + (data.device_id || 'fol-Windows');
                         loadStorageInfo(phone);
                     } else {
-                        deviceInfoBox.classList.add('hidden');
                         const storageEl = document.getElementById('cloud-storage-used');
                         if (storageEl) storageEl.textContent = '- / -';
                         const maxFileEl = document.getElementById('cluster-max-file');
@@ -415,6 +400,10 @@
                     } else {
                         logoutBtn.classList.add('hidden');
                     }
+                }
+                const webdavPort = document.getElementById('webdav-host-port');
+                if (webdavPort && data.webdav_host_port) {
+                    webdavPort.textContent = data.webdav_host_port;
                 }
                 if (data.status === 'running') {
                     startBtn.disabled = true;
@@ -653,7 +642,6 @@
                 if (data.status === 'ok') {
                     phoneInput.value = '';
                     localStorage.removeItem('mc_phone');
-                    deviceInfoBox.classList.add('hidden');
                     const storageEl = document.getElementById('cloud-storage-used');
                     if (storageEl) storageEl.textContent = '- / -';
                     const maxFileEl = document.getElementById('cluster-max-file');
