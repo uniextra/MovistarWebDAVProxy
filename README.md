@@ -5,6 +5,9 @@
 [![Image Size](https://img.shields.io/badge/Image%20Size-~20%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![RAM Usage](https://img.shields.io/badge/RAM%20Usage-~6.5%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 
+> [!WARNING]
+> **Proyecto en desarrollo activo:** Este proyecto está en desarrollo y evoluciona constantemente. Se realizan cambios y actualizaciones frecuentes para corregir problemas, mejorar la estabilidad y ajustar la compatibilidad con Movistar/O2 Cloud. Por este motivo, el comportamiento puede cambiar entre versiones y pueden aparecer incidencias. Consulta las últimas actualizaciones y revisa la documentación antes de actualizar o desplegar una nueva versión.
+
 > [!NOTE]
 > **Aviso de Proyecto No Oficial e Independiente:** Este software es un desarrollo comunitario y no oficial para fines de interoperabilidad y copias de seguridad personales. No está afiliado, asociado, patrocinado ni respaldado por Telefónica, S.A. ni por Movistar/O2. Consulta [DISCLAIMER.md](DISCLAIMER.md) y [TRADEMARKS.md](TRADEMARKS.md) para más información.
 
@@ -104,7 +107,7 @@ docker run -d \
 
 ### Recomendaciones de Seguridad y Autenticación
 * **Autenticación HTTP Basic Robusta y Normalización:** Tanto el servidor WebDAV como el panel web validan usuario y contraseña en tiempo constante contra ataques de temporización (`subtle.ConstantTimeCompare`).
-  * **Normalización de usuarios Windows:** Los prefijos de dominio habituales de Windows WebClient (`DOMAIN\usuario` o `\usuario`) se normalizan automáticamente a `usuario`, ignorando espacios en blanco accidentales.
+  * **Normalización de usuarios Windows:** Los prefijos de dominio habituales de Windows WebClient (`DOMAIN\\usuario` o `\\usuario`) se normalizan automáticamente a `usuario`, ignorando espacios en blanco accidentales.
   * **Preservación intacta de contraseñas:** La contraseña se preserva exactamente tal como se envía, permitiendo contraseñas complejas con dos puntos (`:`) o espacios internos.
   * **Desafío RFC 4918 (`401 Unauthorized`):** Toda petición no autenticada o con credenciales erróneas recibe un código HTTP `401 Unauthorized` junto al encabezado estándar `WWW-Authenticate: Basic realm="WebDAV"`.
   * **Descubrimiento Windows WebClient:** La petición inicial `OPTIONS /` sin credenciales devuelve `200 OK` con `MS-Author-Via: DAV` y cabeceras de conformidad `DAV: 1, 2`, permitiendo al explorador de Windows identificar el servicio antes de solicitar credenciales en `PROPFIND /`.
@@ -228,7 +231,7 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
    * El proxy gestiona esto automáticamente mediante un **semáforo de concurrencia 1:1** (idéntico al motor serie del cliente oficial de escritorio) para operar siempre sin provocar bloqueos de CloudFront WAF ni errores `HTTP 429`.
 
 3. **🔤 Caracteres reservados en nombres de archivo:**
-   * Evita el uso de caracteres especiales no compatibles con URLs o APIs REST (`\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en los nombres de archivos o directorios.
+   * Evita el uso de caracteres especiales no compatibles con URLs o APIs REST (`\\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en los nombres de archivos o directorios.
 
 ---
 
