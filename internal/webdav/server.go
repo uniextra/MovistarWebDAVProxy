@@ -69,6 +69,30 @@ func (lw *loggingResponseWriter) Flush() {
 	}
 }
 
+// bufferedResponse permite inspeccionar la respuesta de x/net/webdav, que
+// devuelve 405 ante cualquier error de RemoveAll, y convertir un fallo de
+// renovación transitoria de SAPI en un 503 reintentable.
+type bufferedResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	code   int
+}
+
+func (b *bufferedResponse) Header() http.Header { return b.header }
+
+func (b *bufferedResponse) WriteHeader(code int) {
+	if b.code == 0 {
+		b.code = code
+	}
+}
+
+func (b *bufferedResponse) Write(p []byte) (int, error) {
+	if b.code == 0 {
+		b.code = http.StatusOK
+	}
+	return b.body.Write(p)
+}
+
 type Server struct {
 	handler        *webdav.Handler
 	fs             *MovistarFS
@@ -450,7 +474,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				logger.Log("[WebDAV] 🔓 Liberado bloqueo huérfano antes de DELETE sobre '%s'", urlPath)
 			}
 		}
-		s.handler.ServeHTTP(lw, r)
+		buf := &bufferedResponse{header: make(http.Header)}
+		s.handler.ServeHTTP(buf, r)
+		if buf.code == 0 {
+			buf.code = http.StatusOK
+		}
+		if buf.code == http.StatusMethodNotAllowed && s.fs != nil &&
+			errors.Is(s.fs.LastRemoveErr(), sapi.ErrSessionRefreshTransient) {
+			lw.Header().Del("Content-Length")
+			lw.Header().Set("Retry-After", "30")
+			http.Error(lw, "SAPI session refresh temporarily unavailable; retry later", http.StatusServiceUnavailable)
+		} else {
+			for k, vv := range buf.header {
+				for _, v := range vv {
+					lw.Header().Add(k, v)
+				}
+			}
+			lw.WriteHeader(buf.code)
+			if buf.body.Len() > 0 {
+				_, _ = lw.Write(buf.body.Bytes())
+			}
+		}
 		// RFC 4918 §7.4: eliminar un recurso debe eliminar todos sus bloqueos
 		if s.lockSys != nil {
 			s.lockSys.unlockPath(time.Now(), urlPath)

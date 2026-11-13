@@ -116,6 +116,11 @@ func NewFingerprintedTransport() http.RoundTripper {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		// El host de subida devuelve HTTP 408 ("Server timeout waiting for the
+		// HTTP request from the client") si se reutiliza una conexión keep-alive
+		// que el servidor ya consideraba caducada. Forzamos conexión nueva por
+		// subida; el coste es despreciable frente a los ficheros de HyperBackup.
+		DisableKeepAlives:     true,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,

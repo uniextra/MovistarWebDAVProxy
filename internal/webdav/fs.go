@@ -295,6 +295,23 @@ type MovistarFS struct {
 	isSyncing       atomic.Bool
 
 	emptyFileManager *EmptyFileManager
+
+	removeErrMu   sync.Mutex
+	lastRemoveErr error
+}
+
+func (mfs *MovistarFS) setLastRemoveErr(err error) {
+	mfs.removeErrMu.Lock()
+	mfs.lastRemoveErr = err
+	mfs.removeErrMu.Unlock()
+}
+
+// LastRemoveErr devuelve el último error de RemoveAll (para mapear renovaciones
+// transitorias de SAPI a HTTP 503 en lugar del 405 genérico de x/net/webdav).
+func (mfs *MovistarFS) LastRemoveErr() error {
+	mfs.removeErrMu.Lock()
+	defer mfs.removeErrMu.Unlock()
+	return mfs.lastRemoveErr
 }
 
 type cachedFolders struct {
@@ -1526,7 +1543,9 @@ func (mem *MemoryFile) downloadURL(mfs *MovistarFS) string {
 	}
 }
 
-func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
+func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
+	mfs.setLastRemoveErr(nil)
+	defer func() { mfs.setLastRemoveErr(err) }()
 	cleanPath := path.Clean("/" + name)
 	lowerPath := strings.ToLower(cleanPath)
 	if cleanPath == "/" || cleanPath == "." {
@@ -1560,12 +1579,26 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 		if folderInfo.ID < 0 || isControlOrLockFile(cleanPath) {
 			logger.Log("[WebDAV] ℹ️ Eliminando carpeta virtual/control '%s' (ID: %d) localmente (sin SAPI)", folderInfo.Name, folderInfo.ID)
 		} else {
-			if err := mfs.client.DeleteFolder(folderInfo.ID, false); err != nil {
+			var delErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				delErr = mfs.client.DeleteFolder(folderInfo.ID, false)
+				if delErr == nil || !errors.Is(delErr, sapi.ErrSessionRefreshTransient) {
+					break
+				}
+				wait := time.Duration(1<<attempt) * 2 * time.Second
+				logger.Log("[WebDAV] ⏳ Renovación transitoria al borrar carpeta '%s'; reintentando en %v (%d/3)...", folderInfo.Name, wait, attempt+1)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(wait):
+				}
+			}
+			if delErr != nil {
 				if isControlOrLockFile(cleanPath) {
-					logger.Log("[WebDAV] ℹ️ Carpeta de control/lock '%s' (ID: %d) gestionada de forma tolerante: %v", folderInfo.Name, folderInfo.ID, err)
+					logger.Log("[WebDAV] ℹ️ Carpeta de control/lock '%s' (ID: %d) gestionada de forma tolerante: %v", folderInfo.Name, folderInfo.ID, delErr)
 				} else {
-					logger.Log("[WebDAV] ❌ Error eliminando carpeta '%s' (ID: %d): %v", folderInfo.Name, folderInfo.ID, err)
-					return err
+					logger.Log("[WebDAV] ❌ Error eliminando carpeta '%s' (ID: %d): %v", folderInfo.Name, folderInfo.ID, delErr)
+					return delErr
 				}
 			}
 		}
@@ -1629,11 +1662,25 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) error {
 				}
 			}
 
-			if err := mfs.client.DeleteFile(mediaInfo.ID, mediaInfo.Name); err != nil {
-				if isTolerantDelete(cleanPath, err) {
-					logger.Log("[WebDAV] ℹ️ Fichero '%s' (ID: %s) gestionado de forma tolerante ante error de borrado SAPI: %v", mediaInfo.Name, mediaInfo.ID, err)
+			var delErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				delErr = mfs.client.DeleteFile(mediaInfo.ID, mediaInfo.Name)
+				if delErr == nil || !errors.Is(delErr, sapi.ErrSessionRefreshTransient) {
+					break
+				}
+				wait := time.Duration(1<<attempt) * 2 * time.Second
+				logger.Log("[WebDAV] ⏳ Renovación transitoria al borrar '%s'; reintentando en %v (%d/3)...", mediaInfo.Name, wait, attempt+1)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(wait):
+				}
+			}
+			if delErr != nil {
+				if isTolerantDelete(cleanPath, delErr) {
+					logger.Log("[WebDAV] ℹ️ Fichero '%s' (ID: %s) gestionado de forma tolerante ante error de borrado SAPI: %v", mediaInfo.Name, mediaInfo.ID, delErr)
 				} else {
-					logger.Log("[WebDAV] ❌ Error eliminando archivo '%s' (ID: %s): %v", mediaInfo.Name, mediaInfo.ID, err)
+					logger.Log("[WebDAV] ❌ Error eliminando archivo '%s' (ID: %s): %v", mediaInfo.Name, mediaInfo.ID, delErr)
 					return fs.ErrPermission
 				}
 			}

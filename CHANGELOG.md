@@ -2,6 +2,14 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.4.2] - 2026-11-13
+
+### 🛠️ Subidas HTTP 408 y renovación transitoria en DELETE
+
+- **HTTP 408 al subir fragmentos grandes (`upload failed (408)`):** el host de subida devolvía `Server timeout waiting for the HTTP request from the client` al reutilizar una conexión keep-alive que ya había caducado. El transporte HTTP/1.1 de `upload.*` ahora usa `DisableKeepAlives` (conexión nueva por subida) y `UploadFileToFolder` reintenta 408 con `CloseIdleConnections()` y backoff cuando el cuerpo es replayable.
+- **401/405 al borrar carpetas tras una renovación transitoria:** `RefreshSession` reintenta 2 veces adicionales los errores transitorios del `refresh_token` (no los 401/`invalid_grant`). El borrado de archivos y carpetas reintenta también si la renovación es transitoria y, si aun así falla, el handler DELETE responde **503 + `Retry-After: 30`** en lugar del 405 genérico de `x/net/webdav`, para que HyperBackup reintente sin marcar el repositorio como `broken`.
+- **Tests añadidos:** reintento de subida tras 408 con servidor simulado, verificación de `DisableKeepAlives` y clasificación terminal/transitoria de errores de renovación.
+
 ## [v2.4.1] - 2026-11-12
 
 ### 🛠️ Corrección de PAPI-0000 al reescribir archivos vacíos y zona horaria de logs

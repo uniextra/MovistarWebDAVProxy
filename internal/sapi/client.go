@@ -268,6 +268,7 @@ type Client struct {
 	maxUploadMB      int
 	rootFolderID     int64
 	sessionExpired   bool
+	refreshTransient bool
 	OnSessionExpired func(err error)
 
 	sapiSem        chan struct{}
@@ -278,6 +279,10 @@ type Client struct {
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
 var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured max file size limit")
+
+// ErrSessionRefreshTransient indica que la renovación de sesión falló por un
+// problema transitorio (red/5xx), no porque el refresh_token esté revocado.
+var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily failed")
 
 func NewClient(cfg config.AccountConfig) (*Client, error) {
 	jar, err := cookiejar.New(nil)
@@ -386,6 +391,12 @@ func (c *Client) IsSessionExpired() bool {
 	return c.sessionExpired
 }
 
+func (c *Client) RefreshTransient() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.refreshTransient
+}
+
 func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -490,6 +501,9 @@ func (c *Client) RefreshSession() bool {
 	}
 
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
+	c.mu.Lock()
+	c.refreshTransient = false
+	c.mu.Unlock()
 
 	// 1. Intento primario: SAPILoginOAuth con access_token actual
 	sapiBase := auth.GetSAPIBaseURL(cfg.Provider)
@@ -530,13 +544,30 @@ func (c *Client) RefreshSession() bool {
 		}
 	}
 
-	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es
+	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es.
+	// Reintentamos errores transitorios: un fallo puntual no debe convertir un
+	// DELETE de HyperBackup en un 405 y dejar el repositorio en state=broken.
 	var refreshErr error
+	var tokens *auth.OAuthTokens
 	if cfg.RefreshToken != "" {
-		logger.Log("[OAuth] 🔄 Canjeando refresh_token en apiseg.telefonica.es (%s)...", cfg.Provider)
-		tokens, err := auth.RefreshOAuthToken(cfg.RefreshToken, cfg.Provider)
-		refreshErr = err
-		if err == nil && tokens != nil && tokens.AccessToken != "" {
+		const refreshAttempts = 3
+		for attempt := 0; attempt < refreshAttempts; attempt++ {
+			logger.Log("[OAuth] 🔄 Canjeando refresh_token en apiseg.telefonica.es (%s) (%d/%d)...", cfg.Provider, attempt+1, refreshAttempts)
+			c.httpClient.CloseIdleConnections()
+			tokens, refreshErr = auth.RefreshOAuthToken(cfg.RefreshToken, cfg.Provider)
+			if refreshErr == nil {
+				break
+			}
+			if isTerminalRefreshError(refreshErr) {
+				break
+			}
+			if attempt < refreshAttempts-1 {
+				backoff := time.Duration(1<<attempt) * time.Second
+				logger.Log("[OAuth] ⏳ Error transitorio al renovar sesión: %v. Reintentando en %v...", refreshErr, backoff)
+				time.Sleep(backoff)
+			}
+		}
+		if refreshErr == nil && tokens != nil && tokens.AccessToken != "" {
 			c.mu.Lock()
 			c.sessionExpired = false
 			c.cfg.AccessToken = tokens.AccessToken
@@ -582,15 +613,16 @@ func (c *Client) RefreshSession() bool {
 			} else {
 				logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
 			}
-		} else if err != nil {
-			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", err)
+		} else if refreshErr != nil {
+			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", refreshErr)
 		}
 	}
 
-	if refreshErr != nil && (strings.Contains(refreshErr.Error(), "401") || strings.Contains(refreshErr.Error(), "invalid_grant")) {
+	if refreshErr != nil && isTerminalRefreshError(refreshErr) {
 		c.mu.Lock()
 		wasExpired := c.sessionExpired
 		c.sessionExpired = true
+		c.refreshTransient = false
 		c.mu.Unlock()
 
 		logger.Log("[!] ⚠️ ERROR 401: El refresh_token ha expirado o ha sido revocado. Pausando reintentos automáticos hasta revinculación en el panel web.")
@@ -598,9 +630,22 @@ func (c *Client) RefreshSession() bool {
 			go c.OnSessionExpired(errors.New("sesión expirada (HTTP 401)"))
 		}
 	} else {
+		if refreshErr != nil {
+			c.mu.Lock()
+			c.refreshTransient = true
+			c.mu.Unlock()
+		}
 		logger.Log("[!] ⚠️ Error transitorio durante renovación de sesión. Conservando credenciales para futuros reintentos.")
 	}
 	return false
+}
+
+func isTerminalRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") || strings.Contains(msg, "invalid_grant")
 }
 
 func (c *Client) SetPacingInterval(d time.Duration) {
@@ -743,13 +788,16 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 				}
 				return resp2, err2
 			}
+			if c.RefreshTransient() {
+				return nil, fmt.Errorf("%w (%s %s)", ErrSessionRefreshTransient, req.Method, req.URL.Path)
+			}
 			// Restaurar cuerpo legible si RefreshSession falló para evitar "http: read on closed response body"
 			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
 
 	// Manejo de retroceso suave ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
-	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) &&
+	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusRequestTimeout) &&
 		(req.Body == nil || req.GetBody != nil) {
 		const maxBackoffRetries = 4
 		for retry := 1; retry <= maxBackoffRetries; retry++ {
@@ -759,7 +807,10 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 			}
 			jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
 			sleepDur := backoff + jitter
-			logger.Log("[SAPI] ⏳ Rate limit o servicio ocupado (%s %s HTTP %d). Reintentando en %v (%d/%d)...", req.Method, req.URL.Path, resp.StatusCode, sleepDur, retry, maxBackoffRetries)
+			if resp.StatusCode == http.StatusRequestTimeout {
+				c.httpClient.CloseIdleConnections()
+			}
+			logger.Log("[SAPI] ⏳ Rate limit, timeout o servicio ocupado (%s %s HTTP %d). Reintentando en %v (%d/%d)...", req.Method, req.URL.Path, resp.StatusCode, sleepDur, retry, maxBackoffRetries)
 			resp.Body.Close()
 			time.Sleep(sleepDur)
 
@@ -1690,6 +1741,23 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				continue
 			}
 			return nil, fmt.Errorf("upload failed: rate limited or service unavailable (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, bStr)
+		}
+
+		// 408: el host de subida cerró una conexión keep-alive obsoleta
+		// ("Server timeout waiting for the HTTP request from the client").
+		// Forzamos conexión nueva y reintentamos si el cuerpo es replayable.
+		if resp.StatusCode == http.StatusRequestTimeout {
+			if attempt < maxRetries && canRetry {
+				backoff := time.Duration(1<<attempt) * time.Second
+				if backoff > 4*time.Second {
+					backoff = 4 * time.Second
+				}
+				c.httpClient.CloseIdleConnections()
+				logger.Log("[SAPI] ⏳ Conexión de subida obsoleta (HTTP 408). Reintentando con conexión nueva en %v (%d/%d)...", backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return nil, fmt.Errorf("upload failed: request timeout (HTTP 408) after %d retries: %s", maxRetries, bStr)
 		}
 
 		if resp.StatusCode == http.StatusRequestEntityTooLarge || strings.Contains(bStr, "MED-1020") {
