@@ -164,3 +164,21 @@ func TestUpdateMedia_ErrorInBodyIsReported(t *testing.T) {
 		t.Fatal("esperado error cuando SAPI responde con error en el cuerpo; se dio por bueno")
 	}
 }
+
+// La espera ante MED-1017 crece con cada intento y se limita a mediaMoveMaxDelay.
+func TestMediaMoveDelay_GrowsAndCaps(t *testing.T) {
+	var total time.Duration
+	for i := 0; i < mediaMoveRetries; i++ {
+		d := mediaMoveDelay(i)
+		if i > 0 && d < mediaMoveDelay(i-1) {
+			t.Errorf("intento %d: %v menor que el anterior", i, d)
+		}
+		if d > mediaMoveMaxDelay {
+			t.Errorf("intento %d: %v supera el máximo %v", i, d, mediaMoveMaxDelay)
+		}
+		total += d
+	}
+	if total < 60*time.Second {
+		t.Errorf("espera total %v: debería cubrir al menos 60 s de validación", total)
+	}
+}
