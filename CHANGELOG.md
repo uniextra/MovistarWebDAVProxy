@@ -2,6 +2,14 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.4.3] - 2026-11-13
+
+### 🛠️ Evitar el bucle 401 y las rotaciones inútiles del refresh_token
+
+- **Síntoma:** el canje de `refresh_token` devolvía tokens correctamente, pero el `SAPILoginOAuth` posterior seguía devolviendo 401. El proxy volvía a intentar el canje cada 30–60 s, rotando el refresh_token sin recuperar la sesión.
+- **Corrección:** tras un canje correcto se reintenta el login SAPI hasta 3 veces **con los mismos tokens nuevos** (sin volver a rotar el refresh_token). Si SAPI sigue devolviendo 401, la sesión se marca como expirada y se pide revincular desde el panel web; KeepAlive y DeltaSync dejan de rotar credenciales automáticamente.
+- **Recuperación:** en ese estado hay que volver a vincular la cuenta desde el panel. El proxy ya no entra en un bucle de refresh/401.
+
 ## [v2.4.2] - 2026-11-13
 
 ### 🛠️ Subidas HTTP 408 y renovación transitoria en DELETE

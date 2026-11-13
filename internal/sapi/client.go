@@ -581,8 +581,22 @@ func (c *Client) RefreshSession() bool {
 			// Persistir inmediatamente los nuevos tokens para proteger contra RTR (Refresh Token Rotation)
 			_ = config.SaveAccountConfig(cfgCopy)
 
-			// Con nuevo access_token, inicializar SAPI
-			res := auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
+			// Con nuevo access_token, inicializar SAPI. Reintentamos el login
+			// (sin volver a rotar el refresh_token) por si el 401 es puntual.
+			var res auth.SAPILoginResult
+			for attempt := 0; attempt < 3; attempt++ {
+				res = auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
+				if res.StatusCode == http.StatusOK {
+					break
+				}
+				if res.StatusCode != http.StatusUnauthorized {
+					break
+				}
+				if attempt < 2 {
+					logger.Log("[OAuth] ⏳ SAPI devolvió 401 tras refresco; reintentando login en %v...", time.Duration(attempt+1)*time.Second)
+					time.Sleep(time.Duration(attempt+1) * time.Second)
+				}
+			}
 			if res.StatusCode == http.StatusOK {
 				c.mu.Lock()
 				c.sessionExpired = false
@@ -610,9 +624,23 @@ func (c *Client) RefreshSession() bool {
 				_ = config.SaveAccountConfig(cfgCopy2)
 				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
 				return true
-			} else {
-				logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
 			}
+			if res.StatusCode == http.StatusUnauthorized {
+				c.mu.Lock()
+				c.sessionExpired = true
+				c.refreshTransient = false
+				c.mu.Unlock()
+				logger.Log("[!] ⚠️ Tokens renovados pero SAPI rechaza la sesión (401). Revincula la cuenta desde el panel web para evitar rotaciones inútiles del refresh_token.")
+				if c.OnSessionExpired != nil {
+					go c.OnSessionExpired(errors.New("sesión SAPI rechazada tras refresco (HTTP 401)"))
+				}
+				return false
+			}
+			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
+			c.mu.Lock()
+			c.refreshTransient = true
+			c.mu.Unlock()
+			return false
 		} else if refreshErr != nil {
 			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", refreshErr)
 		}
