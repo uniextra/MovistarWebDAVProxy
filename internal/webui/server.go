@@ -98,6 +98,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/favicon.ico", s.handleFavicon)
 	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/verify_phone", s.handleVerifyPhone)
@@ -124,7 +125,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", panelCSP)
 
 		// /health siempre accesible sin autenticación para healthchecks de Docker
-		if r.URL.Path == "/health" {
+		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -228,6 +229,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "version": config.Version})
 }
 
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#2563eb"/><path d="M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z" fill="white"/></svg>`))
+}
+
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"version": config.Version})
 }
@@ -239,9 +246,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status = "running"
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"status": status,
-		"phone":  logger.Mask(cfg.Phone),
+		"status":           status,
+		"phone":            logger.Mask(cfg.Phone),
+		"webdav_host_port": webDAVHostPort(),
 	})
+}
+
+func webDAVHostPort() string {
+	if port := strings.TrimSpace(os.Getenv("WEBDAV_HOST_PORT")); port != "" {
+		return port
+	}
+	if port := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); port != "" {
+		return port
+	}
+	return "5050"
 }
 
 func (s *Server) handleVerifyPhone(w http.ResponseWriter, r *http.Request) {
@@ -492,6 +510,27 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	callbackURL := strings.TrimSpace(rawCode)
+	if !strings.HasPrefix(strings.ToLower(callbackURL), "http") {
+		callback, parseErr := url.Parse(auth.GetOAuthRedirectURI(provider))
+		if parseErr != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "No se pudo preparar la URL de retorno OAuth"})
+			return
+		}
+		query := callback.Query()
+		query.Set("code", code)
+		query.Set("state", pending.State)
+		callback.RawQuery = query.Encode()
+		callbackURL = callback.String()
+	}
+
+	_, primedCookies, sessionErr := auth.NewSAPILoginSessionAt(provider, callbackURL)
+	if sessionErr != nil {
+		logger.Log("[OAuth] ⚠️ No se pudo preparar la sesión web previa a SAPI: %v", sessionErr)
+	} else {
+		logger.Log("[OAuth] 🍪 Sesión web preparada para SAPI (cookies: %v).", primedCookies.Names)
+	}
+
 	logger.Log("[OAuth] 🔄 Canjeando código para %s en apiseg.telefonica.es (%s)...", logger.Mask(phone), provider)
 	tokens, err := auth.ExchangeCodeForTokens(code, verifier, provider)
 	if err != nil {
@@ -505,24 +544,9 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	if devID == "" {
 		devID = auth.GenerateDeviceID()
 	}
-	logger.Log("[OAuth] ✔ Tokens obtenidos. Inicializando sesión SAPI para dispositivo %s (%s)...", logger.Mask(devID), provider)
+	logger.Log("[OAuth] ✔ Tokens obtenidos. Usando autorización OAuth directa para el dispositivo %s (%s)...", logger.Mask(devID), provider)
 
-	sapiBase := auth.GetSAPIBaseURL(provider)
 	nowMS := time.Now().UnixMilli()
-	sapiRes := auth.SAPILoginOAuth(nil, sapiBase, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
-
-	if sapiRes.StatusCode != http.StatusOK || (sapiRes.ValidationKey == "" && sapiRes.JSessionID == "") {
-		logger.Log("[OAuth] ❌ Error inicializando sesión SAPI (HTTP %d): %v", sapiRes.StatusCode, sapiRes.Error)
-		provLabel := "Movistar Cloud"
-		if provider == "o2" {
-			provLabel = "O2 Cloud"
-		}
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
-			"status":  "error",
-			"message": fmt.Sprintf("Error iniciando sesión en %s (HTTP %d). Comprueba que la línea tenga el servicio activo.", provLabel, sapiRes.StatusCode),
-		})
-		return
-	}
 
 	cfg := config.AccountConfig{
 		Provider:         provider,
@@ -537,22 +561,11 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		TelegramChatID:   existingCfg.TelegramChatID,
 	}
 
-	if sapiRes.ValidationKey != "" {
-		cfg.ValidationKey = sapiRes.ValidationKey
+	if primedCookies.JSessionID != "" {
+		cfg.JSessionID = primedCookies.JSessionID
 	}
-	if sapiRes.JSessionID != "" {
-		cfg.JSessionID = sapiRes.JSessionID
-	}
-	if sapiRes.LastRefreshDate > 0 {
-		cfg.LastRefreshDate = sapiRes.LastRefreshDate
-	}
-	if sapiRes.RefreshedOAuth != nil {
-		if sapiRes.RefreshedOAuth.AccessToken != "" {
-			cfg.AccessToken = sapiRes.RefreshedOAuth.AccessToken
-		}
-		if sapiRes.RefreshedOAuth.RefreshToken != "" {
-			cfg.RefreshToken = sapiRes.RefreshedOAuth.RefreshToken
-		}
+	if primedCookies.ValidationKey != "" {
+		cfg.ValidationKey = primedCookies.ValidationKey
 	}
 
 	if err := config.SaveAccountConfig(cfg); err != nil {

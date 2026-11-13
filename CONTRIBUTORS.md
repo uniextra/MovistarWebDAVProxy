@@ -10,6 +10,7 @@ Agradecemos enormemente a todas las personas que contribuyen a la mejora, estabi
   - Implementación de `DuplicatiProbeStore`: absorción en memoria volátil de la sonda de privilegios de Duplicati (`duplicati-access-privileges-test.tmp`), resolviendo el error `MED-1000` en Telefónica SAPI ([#13](https://github.com/uniextra/MovistarWebDAVProxy/issues/13), [#14](https://github.com/uniextra/MovistarWebDAVProxy/pull/14)).
 
 * **[@aarizaga90](https://github.com/aarizaga90)**
+  - Diagnóstico A/B del bloqueo de CloudFront por User-Agent en O2 y validación de la huella Edge que permitió corregir el login SAPI en v2.4.3 ([#33](https://github.com/uniextra/MovistarWebDAVProxy/issues/33#issuecomment-6863810469)).
   - Diagnóstico en profundidad de la reconexión de Windows WebClient tras reinicio (Microsoft KB 2673544) y diseño de la solución de montaje persistente con DPAPI ([#18](https://github.com/uniextra/MovistarWebDAVProxy/issues/18)).
   - Confirmación estricta del destino por ID, tamaño y SHA-256 antes de eliminar el archivo origen en re-subidas (`moveByReupload`), protección frente a lecturas con cuerpo vacío de SAPI (`getBodyGuard` -> 503) y exclusión mutua ordenada por ruta en operaciones de ficheros ([#20](https://github.com/uniextra/MovistarWebDAVProxy/pull/20)).
   - Reporte responsable y resolución de la vulnerabilidad de seguridad en NTLMv2 ([GHSA-fpxr-64gm-wxvf](https://github.com/uniextra/MovistarWebDAVProxy/security/advisories/GHSA-fpxr-64gm-wxvf)).

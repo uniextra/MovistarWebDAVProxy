@@ -172,3 +172,29 @@ func TestControlLockVirtualEmulation(t *testing.T) {
 		t.Fatalf("expected 0 SAPI folder deletes for virtual folder, got %d", sapiFolderDeleteCount.Load())
 	}
 }
+
+func TestHyperBackupWriterStateIsPersistent(t *testing.T) {
+	persistent := []string{
+		"/Backups/HPE.hbk/Control/@writer",
+		"/Backups/HPE.hbk/Control/@writer/sequence_id",
+		"/Backups/HPE.hbk/Control/@writer/sequence_id.temp",
+		"/Backups/HPE.hbk/Control/@writer/seq_mapping",
+		"/Backups/HPE.hbk/Control/@writer/v1.cformat",
+		"/Backups/HPE.hbk/Control/@writer/v1.34.-1.0.0.none.none.cinfo",
+	}
+	for _, raw := range persistent {
+		if isControlOrLockFile(raw) {
+			t.Errorf("persistent writer state %q was classified as ephemeral", raw)
+		}
+	}
+
+	ephemeral := []string{
+		"/Backups/HPE.hbk/Control/lock/lock_keep_alive.@writer_version_0.abc",
+		"/Backups/HPE.hbk/Control/@reader.1111-2222-3333/v1.cformat",
+	}
+	for _, raw := range ephemeral {
+		if !isControlOrLockFile(raw) {
+			t.Errorf("ephemeral control path %q was classified as persistent", raw)
+		}
+	}
+}

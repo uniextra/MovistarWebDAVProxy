@@ -142,6 +142,9 @@ docker run -d \
 | `WEBDAV_PORT` | `8080` | Puerto interno del servidor WebDAV. |
 | `TOKENS_DIR` | `/app/tokens` | Directorio donde se almacenan las credenciales OAuth2 (`0700`). |
 | `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave opcional para cifrar en reposo (AES-256-GCM) los tokens guardados en disco. |
+| `WEBDAV_HOST_PORT` | `5050` | Puerto público de WebDAV que se muestra en el panel; en Compose se toma de `WEBDAV_PORT`. |
+| `TELEGRAM_BOT_TOKEN` | *(vacío)* | Token del bot de Telegram para alertas de sesión. |
+| `TELEGRAM_CHAT_ID` | *(vacío)* | Chat o canal de Telegram que recibirá las alertas. |
 | `MAX_UPLOAD_MB` | `4096` | Tamaño máximo permitido por archivo en subidas `PUT` (en MB). |
 | `WEBDAV_BUFFER_MB` | `32` | Tamaño máximo del búfer en RAM (MB) antes de hacer spool a disco (óptimo Duplicati). |
 | `TRUSTED_PROXIES` | *(vacío)* | Lista de IPs/CIDRs de proxies de confianza para evaluar `X-Forwarded-For` / `X-Real-IP`. |

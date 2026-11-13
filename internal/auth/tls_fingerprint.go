@@ -53,7 +53,7 @@ func FingerprintName() string {
 // dialTLSContextWithUTLS realiza el dial TCP y envuelve la conexión en una UConn de
 // uTLS para que el ClientHello imite al perfil elegido en lugar del de crypto/tls.
 // Firma compatible con http2.Transport.DialTLSContext.
-func dialTLSContextWithUTLS(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+func dialTLSContextWithUTLSALPN(ctx context.Context, network, addr string, nextProtos []string) (net.Conn, error) {
 	plainConn, err := (&net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -70,7 +70,7 @@ func dialTLSContextWithUTLS(ctx context.Context, network, addr string, _ *tls.Co
 	helloID := clientHelloIDFromEnv()
 	uConn := utls.UClient(plainConn, &utls.Config{
 		ServerName: host,
-		NextProtos: []string{"h2", "http/1.1"},
+		NextProtos: nextProtos,
 	}, helloID)
 
 	if err := uConn.HandshakeContext(ctx); err != nil {
@@ -78,6 +78,18 @@ func dialTLSContextWithUTLS(ctx context.Context, network, addr string, _ *tls.Co
 		return nil, fmt.Errorf("utls handshake with %s: %w", host, err)
 	}
 	return uConn, nil
+}
+
+func dialTLSContextWithUTLS(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+	return dialTLSContextWithUTLSALPN(ctx, network, addr, []string{"h2", "http/1.1"})
+}
+
+func dialTLSContextWithUTLSHTTP1(ctx context.Context, network, addr string) (net.Conn, error) {
+	return dialTLSContextWithUTLSALPN(ctx, network, addr, []string{"http/1.1"})
+}
+
+func dialTLSContextWithUTLSNoALPN(ctx context.Context, network, addr string) (net.Conn, error) {
+	return dialTLSContextWithUTLSALPN(ctx, network, addr, nil)
 }
 
 // fingerprintedTransport envía los hosts SAPI (lectura, borrado, metadatos) por
@@ -107,7 +119,7 @@ func (t *fingerprintedTransport) HTTP1Transport() *http.Transport {
 // upload.* y las URLs planas (tests httptest) siguen por HTTP/1.1.
 func NewFingerprintedTransport() http.RoundTripper {
 	h2 := &http2.Transport{
-		DialTLSContext: dialTLSContextWithUTLS,
+		DialTLSContext:  dialTLSContextWithUTLS,
 		IdleConnTimeout: 90 * time.Second,
 	}
 
@@ -133,3 +145,41 @@ func NewFingerprintedTransport() http.RoundTripper {
 	return &fingerprintedTransport{h1: h1, h2: h2}
 }
 
+// NewHTTP1FingerprintedTransport mantiene la huella uTLS pero fuerza ALPN
+// HTTP/1.1. Se usa para comparar el comportamiento del cliente oficial cuando
+// CloudFront trata el login de forma distinta a los endpoints SAPI normales.
+func NewHTTP1FingerprintedTransport() http.RoundTripper {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		DialTLSContext:        dialTLSContextWithUTLSHTTP1,
+		ForceAttemptHTTP2:     false,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		MaxConnsPerHost:       100,
+	}
+}
+
+// NewNoALPNHTTP1Transport fuerza HTTP/1.1 sin anunciar ALPN. Algunos perfiles
+// de CloudFront tratan de forma distinta el ClientHello cuando ALPN está vacío.
+func NewNoALPNHTTP1Transport() http.RoundTripper {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		DialTLSContext:        dialTLSContextWithUTLSNoALPN,
+		ForceAttemptHTTP2:     false,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		MaxConnsPerHost:       100,
+	}
+}

@@ -10,6 +10,20 @@ Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan
 - **Corrección:** tras un canje correcto se reintenta el login SAPI hasta 3 veces **con los mismos tokens nuevos** (sin volver a rotar el refresh_token). Si SAPI sigue devolviendo 401, la sesión se marca como expirada y se pide revincular desde el panel web; KeepAlive y DeltaSync dejan de rotar credenciales automáticamente.
 - **Recuperación:** en ese estado hay que volver a vincular la cuenta desde el panel. El proxy ya no entra en un bucle de refresh/401.
 
+### 🔐 Compatibilidad con el cliente actual y rotación de credenciales
+
+- **User-Agent SAPI configurable:** el transporte SAPI usa por defecto un User-Agent Edge; CloudFront bloquea el UA antiguo de la app Windows antes de llegar a Movistar. Se puede cambiar con `SAPI_USER_AGENT` sin recompilar.
+- **Login OAuth directo:** se elimina la llamada inicial a `/sapi/login/oauth`, que el cliente de escritorio actual no referencia. Tras canjear el código se guardan los tokens y se usan directamente en las peticiones SAPI.
+- **Rotación por cabecera:** las respuestas `Authorization` de SAPI se procesan incluso cuando la respuesta HTTP es `401`; si llegan tokens rotados, la petición se reintenta con ellos.
+- **Hyper Backup:** `Control/@writer` se trata como estado persistente, mientras que `@reader` y los locks siguen efímeros. Esto conserva `sequence_id`, `seq_mapping` y `v1.cformat` y evita `cloud-seq-id [-1]`.
+
+### 🖥️ Panel y operación
+
+- Favicon local servido por `/favicon.ico`.
+- El panel muestra el puerto WebDAV host desde `WEBDAV_HOST_PORT`.
+- Eliminados el recuadro de Device ID y el importador de sesiones de Chrome.
+- Añadidas `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` a la configuración Docker; el panel muestra Token enmascarado y Chat ID cuando están completos.
+
 ## [v2.4.2] - 2026-11-13
 
 ### 🛠️ Subidas HTTP 408 y renovación transitoria en DELETE

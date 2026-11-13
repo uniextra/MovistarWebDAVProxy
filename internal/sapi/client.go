@@ -430,9 +430,9 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	return rawURL + sep + "validationkey=" + url.QueryEscape(vk)
 }
 
-func (c *Client) processSAPIResponse(resp *http.Response) {
-	if resp == nil || resp.StatusCode >= 400 {
-		return
+func (c *Client) processSAPIResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
 	}
 
 	var changed bool
@@ -473,6 +473,7 @@ func (c *Client) processSAPIResponse(resp *http.Response) {
 
 	if changed {
 		c.syncCookiesLocked()
+		c.sessionExpired = false
 	}
 	cfgCopy := c.cfg
 	c.mu.Unlock()
@@ -481,6 +482,7 @@ func (c *Client) processSAPIResponse(resp *http.Response) {
 		_ = config.SaveAccountConfig(cfgCopy)
 		logger.Log("[OAuth] ✔ Nuevas credenciales/cookies capturadas y guardadas en disco.")
 	}
+	return changed
 }
 
 func (c *Client) RefreshSession() bool {
@@ -725,7 +727,8 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	c.mu.RUnlock()
 
 	// Inyectar cabeceras comunes
-	req.Header.Set("User-Agent", auth.DesktopUserAgent)
+	userAgent := auth.GetSAPIUserAgent()
+	req.Header.Set("User-Agent", userAgent)
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "*/*")
 	}
@@ -761,7 +764,20 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	c.processSAPIResponse(resp)
+	credentialsRotated := c.processSAPIResponse(resp)
+
+	// El cliente oficial también procesa la cabecera Authorization de las
+	// respuestas 401: si SAPI entrega tokens rotados, la petición se reintenta
+	// inmediatamente con la nueva credencial.
+	if resp.StatusCode == http.StatusUnauthorized && credentialsRotated && (req.Body == nil || req.GetBody != nil) {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		retried, retryErr := c.retryRequestWithCurrentConfig(req)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		return retried, nil
+	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		if req.Body != nil && req.GetBody == nil {
@@ -867,6 +883,45 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	return resp, nil
+}
+
+func (c *Client) retryRequestWithCurrentConfig(req *http.Request) (*http.Response, error) {
+	cfg := c.GetConfig()
+	var retryBody io.Reader
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		retryBody = body
+	}
+	newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
+	if err != nil {
+		return nil, err
+	}
+	newReq.Header = req.Header.Clone()
+	newReq.Header.Del("Authorization")
+	newReq.Header.Del("Cookie")
+	if cfg.AccessToken != "" {
+		newReq.Header.Set("Authorization", auth.BuildOAuthHeader(cfg.AccessToken, cfg.RefreshToken, cfg.LastRefreshDate, cfg.ExpiresIn))
+	}
+	if cfg.JSessionID != "" || cfg.ValidationKey != "" {
+		var cookies []string
+		if cfg.JSessionID != "" {
+			cookies = append(cookies, "JSESSIONID="+cfg.JSessionID)
+		}
+		if cfg.ValidationKey != "" {
+			cookies = append(cookies, "validationkey="+cfg.ValidationKey)
+		}
+		newReq.Header.Set("Cookie", strings.Join(cookies, "; "))
+	}
+	newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
+	resp, err := c.httpClient.Do(newReq)
+	if err != nil {
+		return nil, err
+	}
+	c.processSAPIResponse(resp)
 	return resp, nil
 }
 

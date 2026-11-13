@@ -168,17 +168,15 @@ func isOSJunkPath(rawPath string) bool {
 	return false
 }
 
-// isControlOrLockFile comprueba si la ruta corresponde a un fichero o directorio efímero de control o bloqueo de Hyper Backup
-// (e.g. rutas dentro de "/Control/", "@reader", "@writer", "lock_keep_alive", archivos ".cinfo", "error_detect", etc.)
+// isControlOrLockFile comprueba si la ruta corresponde a un fichero o directorio efímero de bloqueo de Hyper Backup.
+// @writer contiene estado persistente del repositorio (sequence_id, seq_mapping, v1.cformat y cinfo),
+// por lo que no debe emularse localmente como los locks o los directorios @reader temporales.
 func isControlOrLockFile(rawPath string) bool {
 	clean := strings.ToLower(path.Clean("/" + rawPath))
 	base := strings.ToLower(path.Base(clean))
-	return strings.Contains(clean, "/control/") ||
-		strings.HasSuffix(clean, "/control") ||
-		strings.HasPrefix(base, "@writer") ||
+	return strings.Contains(clean, "/control/@reader") ||
 		strings.HasPrefix(base, "@reader") ||
 		strings.HasPrefix(base, "lock_") ||
-		strings.HasSuffix(base, ".cinfo") ||
 		strings.Contains(base, "error_detect")
 }
 
@@ -212,19 +210,19 @@ func acquireFolderLock(cleanPath string) func() {
 }
 
 type MemoryFile struct {
-	ID        string
-	Name      string
-	FolderID  int64
-	Content   []byte
-	Size      int64
-	ModTime   time.Time // fecha de modificación que se muestra al cliente
-	CachedAt  time.Time // momento en que entró en la caché (caducidad)
-	URL       string
+	ID       string
+	Name     string
+	FolderID int64
+	Content  []byte
+	Size     int64
+	ModTime  time.Time // fecha de modificación que se muestra al cliente
+	CachedAt time.Time // momento en que entró en la caché (caducidad)
+	URL      string
 	// URLConfirmed indica que URL ya se ha obtenido de SAPI consultando el archivo por su ID.
 	URLConfirmed bool
 	// URLLookupFailedAt es el momento del último error al consultar la URL (cero si no hubo).
 	URLLookupFailedAt time.Time
-	MD5       string
+	MD5               string
 }
 
 type CreatedFolder struct {
@@ -2641,9 +2639,9 @@ func (w *WebDAVFileWriter) Close() error {
 	return nil
 }
 
-func (w *WebDAVFileWriter) Read(p []byte) (n int, err error) { return 0, io.EOF }
+func (w *WebDAVFileWriter) Read(p []byte) (n int, err error)             { return 0, io.EOF }
 func (w *WebDAVFileWriter) Seek(offset int64, whence int) (int64, error) { return 0, nil }
-func (w *WebDAVFileWriter) Readdir(count int) ([]os.FileInfo, error) { return nil, fs.ErrInvalid }
+func (w *WebDAVFileWriter) Readdir(count int) ([]os.FileInfo, error)     { return nil, fs.ErrInvalid }
 func (w *WebDAVFileWriter) Stat() (os.FileInfo, error) {
 	modTime := time.Now()
 	if !w.modTime.IsZero() {
@@ -2858,10 +2856,12 @@ func NewWebDAVMemoryReader(path string, mem *MemoryFile) *WebDAVMemoryReader {
 	}
 }
 
-func (m *WebDAVMemoryReader) Read(p []byte) (n int, err error) { return m.reader.Read(p) }
+func (m *WebDAVMemoryReader) Read(p []byte) (n int, err error)  { return m.reader.Read(p) }
 func (m *WebDAVMemoryReader) Write(p []byte) (n int, err error) { return 0, fs.ErrPermission }
-func (m *WebDAVMemoryReader) Close() error { return nil }
-func (m *WebDAVMemoryReader) Seek(offset int64, whence int) (int64, error) { return m.reader.Seek(offset, whence) }
+func (m *WebDAVMemoryReader) Close() error                      { return nil }
+func (m *WebDAVMemoryReader) Seek(offset int64, whence int) (int64, error) {
+	return m.reader.Seek(offset, whence)
+}
 func (m *WebDAVMemoryReader) Readdir(count int) ([]os.FileInfo, error) { return nil, fs.ErrInvalid }
 func (m *WebDAVMemoryReader) Stat() (os.FileInfo, error) {
 	return &VirtualFileInfo{name: m.mem.Name, size: m.mem.Size, mode: 0644, modTime: m.mem.ModTime}, nil
@@ -2887,9 +2887,9 @@ func NewWebDAVDirReader(mfs *MovistarFS, path string, folderID int64, modTimes .
 	return &WebDAVDirReader{mfs: mfs, path: path, folderID: folderID, modTime: mt}
 }
 
-func (d *WebDAVDirReader) Read(p []byte) (n int, err error) { return 0, io.EOF }
+func (d *WebDAVDirReader) Read(p []byte) (n int, err error)  { return 0, io.EOF }
 func (d *WebDAVDirReader) Write(p []byte) (n int, err error) { return 0, fs.ErrPermission }
-func (d *WebDAVDirReader) Close() error                     { return nil }
+func (d *WebDAVDirReader) Close() error                      { return nil }
 
 func (d *WebDAVDirReader) Seek(offset int64, whence int) (int64, error) {
 	d.mu.Lock()
