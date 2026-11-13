@@ -271,3 +271,19 @@ func TestGetSyncInterval(t *testing.T) {
 		t.Errorf("expected default 60s on invalid, got %v", got)
 	}
 }
+
+func TestTransferLimits(t *testing.T) {
+	t.Setenv("WEBDAV_MAX_DOWNLOADS", "")
+	t.Setenv("WEBDAV_MAX_UPLOADS", "")
+	if d, u := TransferLimits(false); d != 1 || u != 1 {
+		t.Errorf("sin modo web: esperado 1/1, obtenido %d/%d", d, u)
+	}
+	if d, u := TransferLimits(true); d != 4 || u != 2 {
+		t.Errorf("modo web: esperado 4/2, obtenido %d/%d", d, u)
+	}
+	t.Setenv("WEBDAV_MAX_DOWNLOADS", "6")
+	t.Setenv("WEBDAV_MAX_UPLOADS", "0")
+	if d, u := TransferLimits(true); d != 6 || u != 2 {
+		t.Errorf("con variables: esperado 6/2 (0 se ignora), obtenido %d/%d", d, u)
+	}
+}

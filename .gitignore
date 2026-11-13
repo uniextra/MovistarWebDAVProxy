@@ -72,3 +72,4 @@ synobkpinfo_dump.db
 docker_app/
 *.bundle.js
 .agent/
+.webprofile/

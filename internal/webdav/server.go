@@ -142,7 +142,7 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig, metaStore
 		FileSystem: fs,
 		LockSystem: lockSys,
 		Logger: func(r *http.Request, err error) {
-			if err != nil && !errors.Is(err, ErrUploadTooLarge) {
+			if err != nil && !errors.Is(err, ErrUploadTooLarge) && !isExpectedNotFound(r.Method, err) {
 				logger.Log("[WebDAV] ❌ Error en %s %s: %v", r.Method, r.URL.Path, err)
 			}
 		},
@@ -502,6 +502,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// COPY de un archivo: copia en la nube, como la web, sin descargar ni subir.
+	if method == "COPY" && s.tryServerCopy(lw, r) {
+		return
+	}
+
 	// 4. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
 	if method == "GET" || method == "HEAD" {
 		ext := filepath.Ext(urlPath)
@@ -517,9 +522,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 200/206 truncado que el cliente tomaría por bueno. Un cuerpo corto (truncado
 		// a mitad de la transmisión) se deja como está: el cliente ya lo detecta con
 		// 'unexpected EOF', igual que hasta ahora.
-		g := &getBodyGuard{ResponseWriter: lw, isHEAD: method == "HEAD"}
+		var out http.ResponseWriter = lw
+		var tw *transferWriter
+		if method == "GET" {
+			tw = &transferWriter{ResponseWriter: lw, path: urlPath}
+			out = tw
+		}
+		g := &getBodyGuard{ResponseWriter: out, isHEAD: method == "HEAD"}
 		s.handler.ServeHTTP(g, r)
 		g.finish()
+		if tw != nil {
+			tw.done()
+		}
 		return
 	}
 
@@ -760,8 +774,22 @@ func cleanLockPath(p string) string {
 	return path.Clean("/" + strings.TrimSpace(p))
 }
 
+// implicitLockWait es cuánto espera el bloqueo implícito de una petición (el que
+// x/net/webdav pone mientras dura un MKCOL, PUT, MOVE...) a que se libere otro
+// sobre la misma ruta, antes de responder 423.
+var implicitLockWait = 10 * time.Second
+
 func (l *resilientLockSystem) Create(now time.Time, details webdav.LockDetails) (string, error) {
 	tok, err := l.inner.Create(now, details)
+	// Dos peticiones simultáneas sobre la misma ruta (p. ej. dos subidas que crean a
+	// la vez la misma carpeta nueva) chocan con el bloqueo implícito de la
+	// otra: la segunda espera a que acabe la primera en vez de fallar con 423. Los
+	// bloqueos explícitos de un cliente (LOCK, con propietario y caducidad) no esperan.
+	implicit := details.OwnerXML == "" && details.Duration < 0
+	for deadline := time.Now().Add(implicitLockWait); implicit && errors.Is(err, webdav.ErrLocked) && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
+		tok, err = l.inner.Create(time.Now(), details)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -864,4 +892,18 @@ func (l *resilientLockSystem) Confirm(now time.Time, name0, name1 string, condit
 		}
 	}
 	return release, err
+}
+
+// isExpectedNotFound indica un "no existe" en una consulta: los clientes (rclone,
+// Duplicati...) comprueban si un archivo existe antes de subirlo, y que no exista es
+// lo normal, no un error. En DELETE o MOVE sí se registra.
+func isExpectedNotFound(method string, err error) bool {
+	if !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	switch method {
+	case "PROPFIND", "HEAD", "GET":
+		return true
+	}
+	return false
 }
