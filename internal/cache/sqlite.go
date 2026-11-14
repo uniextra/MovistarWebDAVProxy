@@ -1379,3 +1379,23 @@ func (s *MetadataStore) ListAllVirtualEmptyFiles() ([]VirtualEmptyFilePathRecord
 	}
 	return records, rows.Err()
 }
+
+// ExtractMaxSeqIDFromSQLiteFile opens a Hyper Backup seq_mapping SQLite file and returns
+// the maximum integer seq_id from sequence_id_mapping (or 1 if empty/unavailable).
+func ExtractMaxSeqIDFromSQLiteFile(dbPath string) (int64, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return 1, err
+	}
+	defer db.Close()
+
+	var maxSeq sql.NullInt64
+	err = db.QueryRow(`SELECT MAX(CAST(seq_id AS INTEGER)) FROM sequence_id_mapping`).Scan(&maxSeq)
+	if err != nil {
+		return 1, err
+	}
+	if !maxSeq.Valid || maxSeq.Int64 < 1 {
+		return 1, nil
+	}
+	return maxSeq.Int64, nil
+}
