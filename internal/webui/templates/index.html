@@ -18,14 +18,14 @@
 </head>
 <body class="p-4 sm:p-6 max-w-5xl mx-auto text-slate-800">
     <!-- Header -->
-    <header class="flex flex-wrap items-center justify-between gap-4 mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-        <div class="flex items-center space-x-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/20 font-bold text-white text-lg">
+    <header class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8 bg-white p-5 sm:p-6 rounded-2xl shadow-sm border border-slate-200">
+        <div class="flex items-center space-x-3 min-w-0">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/20 font-bold text-white text-lg flex-shrink-0">
                 ☁
             </div>
-            <div>
-                <div class="flex items-center space-x-2">
-                    <h1 id="app-title-header" class="text-2xl font-bold text-slate-900 tracking-tight">
+            <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                    <h1 id="app-title-header" class="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
                         Movistar WebDAV Proxy
                     </h1>
                     <span id="provider-badge" class="text-xs font-mono font-bold uppercase tracking-wider px-2 py-0.5 bg-blue-100 text-blue-800 rounded-md border border-blue-200">Movistar</span>
@@ -34,12 +34,17 @@
                 <p class="text-xs text-slate-500 mt-0.5">Proxy WebDAV nativo de alto rendimiento para Duplicati & HyperBackup</p>
             </div>
         </div>
-        <div class="flex items-center space-x-3">
-            <button onclick="openTelegramModal()" id="telegram-header-btn" class="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-slate-200" title="Configurar alertas Telegram">
+        <div class="flex items-center space-x-2 sm:space-x-2.5 flex-shrink-0">
+            <button onclick="openTelegramModal()" id="telegram-header-btn" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-slate-200" title="Configurar alertas Telegram">
                 <span>✈️</span>
                 <span id="telegram-status-label">Telegram</span>
             </button>
-            <span id="proxy-status" class="px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs">⚪ Comprobando...</span>
+            <span id="proxy-status" class="px-3 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs">⚪ Comprobando...</span>
+            <button onclick="logout()" id="logout-btn" class="w-8 h-8 rounded-full bg-slate-100 hover:bg-rose-50 text-slate-500 hover:text-rose-600 hover:border-rose-200 border border-slate-200 flex items-center justify-center transition shadow-sm" title="Cerrar sesión" aria-label="Cerrar sesión">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+            </button>
         </div>
     </header>
 
@@ -383,7 +388,19 @@
         async function checkStatus() {
             try {
                 const res = await fetch('/status');
+                if (res.status === 401) {
+                    window.location.href = '/login';
+                    return;
+                }
                 const data = await res.json();
+                const logoutBtn = document.getElementById('logout-btn');
+                if (logoutBtn && typeof data.auth_enabled === 'boolean') {
+                    if (data.auth_enabled) {
+                        logoutBtn.classList.remove('hidden');
+                    } else {
+                        logoutBtn.classList.add('hidden');
+                    }
+                }
                 const webdavPort = document.getElementById('webdav-host-port');
                 if (webdavPort && data.webdav_host_port) {
                     webdavPort.textContent = data.webdav_host_port;
@@ -746,6 +763,12 @@
             } else {
                 fallbackCopy(text);
             }
+        }
+
+        function logout() {
+            fetch('/logout', { method: 'POST' }).finally(() => {
+                window.location.href = '/login';
+            });
         }
     </script>
 </body>

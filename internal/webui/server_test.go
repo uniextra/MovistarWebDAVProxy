@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,5 +285,353 @@ func TestWebUI_UnlinkActiveAndSecondary(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, "metadata_612345678.db")); !os.IsNotExist(err) {
 		t.Errorf("expected active metadata DB to be deleted")
+	}
+}
+
+func TestWebUI_LoginForm_PasswordManagerSupport(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// 1. GET /login renderiza el formulario con soporte para gestores de contraseñas
+	req := httptest.NewRequest("GET", "/login", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on GET /login, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+
+	// Verificación de estructura óptima para Password Managers (Bitwarden, 1Password, Chrome, etc.)
+	checks := []struct {
+		pattern string
+		desc    string
+	}{
+		{`<form id="loginForm" method="POST" action="/login" autocomplete="on"`, "Formulario estándar con autocomplete=on y POST a /login"},
+		{`id="username"`, "Input de usuario con id='username'"},
+		{`name="username"`, "Input de usuario con name='username'"},
+		{`autocomplete="username"`, "Input de usuario con autocomplete='username'"},
+		{`<label for="username"`, "Etiqueta label asociada for='username'"},
+		{`id="password"`, "Input de contraseña con id='password'"},
+		{`name="password"`, "Input de contraseña con name='password'"},
+		{`autocomplete="current-password"`, "Input de contraseña con autocomplete='current-password'"},
+		{`<label for="password"`, "Etiqueta label asociada for='password'"},
+		{`name="remember"`, "Checkbox recordatorio de sesión"},
+		{`type="submit"`, "Botón de envío tipo submit"},
+		{config.Version + " (Go)", "Versión inyectada dinámicamente en el login"},
+	}
+
+	for _, c := range checks {
+		if !strings.Contains(body, c.pattern) {
+			t.Errorf("falta en login.html: %s (buscado '%s')", c.desc, c.pattern)
+		}
+	}
+}
+
+func TestWebUI_UnauthenticatedRedirectAndAPI401(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// 1. Petición web sin autenticación redirige a /login (303 See Other)
+	navReq := httptest.NewRequest("GET", "/", nil)
+	navReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+	navRec := httptest.NewRecorder()
+	handler.ServeHTTP(navRec, navReq)
+
+	if navRec.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 redirect on unauthenticated GET /, got %d", navRec.Code)
+	}
+	if navRec.Header().Get("Location") != "/login" {
+		t.Errorf("expected redirect location /login, got %s", navRec.Header().Get("Location"))
+	}
+
+	// 2. Petición API sin credenciales devuelve 401 JSON SIN encabezado WWW-Authenticate (no modal nativo de navegador)
+	apiReq := httptest.NewRequest("GET", "/status", nil)
+	apiReq.Header.Set("Accept", "application/json")
+	apiRec := httptest.NewRecorder()
+	handler.ServeHTTP(apiRec, apiReq)
+
+	if apiRec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 on unauthenticated API call, got %d", apiRec.Code)
+	}
+	if apiRec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("API 401 response should not have WWW-Authenticate header to prevent native popup, got: %s", apiRec.Header().Get("WWW-Authenticate"))
+	}
+	var apiData map[string]interface{}
+	if err := json.Unmarshal(apiRec.Body.Bytes(), &apiData); err != nil {
+		t.Errorf("expected valid JSON 401 response: %v", err)
+	}
+}
+
+func TestWebUI_LoginFlow_SuccessAndSession(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// 1. Login con credenciales válidas mediante formulario estándar POST (x-www-form-urlencoded)
+	formData := url.Values{
+		"username": {"admin"},
+		"password": {"secretpassword"},
+		"remember": {"1"},
+	}
+	loginReq := httptest.NewRequest("POST", "/login", strings.NewReader(formData.Encode()))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect on successful login, got %d", loginRec.Code)
+	}
+	if loginRec.Header().Get("Location") != "/" {
+		t.Errorf("expected redirect to /, got %s", loginRec.Header().Get("Location"))
+	}
+
+	// Verificar cookie de sesión
+	cookies := loginRec.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == sessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("session cookie %s was not set", sessionCookieName)
+	}
+	if !sessionCookie.HttpOnly {
+		t.Errorf("session cookie must be HttpOnly")
+	}
+	if sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("expected SameSite=Lax, got %v", sessionCookie.SameSite)
+	}
+	if sessionCookie.MaxAge <= 0 {
+		t.Errorf("expected positive MaxAge for session cookie, got %d", sessionCookie.MaxAge)
+	}
+
+	// 2. Acceder a GET / con la cookie de sesión -> 200 OK
+	indexReq := httptest.NewRequest("GET", "/", nil)
+	indexReq.AddCookie(sessionCookie)
+	indexRec := httptest.NewRecorder()
+	handler.ServeHTTP(indexRec, indexReq)
+
+	if indexRec.Code != http.StatusOK {
+		t.Errorf("expected 200 on GET / with session cookie, got %d", indexRec.Code)
+	}
+
+	// 3. Acceder a GET /status con la cookie de sesión -> 200 OK
+	statusReq := httptest.NewRequest("GET", "/status", nil)
+	statusReq.AddCookie(sessionCookie)
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, statusReq)
+
+	if statusRec.Code != http.StatusOK {
+		t.Errorf("expected 200 on /status with session cookie, got %d", statusRec.Code)
+	}
+	var statusData map[string]interface{}
+	_ = json.Unmarshal(statusRec.Body.Bytes(), &statusData)
+	if statusData["auth_enabled"] != true {
+		t.Errorf("expected auth_enabled=true, got %v", statusData["auth_enabled"])
+	}
+
+	// 4. GET /login cuando ya está autenticado -> redirige a / (303)
+	loginAgainReq := httptest.NewRequest("GET", "/login", nil)
+	loginAgainReq.AddCookie(sessionCookie)
+	loginAgainRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginAgainRec, loginAgainReq)
+
+	if loginAgainRec.Code != http.StatusSeeOther || loginAgainRec.Header().Get("Location") != "/" {
+		t.Errorf("expected redirect to / when already authenticated, got %d -> %s", loginAgainRec.Code, loginAgainRec.Header().Get("Location"))
+	}
+
+	// 5. Cerrar sesión con POST /logout
+	logoutReq := httptest.NewRequest("POST", "/logout", nil)
+	logoutReq.AddCookie(sessionCookie)
+	logoutRec := httptest.NewRecorder()
+	handler.ServeHTTP(logoutRec, logoutReq)
+
+	if logoutRec.Code != http.StatusSeeOther || logoutRec.Header().Get("Location") != "/login" {
+		t.Errorf("expected redirect to /login on logout, got %d -> %s", logoutRec.Code, logoutRec.Header().Get("Location"))
+	}
+
+	// Comprobar que la cookie se invalida (MaxAge < 0)
+	logoutCookies := logoutRec.Result().Cookies()
+	var clearedCookie *http.Cookie
+	for _, c := range logoutCookies {
+		if c.Name == sessionCookieName {
+			clearedCookie = c
+			break
+		}
+	}
+	if clearedCookie == nil || clearedCookie.MaxAge >= 0 {
+		t.Errorf("expected cookie to be cleared with negative MaxAge")
+	}
+
+	// 6. Verificar que la sesión destruida ya no permite acceso
+	afterReq := httptest.NewRequest("GET", "/status", nil)
+	afterReq.AddCookie(sessionCookie)
+	afterRec := httptest.NewRecorder()
+	handler.ServeHTTP(afterRec, afterReq)
+
+	if afterRec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 after logout with old session token, got %d", afterRec.Code)
+	}
+}
+
+func TestWebUI_Login_InvalidCredentials(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// Intento fallido con contraseña incorrecta
+	formData := url.Values{
+		"username": {"admin"},
+		"password": {"wrongpassword"},
+	}
+	req := httptest.NewRequest("POST", "/login", strings.NewReader(formData.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on bad password, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Usuario o contraseña incorrectos") {
+		t.Errorf("expected error message in body, got: %s", body)
+	}
+	if !strings.Contains(body, `value="admin"`) {
+		t.Errorf("expected entered username to be preserved, got: %s", body)
+	}
+}
+
+func TestWebUI_Login_JSONSupport(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// Login exitoso vía JSON
+	jsonBody := `{"username":"admin","password":"secretpassword","remember":true}`
+	req := httptest.NewRequest("POST", "/login", strings.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on JSON login, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var res map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("expected JSON response: %v", err)
+	}
+	if res["status"] != "ok" || res["redirect"] != "/" {
+		t.Errorf("unexpected JSON login response: %+v", res)
+	}
+
+	// Login fallido vía JSON
+	badJSON := `{"username":"admin","password":"incorrect"}`
+	badReq := httptest.NewRequest("POST", "/login", strings.NewReader(badJSON))
+	badReq.Header.Set("Content-Type", "application/json")
+	badRec := httptest.NewRecorder()
+	handler.ServeHTTP(badRec, badReq)
+
+	if badRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on bad JSON login, got %d", badRec.Code)
+	}
+}
+
+func TestWebUI_AuthDisabledBehavior(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{AuthDisabled: true})
+
+	// 1. GET / funciona directamente sin login ni Basic Auth
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 on GET / when auth disabled, got %d", rec.Code)
+	}
+
+	// 2. GET /login redirige directamente a /
+	loginReq := httptest.NewRequest("GET", "/login", nil)
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusSeeOther || loginRec.Header().Get("Location") != "/" {
+		t.Errorf("expected redirect to / when auth disabled, got %d -> %s", loginRec.Code, loginRec.Header().Get("Location"))
+	}
+
+	// 3. /status indica auth_enabled=false
+	statusReq := httptest.NewRequest("GET", "/status", nil)
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, statusReq)
+
+	var statusData map[string]interface{}
+	_ = json.Unmarshal(statusRec.Body.Bytes(), &statusData)
+	if statusData["auth_enabled"] != false {
+		t.Errorf("expected auth_enabled=false, got %v", statusData["auth_enabled"])
+	}
+}
+
+func TestWebUI_Login_CSRFProtection(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// 1. Origen malicioso (evil.com) -> 403 Forbidden
+	evilReq := httptest.NewRequest("POST", "/login", strings.NewReader("username=admin&password=secretpassword"))
+	evilReq.Host = "localhost:5000"
+	evilReq.Header.Set("Origin", "http://evil.example.com")
+	evilReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	evilRec := httptest.NewRecorder()
+	handler.ServeHTTP(evilRec, evilReq)
+
+	if evilRec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on evil.example.com login attempt, got %d", evilRec.Code)
+	}
+
+	// 2. Origen 'null' (iframe aislado / sandbox hostil) -> 403 Forbidden
+	nullReq := httptest.NewRequest("POST", "/login", strings.NewReader("username=admin&password=secretpassword"))
+	nullReq.Host = "localhost:5000"
+	nullReq.Header.Set("Origin", "null")
+	nullReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	nullRec := httptest.NewRecorder()
+	handler.ServeHTTP(nullRec, nullReq)
+
+	if nullRec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on Origin: null, got %d", nullRec.Code)
+	}
+
+	// 3. Origen legítimo localhost vs 127.0.0.1 (mismo loopback y puerto) -> 303 Éxito
+	loopbackReq := httptest.NewRequest("POST", "/login", strings.NewReader("username=admin&password=secretpassword"))
+	loopbackReq.Host = "127.0.0.1:5000"
+	loopbackReq.Header.Set("Origin", "http://localhost:5000")
+	loopbackReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loopbackRec := httptest.NewRecorder()
+	handler.ServeHTTP(loopbackRec, loopbackReq)
+
+	if loopbackRec.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 on valid loopback match (localhost vs 127.0.0.1), got %d: %s", loopbackRec.Code, loopbackRec.Body.String())
+	}
+
+	// 4. Detrás de proxy inverso (X-Forwarded-Host: proxy.example.com) -> 303 Éxito
+	proxyReq := httptest.NewRequest("POST", "/login", strings.NewReader("username=admin&password=secretpassword"))
+	proxyReq.Host = "10.0.0.5:5000"
+	proxyReq.Header.Set("X-Forwarded-Host", "proxy.example.com")
+	proxyReq.Header.Set("Origin", "https://proxy.example.com")
+	proxyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	proxyRec := httptest.NewRecorder()
+	handler.ServeHTTP(proxyRec, proxyReq)
+
+	if proxyRec.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 on valid X-Forwarded-Host match, got %d", proxyRec.Code)
 	}
 }
