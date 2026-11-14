@@ -2,6 +2,16 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.4.4] - 2026-11-14
+
+### 🛠️ Synology Hyper Backup: Auto-healing de `Control/@writer` y carpetas reales
+- **Auto-healing de estado (`#23`, PR `#40`):** al listar `Control/@writer`, si existe `seq_mapping` pero faltan los ficheros de 0 bytes `v1.cformat` o `v1.<seq_id>.-1.0.0.none.none.cinfo` (por reinicio del contenedor o expiración de caché), el proxy lee `MAX(CAST(seq_id AS INTEGER))` de `seq_mapping` y reconstruye ambos ficheros virtuales automáticamente en la caché SQLite.
+- **Emulación local estricta a 0 bytes:** los archivos `> 0` bytes y las carpetas `@reader` se crean y suben a Movistar Cloud en lugar de emularse solo en RAM.
+
+### 🔐 WebUI Login CSRF y Documentación
+- **Login WebUI (`Referrer-Policy: same-origin`):** corregido el rechazo `Origen de solicitud no permitido (CSRF)` (`Origin: null`) al enviar el formulario `POST /login`, añadiendo también soporte `HEAD /login`.
+- **Documentación (`README.md`):** documentado el uso opcional de `WEBDAV_TMPDIR=/app/tmp` junto con un volumen en disco para NAS con poca RAM.
+
 ## [v2.4.3] - 2026-11-13
 
 ### 🛠️ Evitar el bucle 401 y las rotaciones inútiles del refresh_token
