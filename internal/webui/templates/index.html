@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Movistar & O2 WebDAV Proxy (Go)</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%232563eb'/%3E%3Cpath d='M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z' fill='white'/%3E%3C/svg%3E">
+    <script>
+        // Tema: el elegido con el botón (guardado en el navegador) o, si no hay, el del sistema.
+        // Se aplica antes de pintar para evitar el destello blanco al cargar en modo oscuro.
+        (function () {
+            let saved = null;
+            try { saved = localStorage.getItem('mc_theme'); } catch (e) {}
+            const dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (dark) document.documentElement.classList.add('dark');
+        })();
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -14,6 +24,49 @@
         .terminal-box::-webkit-scrollbar-track { background: #0A0F1C; }
         .terminal-box::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 4px; }
         .terminal-box::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+        /* ---- Modo oscuro: reinterpreta los colores claros de la plantilla ---- */
+        html.dark { color-scheme: dark; }
+        html.dark body { background-color: #0b1120; color: #e2e8f0; }
+        html.dark .bg-white { background-color: #141b2a; }
+        html.dark .bg-slate-50 { background-color: #1a2233; }
+        html.dark .bg-slate-100 { background-color: #212a3d; }
+        html.dark .hover\:bg-slate-100:hover { background-color: #263045; }
+        html.dark .hover\:bg-slate-200:hover { background-color: #2c3750; }
+        html.dark .border-slate-100 { border-color: #232d40; }
+        html.dark .border-slate-200 { border-color: #2a3448; }
+        html.dark .border-slate-300 { border-color: #364258; }
+        html.dark .text-slate-900, html.dark .text-slate-800 { color: #e5e9f0; }
+        html.dark .text-slate-700 { color: #cdd5e1; }
+        html.dark .text-slate-600, html.dark .hover\:text-slate-600:hover { color: #aeb8c7; }
+        html.dark .text-slate-500 { color: #8f9aab; }
+        html.dark .shadow-sm { box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+
+        html.dark .bg-blue-50 { background-color: rgba(59,130,246,.12); }
+        html.dark .bg-blue-100, html.dark .hover\:bg-blue-50:hover { background-color: rgba(59,130,246,.22); }
+        html.dark .bg-emerald-50 { background-color: rgba(16,185,129,.12); }
+        html.dark .bg-emerald-100 { background-color: rgba(16,185,129,.22); }
+        html.dark .bg-rose-50 { background-color: rgba(244,63,94,.12); }
+        html.dark .bg-rose-100, html.dark .hover\:bg-rose-100:hover { background-color: rgba(244,63,94,.22); }
+        html.dark .bg-sky-50 { background-color: rgba(14,165,233,.12); }
+        html.dark .bg-amber-50 { background-color: rgba(245,158,11,.12); }
+        html.dark .ring-offset-1 { --tw-ring-offset-color: #141b2a; }
+        html.dark .text-amber-800 { color: #fcd34d; }
+        html.dark .border-amber-300 { border-color: rgba(251,191,36,.4); }
+        html.dark .bg-sky-100 { background-color: rgba(14,165,233,.22); }
+
+        html.dark .text-blue-600, html.dark .text-blue-700, html.dark .text-blue-800, html.dark .text-blue-900 { color: #93c5fd; }
+        html.dark .text-emerald-700, html.dark .text-emerald-800 { color: #6ee7b7; }
+        html.dark .text-rose-600, html.dark .text-rose-700, html.dark .text-rose-800 { color: #fda4af; }
+        html.dark .text-sky-600, html.dark .text-sky-700, html.dark .text-sky-800 { color: #7dd3fc; }
+
+        html.dark .border-blue-100, html.dark .border-blue-200, html.dark .border-blue-300 { border-color: rgba(96,165,250,.35); }
+        html.dark .border-emerald-200 { border-color: rgba(52,211,153,.35); }
+        html.dark .border-rose-200 { border-color: rgba(251,113,133,.35); }
+        html.dark .border-sky-200 { border-color: rgba(56,189,248,.35); }
+
+        html.dark input, html.dark textarea { color: #e5e9f0; }
+        html.dark input::placeholder, html.dark textarea::placeholder { color: #6b7688; }
     </style>
 </head>
 <body class="p-4 sm:p-6 max-w-5xl mx-auto text-slate-800">
@@ -35,6 +88,7 @@
             </div>
         </div>
         <div class="flex items-center space-x-2 sm:space-x-2.5 flex-shrink-0">
+            <button onclick="toggleTheme()" id="theme-toggle" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs transition border border-slate-200" title="Cambiar entre modo claro y oscuro">🌙</button>
             <button onclick="openTelegramModal()" id="telegram-header-btn" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-slate-200" title="Configurar alertas Telegram">
                 <span>✈️</span>
                 <span id="telegram-status-label">Telegram</span>
@@ -49,8 +103,31 @@
     </header>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+        <!-- Sesión web (modo web): sustituye a la tarjeta de dispositivo OAuth -->
+        <div id="web-session-card" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
+            <div>
+                <div class="mb-4 flex items-center justify-between">
+                    <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">🌐</span> Sesión web de Movistar Cloud</h2>
+                    <span id="ws-state" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">Comprobando...</span>
+                </div>
+                <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs space-y-1.5">
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Activa desde:</span><span id="ws-since" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Última comprobación:</span><span id="ws-checked" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Caduca:</span><span id="ws-expires" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Renovación automática:</span><span id="ws-renew" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Papelera:</span><span id="ws-trash" class="font-semibold">-</span></div>
+                    <div id="ws-account" class="hidden text-xs text-slate-500 pt-1"></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Modo:</span><span class="font-semibold text-emerald-700">Navegador (Chromium sin pantalla)</span></div>
+                </div>
+                <p id="ws-hint" class="hidden text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-3 mb-4">La sesión ha caducado: inicia sesión de nuevo para que el proxy vuelva a funcionar.</p>
+            </div>
+            <div class="pt-4 border-t border-slate-100 mt-2">
+                <a id="ws-login-btn" href="/web-login/" target="_blank" rel="noopener" class="block w-full text-center bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2.5 px-4 rounded-xl transition text-sm border border-slate-200">🔐 Abrir inicio de sesión</a>
+            </div>
+        </div>
+
         <!-- Autenticación y Dispositivo -->
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
+        <div id="device-card" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
             <div>
                 <div class="mb-4">
                     <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">📱</span> Dispositivo & Cuenta</h2>
@@ -117,6 +194,23 @@
                     ■ Pausar WebDAV
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- Transferencias en curso -->
+    <div id="transfers-card" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-8">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">⇅</span> Transferencias</h2>
+            <span id="tr-summary" class="text-xs text-slate-500">-</span>
+        </div>
+        <div id="tr-empty" class="text-sm text-slate-500">Sin subidas ni descargas en curso.</div>
+        <div id="tr-up-box" class="hidden mb-4">
+            <h3 class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Subiendo a la nube</h3>
+            <div id="tr-up" class="space-y-2"></div>
+        </div>
+        <div id="tr-down-box" class="hidden">
+            <h3 class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Descargando</h3>
+            <div id="tr-down" class="space-y-2"></div>
         </div>
     </div>
 
@@ -324,7 +418,151 @@
             setInterval(checkStatus, 5000);
             fetchLogs();
             logInterval = setInterval(fetchLogs, 2000);
+            initWebMode();
+            refreshTransfers();
+            setInterval(refreshTransfers, 3000);
         });
+
+        // ---- Tema claro / oscuro ----
+        function updateThemeButton() {
+            const dark = document.documentElement.classList.contains('dark');
+            const b = document.getElementById('theme-toggle');
+            if (b) { b.textContent = dark ? '☀️' : '🌙'; b.title = dark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'; }
+        }
+        function toggleTheme() {
+            const dark = !document.documentElement.classList.contains('dark');
+            document.documentElement.classList.toggle('dark', dark);
+            try { localStorage.setItem('mc_theme', dark ? 'dark' : 'light'); } catch (e) {}
+            updateThemeButton();
+        }
+        // Sin elección guardada, sigue los cambios del sistema en vivo.
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+            let saved = null;
+            try { saved = localStorage.getItem('mc_theme'); } catch (err) {}
+            if (!saved) { document.documentElement.classList.toggle('dark', e.matches); updateThemeButton(); }
+        });
+        window.addEventListener('DOMContentLoaded', updateThemeButton);
+
+        // ---- Modo web: sesión del navegador y copia a la nube ----
+        function fmtTime(iso) {
+            if (!iso) return '-';
+            const d = new Date(iso);
+            return isNaN(d) ? iso : d.toLocaleString('es-ES', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
+        }
+
+        async function initWebMode() {
+            try {
+                const res = await fetch('/web_session');
+                const data = await res.json();
+                if (data.enabled) {
+                    document.getElementById('device-card').classList.add('hidden');
+                    document.getElementById('web-session-card').classList.remove('hidden');
+                    renderWebSession(data);
+                    setInterval(refreshWebSession, 10000);
+                }
+            } catch (err) {}
+        }
+
+        async function refreshWebSession() {
+            try { renderWebSession(await (await fetch('/web_session')).json()); } catch (err) {}
+        }
+
+        let webStorageLoaded = false;
+        function renderWebSession(d) {
+            const st = document.getElementById('ws-state');
+            const btn = document.getElementById('ws-login-btn');
+            if (d.logged_in) {
+                st.textContent = '✔ Activa';
+                st.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800';
+                btn.className = 'block w-full text-center bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2.5 px-4 rounded-xl transition text-sm border border-slate-200';
+                document.getElementById('ws-hint').classList.add('hidden');
+                if (!webStorageLoaded) { webStorageLoaded = true; loadStorageInfo(''); }
+            } else {
+                st.textContent = '✘ Caducada';
+                st.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-rose-100 text-rose-800';
+                btn.className = 'block w-full text-center bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl shadow-sm transition text-sm';
+                document.getElementById('ws-hint').classList.remove('hidden');
+            }
+            document.getElementById('ws-since').textContent = fmtTime(d.since);
+            document.getElementById('ws-checked').textContent = fmtTime(d.checked_at);
+            document.getElementById('ws-expires').textContent = fmtTime(d.expires);
+            document.getElementById('ws-renew').textContent = d.remember
+                ? (d.renewed_at ? 'sí · última ' + fmtTime(d.renewed_at) : 'sí')
+                : 'no (entra con e-mail y «No cerrar sesión»)';
+            const every = d.trash_empty_every && d.trash_empty_every !== '0s' ? 'se vacía cada ' + d.trash_empty_every.replace(/m0s$/, 'm').replace(/h0m$/, 'h') : 'vaciado automático desactivado';
+            document.getElementById('ws-trash').textContent = every + (d.trash_emptied_at ? ' · última ' + fmtTime(d.trash_emptied_at) : '');
+            const acc = d.account || {};
+            const parts = [];
+            if (acc['sapi.upload.max-size-in-mb']) parts.push('máx. por archivo ' + acc['sapi.upload.max-size-in-mb'] + ' MB');
+            if (acc['folders.softdelete-updates-limit']) parts.push('borrar carpeta ≤ ' + acc['folders.softdelete-updates-limit'] + ' elementos');
+            if (acc['folders.move-updates-limit']) parts.push('mover carpeta ≤ ' + acc['folders.move-updates-limit'] + ' elementos');
+            const exp = parseInt(acc['trash.cleanup.items-expire-time-in-minutes'], 10);
+            if (exp > 0) parts.push('Movistar vacía la papelera a los ' + (exp >= 1440 ? Math.round(exp / 1440) + ' días' : exp + ' min'));
+            const accEl = document.getElementById('ws-account');
+            accEl.textContent = parts.length ? 'Cuenta: ' + parts.join(' · ') : '';
+            accEl.classList.toggle('hidden', !parts.length);
+        }
+
+        function fmtBytes(n) {
+            if (!n) return '0 B';
+            const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+            return (n / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + u[i];
+        }
+
+        function fmtSecs(s) {
+            if (s == null) return '';
+            if (s < 60) return s + ' s';
+            if (s < 3600) return Math.round(s / 60) + ' min';
+            return Math.floor(s / 3600) + ' h ' + Math.round((s % 3600) / 60) + ' min';
+        }
+
+        // Subidas a la nube y descargas servidas por el proxy. Una descarga terminada
+        // sigue visible unos minutos como "en búfer": el cliente suele tener lo leído.
+        async function refreshTransfers() {
+            let d;
+            try { d = await (await fetch('/transfers')).json(); } catch (err) { return; }
+            const list = d.transfers || [];
+            const ups = list.filter(t => t.kind === 'upload'), downs = list.filter(t => t.kind === 'download');
+            const render = (boxId, listId, items, color) => {
+                const box = document.getElementById(boxId), el = document.getElementById(listId);
+                box.classList.toggle('hidden', !items.length);
+                el.replaceChildren(...items.map(t => {
+                    const row = document.createElement('div');
+                    row.className = 'text-xs' + (t.idle ? ' opacity-60' : '');
+                    const head = document.createElement('div');
+                    head.className = 'flex justify-between gap-3 mb-1';
+                    const name = document.createElement('span');
+                    name.className = 'font-mono truncate';
+                    name.title = t.path;
+                    name.textContent = t.path;
+                    const info = document.createElement('span');
+                    info.className = 'shrink-0 text-slate-500';
+                    const parts = [];
+                    if (t.size) parts.push(t.percentage + '% de ' + fmtBytes(t.size));
+                    if (t.idle) parts.push('en búfer · hace ' + fmtSecs(t.idle_seconds));
+                    else if (t.speed) parts.push(fmtBytes(t.speed) + '/s');
+                    if (!t.idle && t.eta != null) parts.push('quedan ' + fmtSecs(t.eta));
+                    info.textContent = parts.join(' · ');
+                    head.append(name, info);
+                    const bar = document.createElement('div');
+                    bar.className = 'h-1.5 bg-slate-100 rounded-full overflow-hidden';
+                    const fill = document.createElement('div');
+                    fill.className = 'h-full ' + color;
+                    fill.style.width = (t.percentage || 0) + '%';
+                    bar.append(fill);
+                    row.append(head, bar);
+                    return row;
+                }));
+            };
+            render('tr-up-box', 'tr-up', ups, 'bg-blue-500');
+            render('tr-down-box', 'tr-down', downs, 'bg-emerald-500');
+            document.getElementById('tr-empty').classList.toggle('hidden', list.length > 0);
+            const speed = list.filter(t => !t.idle).reduce((a, t) => a + (t.speed || 0), 0);
+            document.getElementById('tr-summary').textContent = list.length
+                ? `${ups.length} subiendo · ${downs.filter(t => !t.idle).length} descargando` + (speed ? ' · ' + fmtBytes(speed) + '/s' : '')
+                : '-';
+        }
 
         async function checkCredentials() {
             const phone = phoneInput.value.trim();

@@ -69,6 +69,19 @@ type Server struct {
 	rateLimiter  *config.AuthRateLimiter
 	sessionMu    sync.RWMutex
 	sessions     map[string]*webSession
+	webLogin     http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
+	webStatus    func() map[string]interface{}
+}
+
+// SetWebSessionStatus publica en /web_session el estado de la sesión web (modo web).
+func (s *Server) SetWebSessionStatus(f func() map[string]interface{}) {
+	s.webStatus = f
+}
+
+// SetWebLogin publica en /web-login/ la vista remota para iniciar sesión en la web
+// de Movistar Cloud (modo web). Queda detrás de la autenticación del panel.
+func (s *Server) SetWebLogin(h http.Handler) {
+	s.webLogin = h
 }
 
 type pendingLogin struct {
@@ -141,6 +154,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/save_telegram", s.handleSaveTelegram)
 	mux.HandleFunc("/api/diagnostic/compare", s.handleDiagnosticCompare)
 	mux.HandleFunc("/diagnostic/compare", s.handleDiagnosticCompare)
+	if s.webLogin != nil {
+		mux.Handle("/web-login/", s.webLogin)
+	}
+	mux.HandleFunc("/web_session", s.handleWebSession)
+	mux.HandleFunc("/transfers", s.handleTransfers)
 
 	return s.securityMiddleware(mux)
 }

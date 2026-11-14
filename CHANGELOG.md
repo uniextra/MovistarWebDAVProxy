@@ -2,6 +2,33 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [Sin publicar]
+
+### 🌐 Modo web opcional (`WEB_SESSION=true`, imagen `Dockerfile.web`)
+
+- **Qué es:** alternativa al inicio de sesión del cliente de escritorio. Un Chromium sin pantalla guarda la sesión de la web oficial (`micloud.movistar.es`) y las llamadas a SAPI se hacen desde esa pestaña, con sus cookies, `validationkey` y `X-deviceid: web-…`. Las subidas van directas a `upload.*` con las cookies de la sesión y las descargas por la URL firmada (con `Range`).
+- **Por qué:** cuando CloudFront bloquea el cliente OAuth `omh windows client` (403) o el emparejamiento por SMS no funciona, la web sigue funcionando. Imagen y `docker-compose.web.yml` aparte: el modo normal y su imagen de ~20 MB no cambian.
+- **Inicio de sesión desde el panel:** `/web-login/` muestra la pestaña del Chromium (captura, ratón y teclado) para entrar como en la web. Tarjeta **Sesión web** en el panel.
+- **Renovación automática:** la sesión (`JSESSIONID`) caduca a las 24 h aunque haya actividad. Con «No cerrar sesión» Movistar deja una cookie `PLC` (~90 días) con la que la web reentra sola; el proxy renueva la sesión una hora antes (`WEB_SESSION_RENEW_BEFORE`) con las demás llamadas en espera, porque la `PLC` rota en cada uso y el uso simultáneo la anula.
+- **Como la web:** `acceptasynchronous=true` solo en subidas de más de 200 MiB (`minAsyncUploadFileSizeBytes`); ante `MED-1017` se consulta `get-validation-status`; borrados con `/media/<tipo>?action=delete&softdelete=true` y `/media/folder?action=softdelete` con su cuerpo JSON (y la llamada genérica si se rechazan); `COPY` de WebDAV con la copia en la nube (`/media/file?action=copy`); 2 subidas y 4 descargas simultáneas (`WEBDAV_MAX_UPLOADS`, `WEBDAV_MAX_DOWNLOADS`).
+- **URLs firmadas caducadas:** una lectura por rangos con la URL caducada (403, rango ignorado o cuerpo vacío) pide otra URL y reintenta; antes una lectura larga se colgaba tras unas horas.
+- **Papelera:** vaciado periódico opcional (`WEB_TRASH_EMPTY_EVERY`, desactivado por defecto).
+- **Opciones de la cuenta:** el panel muestra lo que la web lee de `/system/information` (tamaño máximo, límites `FOL-1036`, caducidad de la papelera).
+
+### ⇅ Transferencias en el panel
+
+- Tarjeta con las subidas a la nube y las descargas servidas en curso: nombre, porcentaje, velocidad y tiempo restante. Las lecturas por rangos de un mismo archivo se agrupan y, al terminar, siguen visibles 5 min como «en búfer» (un cliente que lee por rangos puede pasar minutos sin pedir datos).
+
+### 🛠️ Correcciones
+
+- **Nombres de más de 255 caracteres:** SAPI no los rechaza: los guarda recortados a 255 y responde como si todo fuera bien. Con nombres cifrados (rclone `crypt`) el recortado ya no se puede descifrar y el archivo queda invisible, aunque el cliente lo dio por copiado. `PUT`, `MKCOL` y el destino de `MOVE`/`COPY` con un nombre de más de 255 caracteres reciben ahora `400` y el cliente informa del error.
+- **`SQLITE_BUSY` con escrituras concurrentes:** los `PRAGMA` (`busy_timeout`, `journal_mode=WAL`, `synchronous`) se aplicaban solo a una conexión del pool; ahora van en el DSN y valen para todas. Test que reproducía el fallo.
+- **`423 Locked` en peticiones simultáneas sobre la misma ruta** (p. ej. varios `MKCOL` de rclone): `x/net/webdav` pone un bloqueo implícito por petición; el sistema de bloqueos espera hasta 10 s a que se libere un bloqueo implícito en vez de fallar al instante.
+- **`MED-1017` al mover un archivo recién subido:** hasta ~70 s de espera creciente (antes ~10 s, insuficiente para algunos archivos).
+- **`UpdateFolder`** ya no da por buena una respuesta HTTP 200 con un error en el cuerpo; `FOL-1036` (límite de elementos al mover o borrar una carpeta) devuelve un error propio.
+- **Registro:** los «no existe» de `PROPFIND`/`HEAD`/`GET` (comprobaciones normales de rclone y Duplicati antes de subir) ya no se registran como errores.
+- **Panel:** modo oscuro (sigue al sistema o se elige con el botón).
+
 ## [v2.4.3] - 2026-11-13
 
 ### 🛠️ Evitar el bucle 401 y las rotaciones inútiles del refresh_token

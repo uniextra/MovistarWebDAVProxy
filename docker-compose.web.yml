@@ -1,0 +1,42 @@
+# Modo web (opcional): el proxy usa Movistar Cloud como la web oficial, con un
+# Chromium sin pantalla. Para cuando el inicio de sesión del cliente de escritorio
+# (OAuth) no funciona o CloudFront lo bloquea. Ver "Modo web" en el README.
+#
+#   docker compose -f docker-compose.web.yml up -d --build
+#
+# Después, abre el panel (puerto 5000) y pulsa "Abrir inicio de sesión".
+services:
+  movistar-webdav-proxy-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: movistar-webdav-proxy:web
+    container_name: movistar-webdav-proxy-web
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    shm_size: 256m          # Chromium usa /dev/shm
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - TZ=${TZ:-Europe/Madrid}
+      - WEBDAV_USER=${WEBDAV_USER:-}
+      - WEBDAV_PASSWORD=${WEBDAV_PASSWORD:-}
+      - WEBUI_USER=${WEBUI_USER:-}
+      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-}
+      - WEBDAV_HOST_PORT=${WEBDAV_PORT:-5050}
+      # Opcional (valores por defecto entre paréntesis):
+      # - WEBDAV_MAX_DOWNLOADS=4          # Descargas simultáneas (4 en modo web)
+      # - WEBDAV_MAX_UPLOADS=2            # Subidas simultáneas (2, como la web)
+      # - WEB_SESSION_RENEW_BEFORE=1h     # Renueva la sesión de 24 h este margen antes (requiere "No cerrar sesión")
+      # - WEB_TRASH_EMPTY_EVERY=6h        # Vacía la papelera cada X (desactivado)
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${WEB_PORT:-5000}:5000"
+      - "${BIND_IP:-0.0.0.0}:${WEBDAV_PORT:-5050}:8080"
+    volumes:
+      - movistar_tokens_web:/app/tokens   # incluye el perfil de Chromium (la sesión)
+
+volumes:
+  movistar_tokens_web:
+    name: movistar_webdav_tokens_web

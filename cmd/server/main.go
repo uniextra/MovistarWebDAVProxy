@@ -12,10 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	"movistar-webdav-proxy/internal/auth"
 	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/sapi"
+	"movistar-webdav-proxy/internal/webclient"
 	"movistar-webdav-proxy/internal/webdav"
 	"movistar-webdav-proxy/internal/webui"
 )
@@ -53,7 +55,9 @@ func main() {
 	}
 
 	cfg := config.LoadAccountConfig("")
-	if cfg.DeviceID != "" {
+	if config.WebSessionEnabled() {
+		// El modo de autenticación se anuncia al iniciar la sesión web.
+	} else if cfg.DeviceID != "" {
 		logger.Log("[WebDAV] 💻 Modo Autenticación: CLIENTE OFICIAL WINDOWS (%s)", logger.Mask(cfg.DeviceID))
 	} else if cfg.RefreshToken != "" {
 		logger.Log("[WebDAV] 📱 Modo Autenticación: Tokens OAuth2 Activos")
@@ -69,10 +73,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Modo web: Movistar Cloud se usa como la web oficial, con un Chromium sin
+	// pantalla que guarda la sesión, en lugar de los tokens del cliente de escritorio.
+	var webSess *webclient.Session
+	if config.WebSessionEnabled() {
+		webSess, err = webclient.NewSession(webclient.Options{
+			ProfileDir: filepath.Join(config.TokensDir, "webprofile"),
+			ChromePath: strings.TrimSpace(os.Getenv("CHROME_PATH")),
+			NoSandbox:  strings.EqualFold(strings.TrimSpace(os.Getenv("CHROME_NO_SANDBOX")), "true"),
+		})
+		if err != nil {
+			logger.Log("[FATAL] Error iniciando la sesión web (Chromium): %v", err)
+			os.Exit(1)
+		}
+		defer webSess.Close()
+		// Descargas firmadas y subidas directas con la huella TLS de Chrome (uTLS), a juego
+		// con el User-Agent del Chromium de la sesión.
+		client.EnableWebSession(webSess, &webclient.Transport{Session: webSess, Base: auth.NewFingerprintedTransport()})
+		logger.Log("[WebDAV] 🌐 Modo Autenticación: SESIÓN WEB (navegador)")
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 45*time.Second)
+		if !webSess.CheckLogin(checkCtx) {
+			logger.Log("[!] ⚠️ Sesión web no iniciada. Abre el panel en /web-login/ para iniciar sesión en Movistar Cloud.")
+		}
+		checkCancel()
+	}
+
 	var metaStore *cache.MetadataStore
 	var dbPath string
 	if phoneClean := config.SanitizePhone(cfg.Phone); phoneClean != "" {
 		dbPath = filepath.Join(config.TokensDir, fmt.Sprintf("metadata_%s.db", phoneClean))
+	} else if webSess != nil {
+		dbPath = filepath.Join(config.TokensDir, "metadata_web.db")
 	} else if cfg.RefreshToken != "" || cfg.DeviceID != "" || cfg.JSessionID != "" {
 		dbPath = filepath.Join(config.TokensDir, "metadata.db")
 	}
@@ -87,6 +118,15 @@ func main() {
 		}
 	}
 
+	maxDown, maxUp := config.TransferLimits(client.WebMode())
+	webdav.SetTransferLimits(maxDown, maxUp)
+	if client.WebMode() && strings.TrimSpace(os.Getenv("SAPI_MAX_CONCURRENT")) == "" {
+		// En modo web las llamadas a la API ya las limita el navegador; aquí solo hay
+		// que dejar sitio a cada transferencia para que una subida no frene las lecturas.
+		client.SetMaxConcurrentRequests(maxDown + maxUp + 2)
+	}
+	logger.Log("[WebDAV] 🚦 Transferencias simultáneas: %d descargas, %d subidas", maxDown, maxUp)
+
 	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
 	webdavServer := webdav.NewServerWithAuth(client, davAuth, metaStore)
 
@@ -97,7 +137,7 @@ func main() {
 	}
 
 	// 2. Sincronización inicial de metadatos en segundo plano si hay credenciales activas
-	if metaStore != nil && !client.IsSessionExpired() && (cfg.RefreshToken != "" || cfg.DeviceID != "" || cfg.JSessionID != "") {
+	if metaStore != nil && !client.IsSessionExpired() && (client.WebMode() || cfg.RefreshToken != "" || cfg.DeviceID != "" || cfg.JSessionID != "") {
 		go func() {
 			logger.Log("[Metadata] 🔄 Iniciando sincronización de metadatos en segundo plano...")
 			if _, syncErr := metaStore.SyncChanges(client, false); syncErr != nil {
@@ -139,6 +179,13 @@ func main() {
 
 	// 3. Servidor Web UI
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
+	if webSess != nil {
+		view := webSess.LoginView()
+		uiServer.SetWebLogin(view.Handler("/web-login/"))
+		acct := &accountState{}
+		go runWebHousekeeping(ctx, client, webSess.LoggedIn, acct)
+		uiServer.SetWebSessionStatus(func() map[string]interface{} { return acct.status(webSess.Status()) })
+	}
 	webPort := "5000"
 	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
 		webPort = p
@@ -240,6 +287,14 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 				continue
 			}
 			cfg := client.GetConfig()
+			if client.WebMode() {
+				// En modo web la comprobación también mantiene viva la sesión de la web.
+				if client.RefreshSession() {
+					logger.Log("[KeepAlive] 💓 Sesión web verificada en Movistar Cloud.")
+				}
+				timer.Reset(5 * time.Minute)
+				continue
+			}
 			if cfg.RefreshToken == "" && cfg.AccessToken == "" && cfg.ValidationKey == "" {
 				timer.Reset(5 * time.Minute)
 				continue

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -48,7 +49,11 @@ func NewMetadataStore(dbPath string) (*MetadataStore, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Los PRAGMA de abajo solo afectan a la conexión que los ejecuta, y database/sql
+	// abre varias: busy_timeout y WAL van también en la cadena de conexión para que
+	// todas esperen en vez de fallar con SQLITE_BUSY cuando coinciden dos escrituras.
+	dsn := "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db %s: %w", dbPath, err)
 	}
