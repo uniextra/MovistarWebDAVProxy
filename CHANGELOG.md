@@ -19,6 +19,10 @@ Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan
 
 - Tarjeta con las subidas a la nube y las descargas servidas en curso: nombre, porcentaje, velocidad y tiempo restante. Las lecturas por rangos de un mismo archivo se agrupan y, al terminar, siguen visibles 5 min como «en búfer» (un cliente que lee por rangos puede pasar minutos sin pedir datos).
 
+### 📦 Documentación: configuración recomendada de rclone
+
+- Sección nueva en el `README` con la configuración de `rclone` probada para archivos de más de 4 GB (`chunker` con `name_format = *-chunk###` y `transactions = norename`, sin renombrados ni `423 Locked`) y cifrado opcional con `crypt`, con las notas sobre comentarios en `rclone.conf`, remotos nuevos y la longitud de los nombres.
+
 ### 🛠️ Correcciones
 
 - **Nombres de más de 255 caracteres:** SAPI no los rechaza: los guarda recortados a 255 y responde como si todo fuera bien. Con nombres cifrados (rclone `crypt`) el recortado ya no se puede descifrar y el archivo queda invisible, aunque el cliente lo dio por copiado. `PUT`, `MKCOL` y el destino de `MOVE`/`COPY` con un nombre de más de 255 caracteres reciben ahora `400` y el cliente informa del error.

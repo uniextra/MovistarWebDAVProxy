@@ -101,7 +101,8 @@ Configuración probada con varios TB de datos:
 [movistar]
 type = webdav
 url = http://IP_DE_TU_SERVIDOR:5050
-vendor = owncloud        # envía X-OC-Mtime: se conserva la fecha de modificación
+# owncloud envía X-OC-Mtime: se conserva la fecha de modificación
+vendor = owncloud
 user = admin
 pass = ...
 
@@ -109,7 +110,8 @@ pass = ...
 type = chunker
 remote = movistar:datos
 chunk_size = 1Gi
-name_format = *-chunk###   # SIN punto: ver nota
+# Sin punto: ver la nota de abajo
+name_format = *-chunk###
 hash_type = none
 transactions = norename
 

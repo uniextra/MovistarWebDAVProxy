@@ -229,6 +229,40 @@ El proxy está optimizado para actuar como repositorio remoto de copias automát
 
 👉 **Instrucciones detalladas y capturas en la [Guía de Clientes de Backup](docs/backup-clients.md).**
 
+### 📦 Configuración recomendada de rclone (archivos de más de 4 GB y cifrado)
+
+Para subir archivos de más de 4 GB hay que trocearlos con [`chunker`](https://rclone.org/chunker/), y opcionalmente cifrarlos con [`crypt`](https://rclone.org/crypt/). Esta configuración está probada con varios TB de datos:
+
+```ini
+[movistar]
+type = webdav
+url = http://TU_IP:5050
+# owncloud envía X-OC-Mtime: se conserva la fecha de modificación original
+vendor = owncloud
+user = admin
+pass = TuContraseñaOfuscadaConRcloneObscure
+
+[movistar-chunk]
+type = chunker
+remote = movistar:datos
+chunk_size = 1Gi
+# Sin punto: el formato por defecto (*.rclone_chunk.###) cambia la extensión al
+# renombrar, SAPI no lo permite (MED-1050) y el proxy tiene que volver a subir el trozo
+name_format = *-chunk###
+# Cada trozo se sube directamente con su nombre definitivo: sin MOVE ni 423 Locked
+transactions = norename
+hash_type = none
+
+# Opcional: cifrado de contenido y nombres
+[movistar-crypt]
+type = crypt
+remote = movistar-chunk:
+```
+
+* **Sin comentarios al final de la línea:** rclone no los reconoce y el comentario pasa a formar parte del valor (`name_format = *-chunk###  # …` deja un formato inválido). Ponlos en una línea aparte, como arriba.
+* **Úsalo en un remoto nuevo:** `name_format` y `transactions` cambian cómo se llaman los trozos en la nube; no los cambies en un remoto con datos ya subidos.
+* **Nombres de hasta 255 caracteres:** Movistar Cloud recorta los más largos sin avisar y el proxy los rechaza con `400`. Con `crypt` (codificación `base32`) eso pasa con nombres originales de unos 140 caracteres o más; acórtalos o usa `filename_encoding = base64` en un remoto `crypt` nuevo.
+
 ---
 
 ## 🧹 Filtro Inteligente de Basura del SO (v2.0.5)
@@ -250,7 +284,7 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
    * **¿Cómo afecta a las copias de seguridad?**
      * **Duplicati:** No se ve afectado. Trabaja por defecto dividiendo las copias en volúmenes pequeños de 50 MB (configurables hasta 1 o 2 GB).
      * **Synology HyperBackup:** No se ve afectado. El formato de repositorio `.hbk` fragmenta los datos en bloques pequeños.
-     * **Mapeo directo / Rclone:** Si intentas arrastrar manualmente un archivo mayor de 4 GB (como una imagen ISO de gran tamaño o un disco virtual), la subida fallará. Para archivos gigantes con Rclone, se recomienda utilizar el overlay [`rclone chunker`](https://rclone.org/chunker/) configurado con trozos de 2 GB.
+     * **Mapeo directo / Rclone:** Si intentas arrastrar manualmente un archivo mayor de 4 GB (como una imagen ISO de gran tamaño o un disco virtual), la subida fallará. Para archivos gigantes con Rclone, utiliza el overlay [`rclone chunker`](https://rclone.org/chunker/) con la [configuración recomendada](#-configuración-recomendada-de-rclone-archivos-de-más-de-4-gb-y-cifrado).
 
 2. **🚦 Límite de conexiones concurrentes:**
    * La API aplica restricciones de tasa (*rate-limiting*) si se satura con peticiones paralelas simultáneas.
