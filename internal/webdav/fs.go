@@ -1323,36 +1323,6 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		}
 	}
 
-	// Si es una carpeta de control o lock de Hyper Backup (@reader.*, @writer.*, etc.), emularla
-	// localmente en SQLite y memoria para evitar llamadas innecesarias a SAPI que puedan provocar 403 de CloudFront WAF.
-	if isControlOrLockFile(cleanPath) {
-		syntheticID := -time.Now().UnixNano()
-		if syntheticID > 0 {
-			syntheticID = -syntheticID
-		}
-		if syntheticID == 0 {
-			syntheticID = -1
-		}
-		item := sapi.FolderItem{
-			ID:               syntheticID,
-			Name:             folderName,
-			ParentID:         parentFolder.ID,
-			CreationDate:     sapi.FlexDate(time.Now().UTC().Format("20060102T150405Z")),
-			ModificationDate: sapi.FlexDate(time.Now().UTC().Format("20060102T150405Z")),
-		}
-		logger.Log("[WebDAV] 📁 Carpeta de control/lock emulada localmente (sin SAPI): '%s' (ID virtual: %d)", folderName, syntheticID)
-		if ms := mfs.MetadataStore(); ms != nil {
-			logMetaErr("UpsertFolder", ms.UpsertFolder(item))
-			logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(parentFolder.ID, time.Now().UTC().Format("20060102T150405Z")))
-		}
-		mfs.cacheMu.Lock()
-		delete(mfs.uploadCache, lowerPath)
-		mfs.createdFolders[lowerPath] = &CreatedFolder{Info: item, Time: time.Now()}
-		mfs.cacheMu.Unlock()
-		mfs.InvalidateCache(parentFolder.ID)
-		return nil
-	}
-
 	logger.Log("[WebDAV] 📁 Creando carpeta: '%s' en ID %d...", folderName, parentFolder.ID)
 	created, err := mfs.client.CreateFolder(folderName, parentFolder.ID)
 	if err != nil {
@@ -1574,8 +1544,8 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 
 	if isFolder && folderInfo != nil {
 		logger.Log("[WebDAV] 🗑 Eliminando carpeta: '%s' (ID: %d)...", folderInfo.Name, folderInfo.ID)
-		if folderInfo.ID < 0 || isControlOrLockFile(cleanPath) {
-			logger.Log("[WebDAV] ℹ️ Eliminando carpeta virtual/control '%s' (ID: %d) localmente (sin SAPI)", folderInfo.Name, folderInfo.ID)
+		if folderInfo.ID < 0 {
+			logger.Log("[WebDAV] ℹ️ Eliminando carpeta virtual '%s' (ID: %d) localmente (sin SAPI)", folderInfo.Name, folderInfo.ID)
 		} else {
 			var delErr error
 			for attempt := 0; attempt < 3; attempt++ {
@@ -2281,7 +2251,7 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 }
 
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
-	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 || isControlOrLockFile(w.path) {
+	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 {
 		return
 	}
 	w.ensurePathLock()
@@ -2449,8 +2419,8 @@ func (w *WebDAVFileWriter) Close() error {
 	// de modo que la subida y la actualización de caché no se crucen con ellos.
 	w.ensurePathLock()
 
-	// Emular archivos de 0 bytes o ficheros de control/bloqueo en SQLite y memoria sin subir a Telefónica SAPI
-	if w.size == 0 || w.parentFolderID < 0 || isControlOrLockFile(w.path) {
+	// Emular archivos de 0 bytes (o en carpetas virtuales heredadas) en SQLite y memoria sin subir a Telefónica SAPI
+	if w.size == 0 || w.parentFolderID < 0 {
 		w.cleanupTemp()
 		now := time.Now()
 		modTime := now
@@ -2867,6 +2837,148 @@ func (m *WebDAVMemoryReader) Stat() (os.FileInfo, error) {
 	return &VirtualFileInfo{name: m.mem.Name, size: m.mem.Size, mode: 0644, modTime: m.mem.ModTime}, nil
 }
 
+func (mfs *MovistarFS) extractSeqIDFromSeqMapping(seqItem sapi.MediaItem) int64 {
+	if mfs == nil || mfs.client == nil || seqItem.ID == "" || seqItem.Size <= 0 {
+		return 1
+	}
+	rc, err := mfs.client.DownloadFileStream(seqItem)
+	if err != nil {
+		logger.Log("[WebDAV] ⚠️ No se pudo descargar seq_mapping para auto-reparar @writer: %v", err)
+		return 1
+	}
+	defer rc.Close()
+
+	tmpFile, err := os.CreateTemp(getUploadTempDir(), "hb_seq_mapping_*.db")
+	if err != nil {
+		return 1
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if _, err := io.Copy(tmpFile, io.LimitReader(rc, 64<<20)); err != nil {
+		return 1
+	}
+	_ = tmpFile.Close()
+
+	maxSeq, err := cache.ExtractMaxSeqIDFromSQLiteFile(tmpPath)
+	if err != nil {
+		logger.Log("[WebDAV] ⚠️ No se pudo leer seq_id desde seq_mapping (%v); usando seq_id=1", err)
+		return 1
+	}
+	return maxSeq
+}
+
+func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64, media []sapi.MediaItem, vFiles []cache.VirtualEmptyFileRecord) []cache.VirtualEmptyFileRecord {
+	clean := path.Clean("/" + dirPath)
+	if !strings.HasSuffix(strings.ToLower(clean), "/control/@writer") {
+		return vFiles
+	}
+	ms := mfs.MetadataStore()
+	if ms == nil {
+		return vFiles
+	}
+
+	var seqMappingItem *sapi.MediaItem
+	hasCformat := false
+	hasCinfo := false
+
+	for i := range media {
+		lower := strings.ToLower(media[i].Name)
+		switch {
+		case lower == "seq_mapping":
+			seqMappingItem = &media[i]
+		case lower == "v1.cformat":
+			hasCformat = true
+		case strings.HasSuffix(lower, ".cinfo"):
+			hasCinfo = true
+		}
+	}
+	for i := range vFiles {
+		lower := strings.ToLower(vFiles[i].Name)
+		if lower == "v1.cformat" {
+			hasCformat = true
+		} else if strings.HasSuffix(lower, ".cinfo") {
+			hasCinfo = true
+		}
+	}
+
+	mfs.cacheMu.RLock()
+	for _, mem := range mfs.uploadCache {
+		if mem.FolderID != folderID {
+			continue
+		}
+		lower := strings.ToLower(mem.Name)
+		if lower == "v1.cformat" {
+			hasCformat = true
+		} else if strings.HasSuffix(lower, ".cinfo") {
+			hasCinfo = true
+		}
+	}
+	mfs.cacheMu.RUnlock()
+
+	if seqMappingItem == nil || (hasCformat && hasCinfo) {
+		return vFiles
+	}
+
+	unlock := acquireFolderLock(clean)
+	defer unlock()
+
+	// Re-verificar dentro del lock por si otra petición concurrente ya lo reparó
+	if refreshed, err := ms.ListVirtualEmptyFilesInFolder(folderID); err == nil {
+		vFiles = refreshed
+		for i := range vFiles {
+			lower := strings.ToLower(vFiles[i].Name)
+			if lower == "v1.cformat" {
+				hasCformat = true
+			} else if strings.HasSuffix(lower, ".cinfo") {
+				hasCinfo = true
+			}
+		}
+		if hasCformat && hasCinfo {
+			return vFiles
+		}
+	}
+
+	modTimeStr := string(seqMappingItem.ModificationDate)
+	if modTimeStr == "" {
+		modTimeStr = time.Now().UTC().Format("20060102T150405Z")
+	}
+
+	healed := false
+	if !hasCformat {
+		if err := ms.UpsertVirtualEmptyFile(folderID, "v1.cformat", modTimeStr); err == nil {
+			vFiles = append(vFiles, cache.VirtualEmptyFileRecord{
+				FolderID: folderID,
+				Name:     "v1.cformat",
+				ModTime:  modTimeStr,
+			})
+			healed = true
+			logger.Log("[WebDAV] 🔧 Auto-reparado fichero de formato Hyper Backup en '%s': 'v1.cformat'", clean)
+		}
+	}
+	if !hasCinfo {
+		maxSeq := mfs.extractSeqIDFromSeqMapping(*seqMappingItem)
+		cinfoName := fmt.Sprintf("v1.%d.-1.0.0.none.none.cinfo", maxSeq)
+		if err := ms.UpsertVirtualEmptyFile(folderID, cinfoName, modTimeStr); err == nil {
+			vFiles = append(vFiles, cache.VirtualEmptyFileRecord{
+				FolderID: folderID,
+				Name:     cinfoName,
+				ModTime:  modTimeStr,
+			})
+			healed = true
+			logger.Log("[WebDAV] 🔧 Auto-reparado fichero de estado Hyper Backup en '%s': '%s' (seq_id=%d recuperado de seq_mapping)", clean, cinfoName, maxSeq)
+		}
+	}
+
+	if healed && mfs.emptyFileManager != nil {
+		mfs.emptyFileManager.ScheduleSave()
+	}
+	return vFiles
+}
+
 type WebDAVDirReader struct {
 	noopDeadProps
 	mfs      *MovistarFS
@@ -2984,6 +3096,7 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 
 		if ms != nil {
 			if vFiles, vErr := ms.ListVirtualEmptyFilesInFolder(d.folderID); vErr == nil {
+				vFiles = d.mfs.autoHealHyperBackupWriter(d.path, d.folderID, media, vFiles)
 				d.mfs.cacheMu.RLock()
 				for _, vf := range vFiles {
 					childPath := path.Clean(path.Join(d.path, vf.Name))

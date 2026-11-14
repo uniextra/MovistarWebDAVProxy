@@ -149,7 +149,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", panelCSP)
 
 		// /health siempre accesible sin autenticación para healthchecks de Docker
@@ -457,6 +457,9 @@ func isJSONRequest(r *http.Request) bool {
 
 func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg, username string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if r.Method == http.MethodHead {
+		return
+	}
 	data := loginPageData{
 		Version:  config.Version,
 		Error:    errMsg,
@@ -474,7 +477,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
-	case http.MethodGet:
+	case http.MethodGet, http.MethodHead:
 		if s.isAuthenticated(r) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
@@ -592,7 +595,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 
 	default:
-		w.Header().Set("Allow", "GET, POST")
+		w.Header().Set("Allow", "GET, HEAD, POST")
 		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
 	}
 }
