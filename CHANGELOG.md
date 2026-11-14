@@ -21,6 +21,7 @@ Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan
 
 ### 🛠️ Correcciones
 
+- **Nombres de más de 255 caracteres:** SAPI no los rechaza: los guarda recortados a 255 y responde como si todo fuera bien. Con nombres cifrados (rclone `crypt`) el recortado ya no se puede descifrar y el archivo queda invisible, aunque el cliente lo dio por copiado. `PUT`, `MKCOL` y el destino de `MOVE`/`COPY` con un nombre de más de 255 caracteres reciben ahora `400` y el cliente informa del error.
 - **`SQLITE_BUSY` con escrituras concurrentes:** los `PRAGMA` (`busy_timeout`, `journal_mode=WAL`, `synchronous`) se aplicaban solo a una conexión del pool; ahora van en el DSN y valen para todas. Test que reproducía el fallo.
 - **`423 Locked` en peticiones simultáneas sobre la misma ruta** (p. ej. varios `MKCOL` de rclone): `x/net/webdav` pone un bloqueo implícito por petición; el sistema de bloqueos espera hasta 10 s a que se libere un bloqueo implícito en vez de fallar al instante.
 - **`MED-1017` al mover un archivo recién subido:** hasta ~70 s de espera creciente (antes ~10 s, insuficiente para algunos archivos).
