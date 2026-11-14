@@ -71,11 +71,15 @@ services:
       # Opcional: credenciales distintas para el panel web (si no se definen, usa las de WebDAV)
       # - WEBUI_USER=admin
       # - WEBUI_PASSWORD=OtroPasswordSeguro
+      # Opcional: guardar archivos temporales grandes en disco en lugar de RAM (/tmp)
+      # - WEBDAV_TMPDIR=/app/tmp
     ports:
       - "${BIND_IP:-0.0.0.0}:5000:5000"   # Panel Web de Gestión y Logs (usa BIND_IP=127.0.0.1 para solo localhost)
       - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV (puerto 5050 en el host)
     volumes:
       - movistar_tokens:/app/tokens
+      # Opcional (requiere WEBDAV_TMPDIR=/app/tmp): útil en NAS con poca RAM para subidas grandes
+      # - /ruta/en/tu/nas/tmp:/app/tmp
 
 volumes:
   movistar_tokens:
@@ -152,7 +156,7 @@ docker run -d \
 | `WEBDAV_BUFFER_MB` | `32` | Tamaño máximo del búfer en RAM (MB) antes de hacer spool a disco (óptimo Duplicati). |
 | `TRUSTED_PROXIES` | *(vacío)* | Lista de IPs/CIDRs de proxies de confianza para evaluar `X-Forwarded-For` / `X-Real-IP`. |
 | `BRUTE_FORCE_EXCLUDED_IPS` | `127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16` | IPs/subredes exentas de bloqueo HTTP 429 (mantiene Basic Auth activo). |
-| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. |
+| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. Si montas un volumen en disco (ej. `/app/tmp`), debes definir `WEBDAV_TMPDIR=/app/tmp` para que se utilice. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
 
 > **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.
