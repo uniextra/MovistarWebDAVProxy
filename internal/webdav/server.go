@@ -421,6 +421,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Nombres de más de 255 caracteres: Movistar Cloud los recortaría sin avisar.
+	if rejectLongNames(lw, r) {
+		return
+	}
+
 	// 2. Rechazar PUT a colecciones según RFC 4918 §9.7.1 y validar límite de subida
 	if method == "PUT" {
 		if strings.HasSuffix(urlPath, "/") {

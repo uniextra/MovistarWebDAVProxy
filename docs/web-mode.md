@@ -118,6 +118,14 @@ type = crypt
 remote = movistar-chunk:
 ```
 
+**Nota sobre la longitud de los nombres:** Movistar Cloud admite nombres de hasta
+255 caracteres y recorta los más largos sin avisar. `crypt` (codificación
+`base32`, la estándar) rellena cada nombre a bloques de 16 bytes y lo alarga un
+60 %, así que un nombre original de 144 bytes o más (unos 140 caracteres sin
+acentos) ya no cabe. El proxy rechaza esos nombres con `400` para
+que rclone lo informe como error; si te pasa, acorta el nombre o usa
+`filename_encoding = base64` (nombres más cortos) en un remoto `crypt` nuevo.
+
 **Nota sobre `name_format`:** con el formato por defecto (`*.rclone_chunk.###`)
 el chunker renombra cada trozo cambiando su *extensión*, y SAPI no permite cambiar
 la extensión de un archivo (`MED-1050`): el proxy tiene que volver a subirlo
