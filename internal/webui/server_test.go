@@ -329,6 +329,17 @@ func TestWebUI_LoginForm_PasswordManagerSupport(t *testing.T) {
 			t.Errorf("falta en login.html: %s (buscado '%s')", c.desc, c.pattern)
 		}
 	}
+
+	// 2. HEAD /login devuelve 200 con cabecera Referrer-Policy: same-origin
+	headReq := httptest.NewRequest("HEAD", "/login", nil)
+	headRec := httptest.NewRecorder()
+	handler.ServeHTTP(headRec, headReq)
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on HEAD /login, got %d", headRec.Code)
+	}
+	if refPol := headRec.Header().Get("Referrer-Policy"); refPol != "same-origin" {
+		t.Errorf("expected Referrer-Policy 'same-origin', got '%s'", refPol)
+	}
 }
 
 func TestWebUI_UnauthenticatedRedirectAndAPI401(t *testing.T) {
