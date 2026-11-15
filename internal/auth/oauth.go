@@ -43,6 +43,14 @@ func GetSAPIUserAgent() string {
 	return SAPIUserAgent
 }
 
+// DesktopUserAgent permite cambiar DesktopUserAgent.
+func GetDesktopUserAgent() string {
+	if value := strings.TrimSpace(os.Getenv("DESKTOP_USER_AGENT")); value != "" {
+		return value
+	}
+	return DesktopUserAgent
+}
+
 var (
 	authCodeQueryRegex = regexp.MustCompile(`code=([A-Za-z0-9\-_.~]+)`)
 	validAuthCodeRegex = regexp.MustCompile(`^[A-Za-z0-9\-_.~]{1,512}$`)
@@ -374,7 +382,7 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	req.Header.Set("User-Agent", DesktopUserAgent)
+	req.Header.Set("User-Agent", GetDesktopUserAgent())
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
@@ -417,7 +425,7 @@ func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	req.Header.Set("User-Agent", DesktopUserAgent)
+	req.Header.Set("User-Agent", GetDesktopUserAgent())
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
