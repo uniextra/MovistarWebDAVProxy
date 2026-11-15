@@ -39,6 +39,25 @@ var (
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
 )
 
+// SetTransferLimits fija cuántas descargas y subidas simultáneas admite el proxy.
+// Por defecto es 1 y 1 (como el cliente oficial de escritorio). En modo web las
+// descargas van con URL firmada a CloudFront y la API la llama el navegador, así
+// que se puede abrir más. Debe llamarse al arrancar, antes de servir peticiones.
+func SetTransferLimits(downloads, uploads int) {
+	if downloads < 1 {
+		downloads = 1
+	}
+	if uploads < 1 {
+		uploads = 1
+	}
+	downloadSem = make(chan struct{}, downloads)
+	uploadSem = make(chan struct{}, uploads)
+	uploadBufferSem = make(chan struct{}, uploads)
+	// El tope conjunto ya no frena a unas con otras: una subida masiva no debe
+	// bloquear las lecturas.
+	globalTransferSem = make(chan struct{}, downloads+uploads)
+}
+
 type uploadGuardKey struct{}
 
 type uploadGuard struct {
@@ -1049,6 +1068,20 @@ func (mfs *MovistarFS) ResolvePath(rawPath string) (*sapi.FolderItem, *sapi.Medi
 }
 
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
+	return mfs.resolvePathOpts(rawPath, true)
+}
+
+// localMetadataReady indica si la base SQLite ya tiene la sincronización inicial hecha:
+// entonces "¿existe ya?" se puede responder en local, sin consultar a la API.
+func (mfs *MovistarFS) localMetadataReady() bool {
+	ms := mfs.MetadataStore()
+	return ms != nil && ms.HasInitialSync()
+}
+
+// resolvePathOpts es resolvePath con la consulta de respaldo a SAPI (fallbackQuerySAPI)
+// opcional. Con allowSAPI=false, lo que no está en SQLite se da por inexistente sin
+// llamar a la API (ver OpenFile: la comprobación previa a cada subida).
+func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	cleanPath := path.Clean("/" + rawPath)
 	lowerPath := strings.ToLower(cleanPath)
 
@@ -1203,7 +1236,9 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 			}
 
 			// 5. Fallback to direct SAPI query with cooldown and write-through to SQLite
-			mfs.fallbackQuerySAPI(currentID, isLast)
+			if allowSAPI {
+				mfs.fallbackQuerySAPI(currentID, isLast)
+			}
 
 			// Re-check SQLite after SAPI write-through
 			f, fErr = ms.GetFolderByParentAndName(currentID, part)
@@ -1378,7 +1413,12 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		// DEBE ser rechazado con 405 Method Not Allowed (retornando os.ErrInvalid).
 		// Esto es crítico para Windows Explorer: al arrastrar carpetas, hace MKCOL y luego un PUT de 0 bytes;
 		// si se acepta el PUT, crea un archivo plano en lugar de mantener la carpeta, rompiendo la copia de sus hijos.
-		existingFolder, mediaInfo, isF, err := mfs.resolvePath(cleanPath)
+		// ¿Existe ya el destino? Con la base SQLite ya sincronizada se responde en local.
+		// Consultar a la API cada archivo nuevo (fallbackQuerySAPI: ListAllSubfolders +
+		// ListAllMediaInFolder) costaba 2 llamadas por subida y era lo que disparaba el
+		// 403 del WAF en subidas masivas (medido el 12/11/2026 con la v2.3.0). Lo creado
+		// desde otro cliente entra por la sincronización de cambios (SYNC_INTERVAL_SEC).
+		existingFolder, mediaInfo, isF, err := mfs.resolvePathOpts(cleanPath, !mfs.localMetadataReady())
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
@@ -1434,15 +1474,31 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		if mem.Size == 0 || len(mem.Content) > 0 {
 			return NewWebDAVMemoryReader(cleanPath, mem), nil
 		}
+		mfs.cacheMu.RLock()
+		knownURL := mem.URL
+		mfs.cacheMu.RUnlock()
 		item := sapi.MediaItem{
 			ID:               mem.ID,
 			Name:             mem.Name,
 			Size:             mem.Size,
-			URL:              mem.downloadURL(mfs),
+			URL:              knownURL,
 			FolderID:         mem.FolderID,
 			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 		}
-		return NewWebDAVFileReader(mfs, cleanPath, item), nil
+		// La URL de descarga se consulta a SAPI solo si de verdad se lee el contenido
+		// (primer Read), en los dos modos. x/net/webdav abre el archivo en cada PROPFIND
+		// solo para leer sus propiedades, y rclone hace un PROPFIND tras cada PUT:
+		// consultarla aquí suponía una petición extra a O2 por cada archivo subido (el
+		// doble de tráfico en una subida masiva, y más cerca del límite del WAF).
+		r := NewWebDAVFileReader(mfs, cleanPath, item)
+		if mfs.client.WebMode() {
+			// Modo web: la subida no devuelve URL de descarga y la URL por defecto nunca
+			// sirve, así que hay que esperar a que SAPI indexe el archivo (unos segundos).
+			r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		} else {
+			r.resolveURL = func() string { return mem.downloadURL(mfs) }
+		}
+		return r, nil
 	}
 	mfs.cacheMu.RUnlock()
 
@@ -2270,7 +2326,9 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 			<-globalTransferSem
 			<-uploadSem
 		}()
-		media, err := w.mfs.client.UploadFileToFolder(w.name, pr, expectedSize, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		body, tr := trackUpload(w.path, expectedSize, pr)
+		media, err := w.mfs.client.UploadFileToFolder(w.name, body, expectedSize, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		tr.Done()
 		_ = pr.Close()
 		w.streamDone <- streamUploadResult{media: media, err: err}
 	}()
@@ -2532,7 +2590,9 @@ func (w *WebDAVFileWriter) Close() error {
 		}
 
 		mimeType := mime.TypeByExtension(filepath.Ext(w.name))
-		media, err = w.mfs.client.UploadFileToFolder(w.name, reader, w.size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		body, tr := trackUpload(w.path, w.size, reader)
+		media, err = w.mfs.client.UploadFileToFolder(w.name, body, w.size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		tr.Done()
 		<-globalTransferSem
 		<-uploadSem
 		if err != nil {
@@ -2640,13 +2700,14 @@ func (noopDeadProps) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error
 
 type WebDAVFileReader struct {
 	noopDeadProps
-	mfs      *MovistarFS
-	path     string
-	item     sapi.MediaItem
-	pos      int64
-	stream   io.ReadCloser
-	cacheBuf *bytes.Buffer
-	streamMu sync.Mutex
+	mfs        *MovistarFS
+	path       string
+	item       sapi.MediaItem
+	pos        int64
+	stream     io.ReadCloser
+	cacheBuf   *bytes.Buffer
+	streamMu   sync.Mutex
+	resolveURL func() string // si no es nil, obtiene la URL de descarga antes de la primera lectura
 }
 
 func NewWebDAVFileReader(mfs *MovistarFS, path string, item sapi.MediaItem) *WebDAVFileReader {
@@ -2664,6 +2725,15 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 	r.streamMu.Unlock()
 
 	if st == nil {
+		r.streamMu.Lock()
+		resolve := r.resolveURL
+		r.resolveURL = nil
+		r.streamMu.Unlock()
+		if resolve != nil {
+			if u := resolve(); u != "" {
+				r.item.URL = u
+			}
+		}
 		sizeMB := float64(r.item.Size) / (1024 * 1024)
 		if pos > 0 {
 			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", pos, r.item.Name, sizeMB)

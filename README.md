@@ -26,6 +26,7 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 1. [🌟 Características Principales](#-características-principales)
 2. [🐳 Despliegue con Docker](#-despliegue-con-docker)
 3. [🔑 Vinculación Inicial (Emparejamiento SMS)](#-vinculación-inicial-emparejamiento-sms)
+   * [🌐 Modo Web (opcional)](#-modo-web-opcional)
 4. [💻 Mapear como Unidad de Red (Windows, macOS, Linux)](#-mapear-como-unidad-de-red-windows-macos-linux)
 5. [⚙️ Clientes de Copia de Seguridad (HyperBackup, Duplicati)](#️-clientes-de-copia-de-seguridad-hyperbackup-duplicati)
 6. [🧹 Filtro Inteligente de Basura del SO (v2.1.0)](#-filtro-inteligente-de-basura-del-so-v210)
@@ -45,6 +46,8 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 * 📱 **Autenticación Compatible + OAuth2 PKCE:** Implementa el flujo de autenticación del cliente de escritorio (`omh windows client`) con sincronización milimétrica de timestamps y soporte para verificación SMS oficial desde el navegador.
 * 🛡️ **Protección contra Colisiones:** Previene la creación de duplicados automáticos como ` (1)` al actualizar o mover archivos.
 * 🧹 **Absorbedor de Basura de SO (*DevNull Absorber*):** Filtra y neutraliza automáticamente archivos innecesarios de Windows, macOS y Linux.
+* 🌐 **Modo Web opcional:** Alternativa al inicio de sesión del cliente de escritorio que usa Movistar Cloud exactamente como la web oficial (Chromium sin pantalla), con inicio de sesión desde el panel y renovación automática de la sesión. Ver [docs/web-mode.md](docs/web-mode.md).
+* ⇅ **Transferencias en el panel:** Subidas y descargas en curso con nombre, porcentaje, velocidad y tiempo restante.
 
 ---
 
@@ -158,6 +161,9 @@ docker run -d \
 | `BRUTE_FORCE_EXCLUDED_IPS` | `127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16` | IPs/subredes exentas de bloqueo HTTP 429 (mantiene Basic Auth activo). |
 | `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. Si montas un volumen en disco (ej. `/app/tmp`), debes definir `WEBDAV_TMPDIR=/app/tmp` para que se utilice. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
+| `WEBDAV_MAX_DOWNLOADS` | `1` (`4` en modo web) | Descargas simultáneas a la nube. |
+| `WEBDAV_MAX_UPLOADS` | `1` (`2` en modo web) | Subidas simultáneas a la nube. |
+| `WEB_SESSION` | `false` | Activa el [Modo Web](docs/web-mode.md) (requiere la imagen `Dockerfile.web`). Sus variables (`WEB_SESSION_RENEW_BEFORE`, `WEB_TRASH_EMPTY_EVERY`, `CHROME_PATH`…) están en esa página. |
 
 > **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.
 
@@ -171,6 +177,16 @@ docker run -d \
 4. Pulsa en **"Abrir Página de Login en Nueva Pestaña"** para acceder al portal oficial de Telefónica y escribe el código SMS recibido.
 5. Copia la URL final redirigida en tu navegador (ej: `https://micloud.movistar.es/...code=...`), pégala en el panel y pulsa **"Completar Vinculación"**.
 6. ¡Listo! El servidor WebDAV quedará activo y escuchando en el puerto `5050`.
+
+### 🌐 Modo Web (opcional)
+
+Si el emparejamiento por SMS del cliente de escritorio no funciona en tu caso, el proxy puede usar **la sesión de la web oficial** (`micloud.movistar.es`) con un Chromium sin pantalla:
+
+```bash
+docker compose -f docker-compose.web.yml up -d --build
+```
+
+En el panel, pulsa **🔐 Abrir inicio de sesión**, entra con **e-mail y contraseña** y marca **«No cerrar sesión»**: así el proxy renueva solo la sesión, que Movistar caduca a las 24 h. Todos los detalles en [docs/web-mode.md](docs/web-mode.md).
 
 ---
 
@@ -213,6 +229,40 @@ El proxy está optimizado para actuar como repositorio remoto de copias automát
 
 👉 **Instrucciones detalladas y capturas en la [Guía de Clientes de Backup](docs/backup-clients.md).**
 
+### 📦 Configuración recomendada de rclone (archivos de más de 4 GB y cifrado)
+
+Para subir archivos de más de 4 GB hay que trocearlos con [`chunker`](https://rclone.org/chunker/), y opcionalmente cifrarlos con [`crypt`](https://rclone.org/crypt/). Esta configuración está probada con varios TB de datos:
+
+```ini
+[movistar]
+type = webdav
+url = http://TU_IP:5050
+# owncloud envía X-OC-Mtime: se conserva la fecha de modificación original
+vendor = owncloud
+user = admin
+pass = TuContraseñaOfuscadaConRcloneObscure
+
+[movistar-chunk]
+type = chunker
+remote = movistar:datos
+chunk_size = 1Gi
+# Sin punto: el formato por defecto (*.rclone_chunk.###) cambia la extensión al
+# renombrar, SAPI no lo permite (MED-1050) y el proxy tiene que volver a subir el trozo
+name_format = *-chunk###
+# Cada trozo se sube directamente con su nombre definitivo: sin MOVE ni 423 Locked
+transactions = norename
+hash_type = none
+
+# Opcional: cifrado de contenido y nombres
+[movistar-crypt]
+type = crypt
+remote = movistar-chunk:
+```
+
+* **Sin comentarios al final de la línea:** rclone no los reconoce y el comentario pasa a formar parte del valor (`name_format = *-chunk###  # …` deja un formato inválido). Ponlos en una línea aparte, como arriba.
+* **Úsalo en un remoto nuevo:** `name_format` y `transactions` cambian cómo se llaman los trozos en la nube; no los cambies en un remoto con datos ya subidos.
+* **Nombres de hasta 255 caracteres:** Movistar Cloud recorta los más largos sin avisar y el proxy los rechaza con `400`. Con `crypt` (codificación `base32`) eso pasa con nombres originales de unos 140 caracteres o más; acórtalos o usa `filename_encoding = base64` en un remoto `crypt` nuevo.
+
 ---
 
 ## 🧹 Filtro Inteligente de Basura del SO (v2.0.5)
@@ -234,7 +284,7 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
    * **¿Cómo afecta a las copias de seguridad?**
      * **Duplicati:** No se ve afectado. Trabaja por defecto dividiendo las copias en volúmenes pequeños de 50 MB (configurables hasta 1 o 2 GB).
      * **Synology HyperBackup:** No se ve afectado. El formato de repositorio `.hbk` fragmenta los datos en bloques pequeños.
-     * **Mapeo directo / Rclone:** Si intentas arrastrar manualmente un archivo mayor de 4 GB (como una imagen ISO de gran tamaño o un disco virtual), la subida fallará. Para archivos gigantes con Rclone, se recomienda utilizar el overlay [`rclone chunker`](https://rclone.org/chunker/) configurado con trozos de 2 GB.
+     * **Mapeo directo / Rclone:** Si intentas arrastrar manualmente un archivo mayor de 4 GB (como una imagen ISO de gran tamaño o un disco virtual), la subida fallará. Para archivos gigantes con Rclone, utiliza el overlay [`rclone chunker`](https://rclone.org/chunker/) con la [configuración recomendada](#-configuración-recomendada-de-rclone-archivos-de-más-de-4-gb-y-cifrado).
 
 2. **🚦 Límite de conexiones concurrentes:**
    * La API aplica restricciones de tasa (*rate-limiting*) si se satura con peticiones paralelas simultáneas.
@@ -249,6 +299,7 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
 
 * [📖 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)
 * [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone](docs/backup-clients.md)
+* [🌐 Modo Web: sesión del navegador, renovación automática y rclone chunker](docs/web-mode.md)
 
 ---
 

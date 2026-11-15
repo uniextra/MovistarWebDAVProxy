@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -48,7 +49,11 @@ func NewMetadataStore(dbPath string) (*MetadataStore, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Los PRAGMA de abajo solo afectan a la conexión que los ejecuta, y database/sql
+	// abre varias: busy_timeout y WAL van también en la cadena de conexión para que
+	// todas esperen en vez de fallar con SQLITE_BUSY cuando coinciden dos escrituras.
+	dsn := "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db %s: %w", dbPath, err)
 	}
@@ -1064,16 +1069,16 @@ func (s *MetadataStore) SyncChanges(client *sapi.Client, forceFullBootstrap bool
 	if err != nil {
 		return 0, fmt.Errorf("get last_sync_cursor: %w", err)
 	}
+	// resume: la base ya tiene datos pero no hay cursor válido (p. ej. una sincronización
+	// inicial cortada por un 403). Se vuelve a pedir la lista completa (una sola llamada) y
+	// solo se descargan los elementos que aún no están en la base, en vez de darla por completa.
+	resume := false
 	if cursor == "" || forceFullBootstrap || strings.Contains(cursor, "T") {
 		var count int
 		if s.db.QueryRow("SELECT COUNT(*) FROM media").Scan(&count) == nil && count > 0 {
-			// Si la base de datos ya tiene metadatos sincronizados, no re-descargar 73.000 items desde cero.
-			// Iniciamos el cursor en el momento actual para sincronizar únicamente cambios incrementales.
-			cursor = strconv.FormatInt(time.Now().UnixMilli(), 10)
-			_ = s.SetSyncState("last_sync_cursor", cursor)
-		} else {
-			cursor = "0"
+			resume = true
 		}
+		cursor = "0"
 	}
 
 	resp, err := client.GetProfileChanges(cursor)
@@ -1139,6 +1144,9 @@ func (s *MetadataStore) SyncChanges(client *sapi.Client, forceFullBootstrap bool
 	folderIDs = append(folderIDs, resp.Data.Folder.N...)
 	folderIDs = append(folderIDs, resp.Data.Folder.U...)
 	folderIDs = dedupeInt64(folderIDs)
+	if resume {
+		folderIDs = s.filterMissing(folderIDs, "folders")
+	}
 	if len(folderIDs) > 0 {
 		folders, err := client.GetFoldersByIDs(folderIDs)
 		if err != nil {
@@ -1172,6 +1180,10 @@ func (s *MetadataStore) SyncChanges(client *sapi.Client, forceFullBootstrap bool
 	mediaIDs = append(mediaIDs, resp.Data.Audio.U...)
 	mediaIDs = append(mediaIDs, resp.Data.Audio.N...)
 	mediaIDs = dedupeInt64(mediaIDs)
+	if resume {
+		mediaIDs = s.filterMissing(mediaIDs, "media")
+		logger.Log("[Metadata] 🔁 Reanudando sincronización inicial: faltan %d elementos", len(mediaIDs))
+	}
 	if len(mediaIDs) > 0 {
 		totalMedia := len(mediaIDs)
 		processedMedia := 0
@@ -1398,4 +1410,16 @@ func ExtractMaxSeqIDFromSQLiteFile(dbPath string) (int64, error) {
 		return 1, nil
 	}
 	return maxSeq.Int64, nil
+}
+
+// filterMissing devuelve los IDs que todavía no están en la tabla indicada ("media" o "folders").
+func (s *MetadataStore) filterMissing(ids []int64, table string) []int64 {
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		var one int
+		if err := s.db.QueryRow("SELECT 1 FROM "+table+" WHERE id = ?", id).Scan(&one); err != nil {
+			out = append(out, id)
+		}
+	}
+	return out
 }

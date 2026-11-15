@@ -2,6 +2,51 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.5.1] - 2026-11-15
+
+### 🛡️ Resiliencia ante WAF (403) y Subidas Masivas/Grandes (`#26`, PR `#44`)
+- **Circuit breaker por servidor (`waf_breaker.go`):** al primer `403` de CloudFront, el proxy pausa las llamadas a ese servidor durante 10 min (duplicando el tiempo hasta 2 h si persiste) y responde `503 + Retry-After` a las escrituras que lo necesitan, evitando ráfagas de reintentos que alargan el bloqueo. Los servidores de API (`sapi`) y de subidas (`upload.*`) tienen frenos independientes para que un bloqueo en la API no detenga las subidas.
+- **0 llamadas previas a la API en subidas nuevas:** cuando SQLite ya completó su sincronización inicial, la comprobación previa al `PUT` y en `MKCOL` se resuelve en local (ahorrando 2 llamadas por archivo), y la URL de descarga se consulta solo en la primera lectura (`resolveURL`) en lugar de en cada `PROPFIND` tras el `PUT`.
+- **Renovación de sesión en subidas (`401`):** si una subida en streaming recibe `401`, renueva la sesión aunque el breaker de la API esté en pausa.
+- **Timeout de respuesta en subidas grandes (`UPLOAD_RESPONSE_TIMEOUT_SEC`):** ampliado a **300 s (5 min)** por defecto para evitar cortes a los 60 s cuando Movistar/O2 tarda en confirmar archivos de cientos de MB.
+- **`DeleteFile`:** deja de reintentar `403` si el breaker del WAF ya está activo.
+
+## [v2.5.0] - 2026-11-15
+
+### 🌐 Modo web opcional (`WEB_SESSION=true`, imagen `Dockerfile.web`)
+
+- **Qué es:** alternativa al inicio de sesión del cliente de escritorio. Un Chromium sin pantalla guarda la sesión de la web oficial (`micloud.movistar.es`) y las llamadas a SAPI se hacen desde esa pestaña, con sus cookies, `validationkey` y `X-deviceid: web-…`. Las subidas van directas a `upload.*` con las cookies de la sesión y las descargas por la URL firmada (con `Range`).
+- **Por qué:** cuando CloudFront bloquea el cliente OAuth `omh windows client` (403) o el emparejamiento por SMS no funciona, la web sigue funcionando. Imagen y `docker-compose.web.yml` aparte: el modo normal y su imagen de ~20 MB no cambian.
+- **Inicio de sesión desde el panel:** `/web-login/` muestra la pestaña del Chromium (captura, ratón y teclado) para entrar como en la web. Tarjeta **Sesión web** en el panel.
+- **Renovación automática:** la sesión (`JSESSIONID`) caduca a las 24 h aunque haya actividad. Con «No cerrar sesión» Movistar deja una cookie `PLC` (~90 días) con la que la web reentra sola; el proxy renueva la sesión una hora antes (`WEB_SESSION_RENEW_BEFORE`) con las demás llamadas en espera, porque la `PLC` rota en cada uso y el uso simultáneo la anula.
+- **Como la web:** `acceptasynchronous=true` solo en subidas de más de 200 MiB (`minAsyncUploadFileSizeBytes`); ante `MED-1017` se consulta `get-validation-status`; borrados con `/media/<tipo>?action=delete&softdelete=true` y `/media/folder?action=softdelete` con su cuerpo JSON (y la llamada genérica si se rechazan); `COPY` de WebDAV con la copia en la nube (`/media/file?action=copy`); 2 subidas y 4 descargas simultáneas (`WEBDAV_MAX_UPLOADS`, `WEBDAV_MAX_DOWNLOADS`).
+- **URLs firmadas caducadas:** una lectura por rangos con la URL caducada (403, rango ignorado o cuerpo vacío) pide otra URL y reintenta; antes una lectura larga se colgaba tras unas horas.
+- **Papelera:** vaciado periódico opcional (`WEB_TRASH_EMPTY_EVERY`, desactivado por defecto).
+- **Opciones de la cuenta:** el panel muestra lo que la web lee de `/system/information` (tamaño máximo, límites `FOL-1036`, caducidad de la papelera).
+
+### ⇅ Transferencias en el panel
+
+- Tarjeta con las subidas a la nube y las descargas servidas en curso: nombre, porcentaje, velocidad y tiempo restante. Las lecturas por rangos de un mismo archivo se agrupan y, al terminar, siguen visibles 5 min como «en búfer» (un cliente que lee por rangos puede pasar minutos sin pedir datos).
+
+### 📦 Documentación: configuración recomendada de rclone
+
+- Sección nueva en el `README` con la configuración de `rclone` probada para archivos de más de 4 GB (`chunker` con `name_format = *-chunk###` y `transactions = norename`, sin renombrados ni `423 Locked`) y cifrado opcional con `crypt`, con las notas sobre comentarios en `rclone.conf`, remotos nuevos y la longitud de los nombres.
+
+### 🛠️ Correcciones
+
+- **Nombres de más de 255 caracteres:** SAPI no los rechaza: los guarda recortados a 255 y responde como si todo fuera bien. Con nombres cifrados (rclone `crypt`) el recortado ya no se puede descifrar y el archivo queda invisible, aunque el cliente lo dio por copiado. `PUT`, `MKCOL` y el destino de `MOVE`/`COPY` con un nombre de más de 255 caracteres reciben ahora `400` y el cliente informa del error.
+- **`SQLITE_BUSY` con escrituras concurrentes:** los `PRAGMA` (`busy_timeout`, `journal_mode=WAL`, `synchronous`) se aplicaban solo a una conexión del pool; ahora van en el DSN y valen para todas. Test que reproducía el fallo.
+- **`423 Locked` en peticiones simultáneas sobre la misma ruta** (p. ej. varios `MKCOL` de rclone): `x/net/webdav` pone un bloqueo implícito por petición; el sistema de bloqueos espera hasta 10 s a que se libere un bloqueo implícito en vez de fallar al instante.
+- **`MED-1017` al mover un archivo recién subido:** hasta ~70 s de espera creciente (antes ~10 s, insuficiente para algunos archivos).
+- **`UpdateFolder`** ya no da por buena una respuesta HTTP 200 con un error en el cuerpo; `FOL-1036` (límite de elementos al mover o borrar una carpeta) devuelve un error propio.
+- **Registro:** los «no existe» de `PROPFIND`/`HEAD`/`GET` (comprobaciones normales de rclone y Duplicati antes de subir) ya no se registran como errores.
+- **Panel:** modo oscuro (sigue al sistema o se elige con el botón).
+
+## [v2.4.5] - 2026-11-15
+
+### 🛠️ Caché y Sincronización de Metadatos (`#28`, PR `#42`)
+- **Reanudación de sincronización inicial cortada:** si la sincronización inicial se interrumpe a mitad (por ejemplo por un `403` en un lote de `GetMediaByIDs`) dejando elementos en SQLite sin `last_sync_cursor`, el siguiente ciclo ya no salta el cursor a «ahora» ni da la caché por completa; vuelve a consultar desde `from=0` y descarga únicamente los IDs de carpetas y archivos que aún faltan en la base local (`filterMissing`).
+
 ## [v2.4.4] - 2026-11-14
 
 ### 🛠️ Synology Hyper Backup: Auto-healing de `Control/@writer` y carpetas reales

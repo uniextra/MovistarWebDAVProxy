@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,6 +93,20 @@ func dialTLSContextWithUTLSNoALPN(ctx context.Context, network, addr string) (ne
 	return dialTLSContextWithUTLSALPN(ctx, network, addr, nil)
 }
 
+// UploadResponseTimeout es lo que se espera la respuesta del servidor de subidas una vez
+// enviado el archivo. Con archivos de cientos de MB, O2 tarda a veces más de 60 s en
+// responder tras recibirlos (15/11/2026: 189 MB, dos intentos cortados por "timeout
+// awaiting response headers"; otro de 153 MB respondió a los 87 s). Por defecto 5 min,
+// configurable con UPLOAD_RESPONSE_TIMEOUT_SEC.
+func UploadResponseTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("UPLOAD_RESPONSE_TIMEOUT_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 5 * time.Minute
+}
+
 // fingerprintedTransport envía los hosts SAPI (lectura, borrado, metadatos) por
 // HTTP/2 con uTLS, y deja las subidas (upload.*) por HTTP/1.1, que ya funcionaba.
 // Mezclar un handshake h2 con un stack HTTP/1.x provoca exactamente el error
@@ -135,7 +150,7 @@ func NewFingerprintedTransport() http.RoundTripper {
 		DisableKeepAlives:     true,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: UploadResponseTimeout(),
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
