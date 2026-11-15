@@ -200,16 +200,34 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.isAuthenticated(r) {
+		// 1. Sesión web activa por cookie (navegación del panel WebUI)
+		token := s.getSessionToken(r)
+		if token != "" && s.validateSession(token) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// No autenticado
-		clientIP := config.ExtractClientIP(r)
+		// 2. Navegación web del navegador (requiere sesión interactiva mediante formulario en /login)
+		accept := strings.ToLower(r.Header.Get("Accept"))
+		isHTMLNav := strings.Contains(accept, "text/html")
 
-		// 1. Si el cliente envió cabecera de Basic Auth (e.g. curl o scripts automáticos con credenciales erróneas)
-		rawUser, _, _, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
+		// 3. Clientes no interactivos / API con cabecera Basic Auth
+		rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
+		if hasAuth && s.authCfg.Validate(cleanUser, pass) {
+			if !isHTMLNav {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// 4. Si es navegación web en el navegador sin sesión activa -> redirigir a /login
+		if isHTMLNav {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		// 5. No autenticado para peticiones API / scripts
+		clientIP := config.ExtractClientIP(r)
 		if hasAuth {
 			s.rateLimiter.RecordFailure(clientIP)
 			logger.Log("[WebUI] 🔒 Intento de acceso Basic Auth fallido al panel desde %s (usuario: %s)", clientIP, logger.Mask(rawUser))
@@ -218,14 +236,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// 2. Si es una petición de navegación web (GET a "/" o con Accept: text/html)
-		accept := strings.ToLower(r.Header.Get("Accept"))
-		if r.Method == http.MethodGet && (r.URL.Path == "/" || strings.Contains(accept, "text/html")) {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
-
-		// 3. Para peticiones AJAX / API sin cabecera de autenticación, devolver 401 Unauthorized sin WWW-Authenticate para evitar el popup del navegador
+		// 6. Para peticiones AJAX / API sin cabecera de autenticación, devolver 401 Unauthorized sin popup
 		jsonResponse(w, http.StatusUnauthorized, map[string]interface{}{
 			"status":  "error",
 			"message": "Autenticación requerida. Inicia sesión en /login",
@@ -509,7 +520,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		if s.isAuthenticated(r) {
+		token := s.getSessionToken(r)
+		if token != "" && s.validateSession(token) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
@@ -635,9 +647,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := s.getSessionToken(r)
 	if token != "" {
 		s.destroySession(token)
-		s.clearSessionCookie(w, r)
 		logger.Log("[WebUI] 🔒 Sesión cerrada correctamente")
 	}
+	s.clearSessionCookie(w, r)
 	if isJSONRequest(r) {
 		jsonResponse(w, http.StatusOK, map[string]interface{}{
 			"status":   "ok",

@@ -646,3 +646,89 @@ func TestWebUI_Login_CSRFProtection(t *testing.T) {
 		t.Errorf("expected 303 on valid X-Forwarded-Host match, got %d", proxyRec.Code)
 	}
 }
+
+func TestWebUI_Logout_DirectNavigationAndResidualBasicAuth(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// 1. Iniciar sesión mediante formulario
+	loginReq := httptest.NewRequest("POST", "/login", strings.NewReader("username=admin&password=secretpassword"))
+	loginReq.Host = "localhost:5000"
+	loginReq.Header.Set("Origin", "http://localhost:5000")
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("login failed: code %d", loginRec.Code)
+	}
+
+	var sessionCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.Value != "" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("session cookie not set")
+	}
+
+	// 2. Acceso a / con la cookie -> 200 OK
+	panelReq := httptest.NewRequest("GET", "/", nil)
+	panelReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+	panelReq.AddCookie(sessionCookie)
+	panelRec := httptest.NewRecorder()
+	handler.ServeHTTP(panelRec, panelReq)
+	if panelRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on panel with session cookie, got %d", panelRec.Code)
+	}
+
+	// 3. Cerrar sesión vía GET /logout (navegación directa del botón)
+	logoutReq := httptest.NewRequest("GET", "/logout", nil)
+	logoutReq.AddCookie(sessionCookie)
+	logoutRec := httptest.NewRecorder()
+	handler.ServeHTTP(logoutRec, logoutReq)
+
+	if logoutRec.Code != http.StatusSeeOther || logoutRec.Header().Get("Location") != "/login" {
+		t.Errorf("expected 303 -> /login on GET /logout, got %d -> %s", logoutRec.Code, logoutRec.Header().Get("Location"))
+	}
+
+	// Verificar cookie eliminada
+	var clearedCookie *http.Cookie
+	for _, c := range logoutRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			clearedCookie = c
+			break
+		}
+	}
+	if clearedCookie == nil || clearedCookie.MaxAge >= 0 {
+		t.Errorf("expected session cookie to be cleared on logout")
+	}
+
+	// 4. Si el navegador visita /login con cabecera Basic Auth residual -> debe mostrar la página de login (200), NO redirigir a /
+	loginPageReq := httptest.NewRequest("GET", "/login", nil)
+	loginPageReq.SetBasicAuth("admin", "secretpassword")
+	loginPageRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginPageRec, loginPageReq)
+
+	if loginPageRec.Code != http.StatusOK {
+		t.Errorf("expected 200 on /login despite residual Basic Auth, got %d", loginPageRec.Code)
+	}
+	if !strings.Contains(loginPageRec.Body.String(), "Iniciar Sesión") {
+		t.Errorf("expected login page to be rendered")
+	}
+
+	// 5. Si el navegador intenta navegar a / sin cookie pero con Basic Auth residual -> debe redirigir a /login (303)
+	blockedPanelReq := httptest.NewRequest("GET", "/", nil)
+	blockedPanelReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+	blockedPanelReq.SetBasicAuth("admin", "secretpassword")
+	blockedPanelRec := httptest.NewRecorder()
+	handler.ServeHTTP(blockedPanelRec, blockedPanelReq)
+
+	if blockedPanelRec.Code != http.StatusSeeOther || blockedPanelRec.Header().Get("Location") != "/login" {
+		t.Errorf("expected 303 -> /login for browser navigation without session cookie, got %d -> %s", blockedPanelRec.Code, blockedPanelRec.Header().Get("Location"))
+	}
+}
