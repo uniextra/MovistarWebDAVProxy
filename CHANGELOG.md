@@ -2,6 +2,15 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.5.1] - 2026-11-15
+
+### 🛡️ Resiliencia ante WAF (403) y Subidas Masivas/Grandes (`#26`, PR `#44`)
+- **Circuit breaker por servidor (`waf_breaker.go`):** al primer `403` de CloudFront, el proxy pausa las llamadas a ese servidor durante 10 min (duplicando el tiempo hasta 2 h si persiste) y responde `503 + Retry-After` a las escrituras que lo necesitan, evitando ráfagas de reintentos que alargan el bloqueo. Los servidores de API (`sapi`) y de subidas (`upload.*`) tienen frenos independientes para que un bloqueo en la API no detenga las subidas.
+- **0 llamadas previas a la API en subidas nuevas:** cuando SQLite ya completó su sincronización inicial, la comprobación previa al `PUT` y en `MKCOL` se resuelve en local (ahorrando 2 llamadas por archivo), y la URL de descarga se consulta solo en la primera lectura (`resolveURL`) en lugar de en cada `PROPFIND` tras el `PUT`.
+- **Renovación de sesión en subidas (`401`):** si una subida en streaming recibe `401`, renueva la sesión aunque el breaker de la API esté en pausa.
+- **Timeout de respuesta en subidas grandes (`UPLOAD_RESPONSE_TIMEOUT_SEC`):** ampliado a **300 s (5 min)** por defecto para evitar cortes a los 60 s cuando Movistar/O2 tarda en confirmar archivos de cientos de MB.
+- **`DeleteFile`:** deja de reintentar `403` si el breaker del WAF ya está activo.
+
 ## [v2.5.0] - 2026-11-15
 
 ### 🌐 Modo web opcional (`WEB_SESSION=true`, imagen `Dockerfile.web`)
