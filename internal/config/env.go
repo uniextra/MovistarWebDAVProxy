@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	Version          = "v2.5.1"
+	Version          = "v2.5.2"
 	encryptedPrefix  = "enc:v1:"
 	tokensEncryptEnv = "TOKENS_ENCRYPTION_KEY"
 )
@@ -68,12 +68,9 @@ func WebSessionEnabled() bool {
 }
 
 // TransferLimits devuelve las descargas y subidas simultáneas (WEBDAV_MAX_DOWNLOADS,
-// WEBDAV_MAX_UPLOADS). Por defecto 1 y 1; en modo web, 4 y 2 (la web sube de 2 en 2).
+// WEBDAV_MAX_UPLOADS). Por defecto 4 descargas y 2 subidas para ambos modos (la web sube de 2 en 2).
 func TransferLimits(webMode bool) (downloads, uploads int) {
-	downloads, uploads = 1, 1
-	if webMode {
-		downloads, uploads = 4, 2
-	}
+	downloads, uploads = 4, 2
 	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WEBDAV_MAX_DOWNLOADS"))); err == nil && n > 0 {
 		downloads = n
 	}

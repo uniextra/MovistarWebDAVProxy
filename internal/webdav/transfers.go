@@ -239,23 +239,25 @@ type transferWriter struct {
 }
 
 func (t *transferWriter) WriteHeader(code int) {
-	if !t.started && (code == http.StatusOK || code == http.StatusPartialContent) {
+	if !t.started {
 		t.started = true
-		size, offset := int64(0), int64(0)
-		if cr := t.Header().Get("Content-Range"); cr != "" {
-			// "bytes 100-199/1000"
-			if sp := strings.Fields(cr); len(sp) == 2 {
-				if i := strings.Index(sp[1], "/"); i > 0 {
-					size, _ = strconv.ParseInt(sp[1][i+1:], 10, 64)
-					if j := strings.Index(sp[1][:i], "-"); j > 0 {
-						offset, _ = strconv.ParseInt(sp[1][:j], 10, 64)
+		if code == http.StatusOK || code == http.StatusPartialContent {
+			size, offset := int64(0), int64(0)
+			if cr := t.Header().Get("Content-Range"); cr != "" {
+				// "bytes 100-199/1000"
+				if sp := strings.Fields(cr); len(sp) == 2 {
+					if i := strings.Index(sp[1], "/"); i > 0 {
+						size, _ = strconv.ParseInt(sp[1][i+1:], 10, 64)
+						if j := strings.Index(sp[1][:i], "-"); j > 0 {
+							offset, _ = strconv.ParseInt(sp[1][:j], 10, 64)
+						}
 					}
 				}
+			} else if cl := t.Header().Get("Content-Length"); cl != "" {
+				size, _ = strconv.ParseInt(cl, 10, 64)
 			}
-		} else if cl := t.Header().Get("Content-Length"); cl != "" {
-			size, _ = strconv.ParseInt(cl, 10, 64)
+			t.h = Transfers.Start("download", t.path, size, offset)
 		}
-		t.h = Transfers.Start("download", t.path, size, offset)
 	}
 	t.ResponseWriter.WriteHeader(code)
 }

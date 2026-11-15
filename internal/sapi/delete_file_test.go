@@ -1,6 +1,7 @@
 package sapi
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -40,20 +41,60 @@ func TestDeleteFile_OfficialFormat(t *testing.T) {
 	if capturedMethod != "POST" {
 		t.Errorf("expected POST method, got %s", capturedMethod)
 	}
-	if capturedPath != "/sapi/media" {
-		t.Errorf("expected path /sapi/media, got %s", capturedPath)
+	if capturedPath != "/sapi/media/file" {
+		t.Errorf("expected path /sapi/media/file, got %s", capturedPath)
 	}
-	if len(capturedQuery["action"]) == 0 || capturedQuery["action"][0] != "softdelete" {
-		t.Errorf("expected action=softdelete, got %v", capturedQuery["action"])
+	if len(capturedQuery["action"]) == 0 || capturedQuery["action"][0] != "delete" {
+		t.Errorf("expected action=delete, got %v", capturedQuery["action"])
 	}
-	if len(capturedQuery["id"]) == 0 || capturedQuery["id"][0] != "7276344205" {
-		t.Errorf("expected id=7276344205, got %v", capturedQuery["id"])
+	if len(capturedQuery["softdelete"]) == 0 || capturedQuery["softdelete"][0] != "true" {
+		t.Errorf("expected softdelete=true, got %v", capturedQuery["softdelete"])
 	}
-	if !strings.Contains(capturedContentType, "application/x-www-form-urlencoded") {
-		t.Errorf("expected application/x-www-form-urlencoded content type, got %s", capturedContentType)
+	if !strings.Contains(capturedContentType, "application/json") {
+		t.Errorf("expected application/json content type, got %s", capturedContentType)
 	}
-	if len(capturedBody) != 0 {
-		t.Errorf("expected empty body, got %d bytes: %s", len(capturedBody), string(capturedBody))
+	var res map[string]interface{}
+	if err := json.Unmarshal(capturedBody, &res); err != nil {
+		t.Fatalf("failed unmarshaling body: %v", err)
+	}
+	data, ok := res["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object in body, got %v", res)
+	}
+	files, ok := data["files"].([]interface{})
+	if !ok || len(files) != 1 {
+		t.Fatalf("expected files array with 1 item, got %v", data["files"])
+	}
+	if files[0] != float64(7276344205) && files[0] != int64(7276344205) {
+		t.Errorf("expected file id 7276344205, got %v", files[0])
+	}
+}
+
+func TestDeleteFile_FallbackToLegacy(t *testing.T) {
+	var calls []string
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path+"?"+r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		if strings.HasPrefix(r.URL.Path, "/sapi/media/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":"Media soft deleted successfully"}`))
+	})
+
+	err := client.DeleteFile("7276344205", "sample.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 calls, got %v", calls)
+	}
+	if !strings.HasPrefix(calls[0], "/sapi/media/file?action=delete&softdelete=true") {
+		t.Errorf("call 0 expected modern endpoint, got %s", calls[0])
+	}
+	if !strings.HasPrefix(calls[1], "/sapi/media?action=softdelete&id=7276344205") {
+		t.Errorf("call 1 expected legacy endpoint, got %s", calls[1])
 	}
 }
 
@@ -190,14 +231,52 @@ func TestDeleteFolder_OfficialFormat(t *testing.T) {
 	if len(capturedQuery["action"]) == 0 || capturedQuery["action"][0] != "softdelete" {
 		t.Errorf("expected action=softdelete, got %v", capturedQuery["action"])
 	}
-	if len(capturedQuery["id"]) == 0 || capturedQuery["id"][0] != "12345" {
-		t.Errorf("expected id=12345, got %v", capturedQuery["id"])
+	if !strings.Contains(capturedContentType, "application/json") {
+		t.Errorf("expected application/json content type, got %s", capturedContentType)
 	}
-	if !strings.Contains(capturedContentType, "application/x-www-form-urlencoded") {
-		t.Errorf("expected application/x-www-form-urlencoded content type, got %s", capturedContentType)
+	var res map[string]interface{}
+	if err := json.Unmarshal(capturedBody, &res); err != nil {
+		t.Fatalf("failed unmarshaling body: %v", err)
 	}
-	if len(capturedBody) != 0 {
-		t.Errorf("expected empty body, got %d bytes: %s", len(capturedBody), string(capturedBody))
+	data, ok := res["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object in body, got %v", res)
+	}
+	ids, ok := data["ids"].([]interface{})
+	if !ok || len(ids) != 1 {
+		t.Fatalf("expected 1 id in data.ids, got %v", data["ids"])
+	}
+	if ids[0] != float64(12345) && ids[0] != int64(12345) {
+		t.Errorf("expected folder id 12345, got %v", ids[0])
+	}
+}
+
+func TestDeleteFolder_FallbackToLegacy(t *testing.T) {
+	var calls []string
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path+"?"+r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		if len(r.URL.Query()["id"]) == 0 {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":{"code":"SAPI-500","message":"modern rejected"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":"Folder soft deleted successfully"}`))
+	})
+
+	err := client.DeleteFolder(12345, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 calls, got %v", calls)
+	}
+	if !strings.HasPrefix(calls[0], "/sapi/media/folder?action=softdelete") {
+		t.Errorf("call 0 expected modern endpoint, got %s", calls[0])
+	}
+	if !strings.HasPrefix(calls[1], "/sapi/media/folder?action=softdelete&id=12345") {
+		t.Errorf("call 1 expected legacy endpoint, got %s", calls[1])
 	}
 }
 

@@ -76,6 +76,10 @@ func fakeSaveMetadata(t *testing.T, validating int, okKinds ...string) (*Client,
 	var mu sync.Mutex
 	var calls []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/sapi/upload/") {
+			http.NotFound(w, r)
+			return
+		}
 		kind := strings.TrimPrefix(r.URL.Path, "/sapi/upload/")
 		mu.Lock()
 		calls = append(calls, kind)
