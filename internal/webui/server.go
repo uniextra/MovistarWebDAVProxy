@@ -44,7 +44,7 @@ const (
 	sessionCookieName  = "mc_webui_session"
 	defaultSessionTTL  = 24 * time.Hour
 	rememberSessionTTL = 30 * 24 * time.Hour
-	panelCSP           = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	panelCSP           = "default-src 'self'; base-uri 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
 )
 
 type webSession struct {
@@ -169,6 +169,11 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", panelCSP)
+		// Mejoras
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+
 
 		// /health siempre accesible sin autenticación para healthchecks de Docker
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
@@ -176,6 +181,14 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Protección CSRF / Cross-Origin para métodos que modifican estado
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
+			if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" {
+				http.Error(w, "Forbidden (cross-site request)", http.StatusForbidden)
+				return
+			}
+		}
+		
 		// Rutas públicas de autenticación web
 		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
 			next.ServeHTTP(w, r)

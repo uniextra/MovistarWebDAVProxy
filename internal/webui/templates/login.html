@@ -4,10 +4,58 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Iniciar Sesión — Movistar & O2 WebDAV Proxy</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%232563eb'/%3E%3Cpath d='M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z' fill='white'/%3E%3C/svg%3E">
+    <!-- 1. Carga externa controlada con CORS y sin Referer -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous" referrerpolicy="no-referrer">
+    <script src="https://cdn.tailwindcss.com" referrerpolicy="no-referrer"></script>
+    <!-- 2. Estilos locales limpios (sin @import externo) -->
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+
+        /* ---- Modo oscuro: reinterpreta los colores claros de la plantilla ---- */
+        html.dark { color-scheme: dark; }
+        html.dark body { background-color: #0b1120; color: #e2e8f0; }
+        html.dark .bg-white { background-color: #141b2a; }
+        html.dark .bg-slate-50 { background-color: #1a2233; }
+        html.dark .bg-slate-100 { background-color: #212a3d; }
+        html.dark .hover\:bg-slate-100:hover { background-color: #263045; }
+        html.dark .hover\:bg-slate-200:hover { background-color: #2c3750; }
+        html.dark .border-slate-100 { border-color: #232d40; }
+        html.dark .border-slate-200 { border-color: #2a3448; }
+        html.dark .border-slate-300 { border-color: #364258; }
+        html.dark .text-slate-900, html.dark .text-slate-800 { color: #e5e9f0; }
+        html.dark .text-slate-700 { color: #cdd5e1; }
+        html.dark .text-slate-600, html.dark .hover\:text-slate-600:hover { color: #aeb8c7; }
+        html.dark .text-slate-500 { color: #8f9aab; }
+        html.dark .shadow-sm { box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+
+        html.dark .bg-blue-50 { background-color: rgba(59,130,246,.12); }
+        html.dark .bg-blue-100, html.dark .hover\:bg-blue-50:hover { background-color: rgba(59,130,246,.22); }
+        html.dark .bg-emerald-50 { background-color: rgba(16,185,129,.12); }
+        html.dark .bg-emerald-100 { background-color: rgba(16,185,129,.22); }
+        html.dark .bg-rose-50 { background-color: rgba(244,63,94,.12); }
+        html.dark .bg-rose-100, html.dark .hover\:bg-rose-100:hover { background-color: rgba(244,63,94,.22); }
+        html.dark .bg-sky-50 { background-color: rgba(14,165,233,.12); }
+        html.dark .bg-amber-50 { background-color: rgba(245,158,11,.12); }
+        html.dark .ring-offset-1 { --tw-ring-offset-color: #141b2a; }
+        html.dark .text-amber-800 { color: #fcd34d; }
+        html.dark .border-amber-300 { border-color: rgba(251,191,36,.4); }
+        html.dark .bg-sky-100 { background-color: rgba(14,165,233,.22); }
+
+        html.dark .text-blue-600, html.dark .text-blue-700, html.dark .text-blue-800, html.dark .text-blue-900 { color: #93c5fd; }
+        html.dark .text-emerald-700, html.dark .text-emerald-800 { color: #6ee7b7; }
+        html.dark .text-rose-600, html.dark .text-rose-700, html.dark .text-rose-800 { color: #fda4af; }
+        html.dark .text-sky-600, html.dark .text-sky-700, html.dark .text-sky-800 { color: #7dd3fc; }
+
+        html.dark .border-blue-100, html.dark .border-blue-200, html.dark .border-blue-300 { border-color: rgba(96,165,250,.35); }
+        html.dark .border-emerald-200 { border-color: rgba(52,211,153,.35); }
+        html.dark .border-rose-200 { border-color: rgba(251,113,133,.35); }
+        html.dark .border-sky-200 { border-color: rgba(56,189,248,.35); }
+
+        html.dark input, html.dark textarea { color: #e5e9f0; }
+        html.dark input::placeholder, html.dark textarea::placeholder { color: #6b7688; }        
     </style>
 </head>
 <body class="min-h-screen flex items-center justify-center p-4 sm:p-6 text-slate-800">
