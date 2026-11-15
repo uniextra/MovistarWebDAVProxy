@@ -2,6 +2,14 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.5.4] - 2026-11-15
+
+### 🔐 Corrección del flujo de cierre de sesión y Basic Auth en WebUI (PR `#47`)
+- **Navegación HTML vs. API (`internal/webui/server.go`):** las peticiones de navegación del navegador (`Accept: text/html`) requieren sesión activa por cookie y redirigen a `/login` si no la tienen, evitando bucles con cabeceras residuales de Basic Auth (reservada para clientes no interactivos/API).
+- **`/login` y `/logout`:** `/login` comprueba la cookie de sesión en `GET`/`HEAD` y `/logout` limpia siempre la cookie de sesión.
+- **Botón de cierre de sesión (`internal/webui/templates/index.html`):** navega directamente a `/logout` (deshabilitando el botón para evitar clics repetidos) y añade `type="button"` / `pointer-events-none`.
+- **Tests (`internal/webui/server_test.go`):** añadidas pruebas para el flujo de logout, navegación directa y prevención de bucle con Basic Auth residual.
+
 ## [v2.5.3] - 2026-11-15
 
 ### 🔒 Seguridad WebUI, `DESKTOP_USER_AGENT` y modo oscuro en login (PR `#43`)
