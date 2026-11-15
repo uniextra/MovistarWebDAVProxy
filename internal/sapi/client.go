@@ -2127,8 +2127,8 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
-		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		// Manejo de retroceso ante HTTP 429 (Too Many Requests), 502, 503 (Service Unavailable) Antes rate limit o servicio ocupado
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable {
 			if attempt < maxRetries && canRetry {
 				backoff := time.Duration(1<<attempt) * time.Second
 				if backoff > 8*time.Second {
@@ -2136,7 +2136,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				}
 				jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
 				sleepDur := backoff + jitter
-				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o servicio ocupado (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
+				logger.Log("[SAPI] ⏳ Subida UploadFileToFolder pausada por error temporal (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
 				time.Sleep(sleepDur)
 				continue
 			}
