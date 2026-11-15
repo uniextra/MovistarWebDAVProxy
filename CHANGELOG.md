@@ -2,6 +2,11 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.4.5] - 2026-11-15
+
+### 🛠️ Caché y Sincronización de Metadatos (`#28`, PR `#42`)
+- **Reanudación de sincronización inicial cortada:** si la sincronización inicial se interrumpe a mitad (por ejemplo por un `403` en un lote de `GetMediaByIDs`) dejando elementos en SQLite sin `last_sync_cursor`, el siguiente ciclo ya no salta el cursor a «ahora» ni da la caché por completa; vuelve a consultar desde `from=0` y descarga únicamente los IDs de carpetas y archivos que aún faltan en la base local (`filterMissing`).
+
 ## [v2.4.4] - 2026-11-14
 
 ### 🛠️ Synology Hyper Backup: Auto-healing de `Control/@writer` y carpetas reales
