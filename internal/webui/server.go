@@ -44,7 +44,7 @@ const (
 	sessionCookieName  = "mc_webui_session"
 	defaultSessionTTL  = 24 * time.Hour
 	rememberSessionTTL = 30 * 24 * time.Hour
-	panelCSP           = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	panelCSP           = "default-src 'self'; base-uri 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
 )
 
 type webSession struct {
