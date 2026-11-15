@@ -2,7 +2,7 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
-## [Sin publicar]
+## [v2.5.0] - 2026-11-15
 
 ### 🌐 Modo web opcional (`WEB_SESSION=true`, imagen `Dockerfile.web`)
 
