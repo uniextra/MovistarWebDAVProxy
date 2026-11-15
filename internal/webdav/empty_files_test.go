@@ -443,3 +443,49 @@ func TestVirtualEmptyFiles_InternalFolderHidden(t *testing.T) {
 		t.Fatalf("ProxyInternalDir %s must be hidden from PROPFIND, but was found in response: %s", ProxyInternalDir, body)
 	}
 }
+
+func TestEphemeralEmptyFiles_FilteredAndPurged(t *testing.T) {
+	ephemeral := []string{
+		"/HyperBkp/HPE.hbk/Control/lock/lock_keep_alive.@writer_version_19.uuid",
+		"/HyperBkp/HPE.hbk/Control/@reader.1234/v1.cformat",
+	}
+	for _, p := range ephemeral {
+		if !isEphemeralEmptyFile(p) {
+			t.Errorf("expected %q to be classified as ephemeral", p)
+		}
+	}
+
+	persistent := []string{
+		"/HyperBkp/HPE.hbk/Control/@writer/v1.cformat",
+		"/HyperBkp/HPE.hbk/Control/@writer/v1.39.-1.0.0.none.none.cinfo",
+		"/HyperBkp/HPE.hbk/Control/@writer/v1.39.40.1.0.delete_version.start.cinfo",
+		"/HyperBkp/HPE.hbk/Control/@writer/v1.39.40.7.19.rollback_delete_version.upload_bucket_compact.cinfo",
+		"/Backups/empty.txt",
+	}
+	for _, p := range persistent {
+		if isEphemeralEmptyFile(p) {
+			t.Errorf("expected %q to be persistent (not ephemeral)", p)
+		}
+	}
+
+	srv, ms, _, cleanup := setupTestWebDAVServerWithDB(t)
+	defer cleanup()
+
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 300, Name: "Control", ParentID: 200})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 301, Name: "lock", ParentID: 300})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 302, Name: "@writer", ParentID: 300})
+	_ = ms.UpsertVirtualEmptyFile(301, "lock_keep_alive.@writer_version_19.uuid", "20261115T000000Z")
+	_ = ms.UpsertVirtualEmptyFile(302, "v1.39.40.1.0.delete_version.start.cinfo", "20261115T000000Z")
+	_ = ms.UpsertVirtualEmptyFile(302, "v1.cformat", "20261115T000000Z")
+	_ = ms.UpsertVirtualEmptyFile(302, "v1.39.-1.0.0.none.none.cinfo", "20261115T000000Z")
+
+	srv.fs.emptyFileManager.purgeLocalEphemeralFiles()
+
+	remaining, err := ms.ListAllVirtualEmptyFiles()
+	if err != nil {
+		t.Fatalf("ListAllVirtualEmptyFiles failed: %v", err)
+	}
+	if len(remaining) != 3 {
+		t.Fatalf("expected 3 persistent @writer files after purge, got %d: %+v", len(remaining), remaining)
+	}
+}

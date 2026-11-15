@@ -1491,13 +1491,10 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		// consultarla aquí suponía una petición extra a O2 por cada archivo subido (el
 		// doble de tráfico en una subida masiva, y más cerca del límite del WAF).
 		r := NewWebDAVFileReader(mfs, cleanPath, item)
-		if mfs.client.WebMode() {
-			// Modo web: la subida no devuelve URL de descarga y la URL por defecto nunca
-			// sirve, así que hay que esperar a que SAPI indexe el archivo (unos segundos).
-			r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
-		} else {
-			r.resolveURL = func() string { return mem.downloadURL(mfs) }
-		}
+		// La subida no siempre devuelve URL de descarga y SAPI tarda unos segundos en
+		// indexar el archivo recién subido; esperamos brevemente en ambos modos a que
+		// GetMediaByID devuelva la URL firmada en lugar de caer en /media/content?id=.
+		r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
 		return r, nil
 	}
 	mfs.cacheMu.RUnlock()
@@ -1967,8 +1964,9 @@ func (mfs *MovistarFS) waitForDownloadURL(mem *MemoryFile) string {
 		u := mem.downloadURL(mfs)
 		mfs.cacheMu.RLock()
 		confirmed := mem.URLConfirmed
+		failed := !mem.URLLookupFailedAt.IsZero()
 		mfs.cacheMu.RUnlock()
-		if confirmed || mem.ID == "" || time.Now().After(deadline) {
+		if confirmed || failed || mem.ID == "" || time.Now().After(deadline) {
 			return u
 		}
 		time.Sleep(reuploadSourcePoll)

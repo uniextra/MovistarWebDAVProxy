@@ -20,7 +20,7 @@ import (
 // archivos virtuales o cualquier fallo de la copia en la nube.
 func (s *Server) tryServerCopy(w http.ResponseWriter, r *http.Request) bool {
 	mfs := s.fs
-	if mfs == nil || mfs.client == nil || !mfs.client.WebMode() {
+	if mfs == nil || mfs.client == nil {
 		return false
 	}
 	u, err := url.Parse(r.Header.Get("Destination"))

@@ -1539,19 +1539,17 @@ func (c *Client) UpdateFolder(folderID int64, name string, parentID int64) error
 var ErrFolderUpdatesLimit = errors.New("la carpeta supera el límite de elementos por operación de Movistar Cloud (FOL-1036)")
 
 func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
-	if c.WebMode() {
-		err := c.deleteFolderWeb(folderID, permanent)
-		if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
-			return err
-		}
-		logger.Log("[SAPI] ↪ Borrado de la carpeta %d rechazado como en la web (%v); se usa la llamada genérica.", folderID, err)
+	err := c.deleteFolderModern(folderID, permanent)
+	if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
+		return err
 	}
+	logger.Log("[SAPI] ↪ Borrado moderno de la carpeta %d rechazado (%v); se usa la llamada genérica.", folderID, err)
 	return c.deleteFolderLegacy(folderID, permanent)
 }
 
-// deleteFolderWeb borra como la web: a la papelera con action=softdelete y
+// deleteFolderModern borra usando el endpoint moderno: a la papelera con action=softdelete y
 // {"data":{"ids":[id]}}, o definitivamente con action=delete y {"data":{"folders":[id]}}.
-func (c *Client) deleteFolderWeb(folderID int64, permanent bool) error {
+func (c *Client) deleteFolderModern(folderID int64, permanent bool) error {
 	action, key := "softdelete", "ids"
 	if permanent {
 		action, key = "delete", "folders"
@@ -1587,6 +1585,10 @@ func (c *Client) deleteFolderWeb(folderID int64, permanent bool) error {
 		return fmt.Errorf("delete folder failed (%d): %s", resp.StatusCode, string(b))
 	}
 	return nil
+}
+
+func (c *Client) deleteFolderWeb(folderID int64, permanent bool) error {
+	return c.deleteFolderModern(folderID, permanent)
 }
 
 func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
@@ -1653,6 +1655,10 @@ func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
 // Si una extensión clasificada como multimedia resultara genérica para SAPI,
 // UpdateMedia recurre a la operación genérica.
 func mediaKindForName(name string) string {
+	switch strings.ToLower(name) {
+	case "audio", "video", "picture", "file":
+		return strings.ToLower(name)
+	}
 	ext := strings.ToLower(name)
 	if i := strings.LastIndex(ext, "."); i >= 0 {
 		ext = ext[i+1:]
@@ -1792,9 +1798,8 @@ func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int6
 			if err == nil || !strings.Contains(err.Error(), "MED-1017") || attempt >= mediaMoveRetries {
 				break
 			}
-			// En modo web se pregunta el estado de validación, como la web; si no
-			// se puede saber, se espera a ciegas.
-			if c.WebMode() && c.waitMediaValidated(mediaID) {
+			// Se pregunta el estado de validación; si no se puede saber, se espera a ciegas.
+			if c.waitMediaValidated(mediaID) {
 				logger.Log("[SAPI] ⏳ '%s' estaba en validación (MED-1017); validado, reintento el movimiento (%d/%d).", newName, attempt+1, mediaMoveRetries)
 				continue
 			}
@@ -1884,9 +1889,9 @@ var (
 	}
 )
 
-// webDeleteRequest es el borrado de la web: lleva a la papelera con
+// modernDeleteRequest lleva a la papelera con
 // /media/<tipo>?action=delete&softdelete=true y {"data":{"<tipos>":[id]}}.
-func (c *Client) webDeleteRequest(kind, mediaID string) (*http.Request, error) {
+func (c *Client) modernDeleteRequest(kind, mediaID string) (*http.Request, error) {
 	var id interface{} = mediaID
 	if n, err := strconv.ParseInt(mediaID, 10, 64); err == nil {
 		id = n
@@ -1900,25 +1905,26 @@ func (c *Client) webDeleteRequest(kind, mediaID string) (*http.Request, error) {
 	return req, nil
 }
 
+func (c *Client) webDeleteRequest(kind, mediaID string) (*http.Request, error) {
+	return c.modernDeleteRequest(kind, mediaID)
+}
+
 func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 	maxRetries := deleteRetries
 	u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, mediaID)
-	// En modo web se borra como la web, con la operación del tipo (deducido del
-	// nombre); si la rechaza, se vuelve a la llamada genérica de siempre.
-	webKind := ""
-	if c.WebMode() {
-		webKind = "file"
-		if len(nameOrKind) > 0 {
-			webKind = mediaKindForName(nameOrKind[0])
-		}
+	// Se intenta primero la operación por tipo (/media/<kind>?action=delete&softdelete=true
+	// con cuerpo JSON); si la rechaza, se vuelve a la llamada genérica de siempre (/media?action=softdelete&id=...).
+	targetKind := "file"
+	if len(nameOrKind) > 0 {
+		targetKind = mediaKindForName(nameOrKind[0])
 	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var req *http.Request
 		var err error
-		if webKind != "" {
-			req, err = c.webDeleteRequest(webKind, mediaID)
+		if targetKind != "" {
+			req, err = c.modernDeleteRequest(targetKind, mediaID)
 		} else {
 			req, err = http.NewRequest("POST", u, strings.NewReader(""))
 			if err == nil {
@@ -1937,9 +1943,9 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		if resp.StatusCode == http.StatusNotFound {
 			_ = resp.Body.Close()
-			if webKind != "" {
+			if targetKind != "" {
 				// Un 404 de la operación por tipo no prueba que el archivo ya no esté.
-				webKind = ""
+				targetKind = ""
 				attempt--
 				continue
 			}
@@ -1996,9 +2002,9 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 				return nil
 			}
 			lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
-			if webKind != "" {
-				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%s); se usa la llamada genérica.", mediaID, webKind, res.Error.Code)
-				webKind = ""
+			if targetKind != "" {
+				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%s); se usa la llamada genérica.", mediaID, targetKind, res.Error.Code)
+				targetKind = ""
 				attempt--
 				continue
 			}
@@ -2007,6 +2013,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
+			if targetKind != "" {
+				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%d); se usa la llamada genérica.", mediaID, targetKind, resp.StatusCode)
+				targetKind = ""
+				attempt--
+				continue
+			}
 			break
 		}
 
@@ -2127,20 +2139,21 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
-		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o errores 5xx de servidor
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode >= 500 {
 			if attempt < maxRetries && canRetry {
+				c.httpClient.CloseIdleConnections()
 				backoff := time.Duration(1<<attempt) * time.Second
 				if backoff > 8*time.Second {
 					backoff = 8 * time.Second
 				}
 				jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
 				sleepDur := backoff + jitter
-				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o servicio ocupado (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
+				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o error de servidor (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
 				time.Sleep(sleepDur)
 				continue
 			}
-			return nil, fmt.Errorf("upload failed: rate limited or service unavailable (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, bStr)
+			return nil, fmt.Errorf("upload failed: rate limited or server error (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, bStr)
 		}
 
 		// 408: el host de subida cerró una conexión keep-alive obsoleta
@@ -2199,6 +2212,16 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
+		if res.Error != nil && (res.Error.Code == "MED-1048" || res.Error.Code == "PAPI-0000") {
+			if attempt < maxRetries && canRetry {
+				c.httpClient.CloseIdleConnections()
+				backoff := 2000*time.Millisecond + time.Duration(attempt)*1500*time.Millisecond
+				logger.Log("[SAPI] ⚠️ Error transitorio de subida (%s: %s) para %s. Reintentando en %v (%d/%d)...", res.Error.Code, res.Error.Message, fileName, backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+		}
+
 		finalID := parseFlexibleID(res.ID)
 		if finalID == "" {
 			finalID = parseFlexibleID(res.Data.ID)
@@ -2243,18 +2266,21 @@ func (c *Client) DownloadFileStream(item MediaItem) (io.ReadCloser, error) {
 }
 
 func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadCloser, error) {
-	if !c.WebMode() || item.ID == "" {
+	if item.ID == "" || strings.HasPrefix(item.ID, "virtual:") {
 		return c.downloadRange(item, offset)
 	}
-	// Modo web: las URL de descarga van firmadas y caducan. Se usa la última URL
-	// renovada de ese archivo y, si la descarga falla o llega vacía, se pide una URL
-	// nueva (como hace la web al abrir un archivo) y se reintenta una vez.
+	// Las URL de descarga van firmadas y caducan (tanto en modo normal como en modo web).
+	// Se usa la última URL renovada de ese archivo y, si la descarga falla, se pide una
+	// URL nueva por ID y se reintenta una vez (salvo si el WAF ya está en pausa).
 	if u, ok := c.freshURLs.Load(item.ID); ok {
 		item.URL = u.(string)
 	}
 	rc, err := c.downloadRange(item, offset)
 	if err == nil {
 		return rc, nil
+	}
+	if errors.Is(err, ErrWAFBlocked) {
+		return nil, err
 	}
 	fresh, ferr := c.GetMediaByID(item.ID)
 	if ferr != nil || fresh == nil || fresh.URL == "" || fresh.URL == item.URL {
@@ -2301,17 +2327,15 @@ func (c *Client) downloadRange(item MediaItem, offset int64) (io.ReadCloser, err
 		resp.Body.Close()
 		return nil, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
-	if c.WebMode() {
-		// Un 200 a una petición con rango entregaría el archivo desde el principio
-		// (datos del sitio equivocado), y un cuerpo vacío no sirve para nada.
-		if offset > 0 && resp.StatusCode == http.StatusOK {
-			resp.Body.Close()
-			return nil, fmt.Errorf("download ignoró el rango (HTTP 200 a bytes=%d-)", offset)
-		}
-		if resp.ContentLength == 0 && item.Size > offset {
-			resp.Body.Close()
-			return nil, fmt.Errorf("download devolvió un cuerpo vacío (HTTP %d)", resp.StatusCode)
-		}
+	// Un 200 a una petición con rango entregaría el archivo desde el principio
+	// (datos del sitio equivocado), y un cuerpo vacío no sirve para nada.
+	if offset > 0 && resp.StatusCode == http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download ignoró el rango (HTTP 200 a bytes=%d-)", offset)
+	}
+	if resp.ContentLength == 0 && item.Size > offset {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download devolvió un cuerpo vacío (HTTP %d)", resp.StatusCode)
 	}
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))

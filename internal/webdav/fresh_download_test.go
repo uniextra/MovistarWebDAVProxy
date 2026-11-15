@@ -149,51 +149,92 @@ func TestFreshRead_FoundIsUsedAndRemembered(t *testing.T) {
 	}
 }
 
-// Aún indexándose: no hay esperas ni se recuerda nada; la siguiente lectura vuelve a
-// consultar y, en cuanto SAPI lo conoce, funciona.
+// Aún indexándose: espera brevemente (reuploadSourceWait) y si agota el tiempo cae a la
+// URL conocida; la siguiente lectura vuelve a consultar y, en cuanto SAPI lo conoce, funciona.
 func TestFreshRead_NotYetIndexedRetriesOnNextRead(t *testing.T) {
+	oldWait, oldPoll := reuploadSourceWait, reuploadSourcePoll
+	reuploadSourceWait = 120 * time.Millisecond
+	reuploadSourcePoll = 30 * time.Millisecond
+	defer func() {
+		reuploadSourceWait = oldWait
+		reuploadSourcePoll = oldPoll
+	}()
+
 	f := &fakeO2{}
 	f.set(false, false)
 	srv, payload := uploadThenServer(t, f)
 
 	start := time.Now()
-	_ = readBack(srv) // URL conocida (rota): igual que antes del cambio
+	_ = readBack(srv) // espera como máximo ~reuploadSourceWait antes de usar la URL conocida
 	if d := time.Since(start); d > time.Second {
-		t.Errorf("la lectura no debe esperar; tardó %v", d)
+		t.Errorf("la lectura tardó demasiado tras agotar la espera: %v", d)
+	}
+	beforeRetry := f.queryCount()
+	if beforeRetry < 2 {
+		t.Errorf("esperados varios intentos durante la espera, hubo %d", beforeRetry)
 	}
 
 	f.set(true, false)
 	if got := readBack(srv); !bytes.Equal(got, payload) {
 		t.Fatalf("tras indexarse: %d bytes, esperados %d", len(got), len(payload))
 	}
-	if n := f.queryCount(); n != 2 {
-		t.Errorf("esperadas 2 consultas (una por lectura), hubo %d", n)
+	if n := f.queryCount(); n != beforeRetry+1 {
+		t.Errorf("esperada 1 consulta adicional tras indexarse, hubo %d (antes %d)", n, beforeRetry)
 	}
 }
 
-// Error de SAPI: se usa la URL conocida y no se vuelve a consultar ese archivo hasta
-// pasado el intervalo de espera.
+// Issue #41: PUT seguido inmediatamente de GET mientras SAPI termina de indexar en modo normal
+// debe esperar el sondeo de waitForDownloadURL y devolver el contenido en la primera lectura.
+func TestIssue41_ImmediateGetAfterPutWhileSapiIndexingInNormalMode(t *testing.T) {
+	oldWait, oldPoll := reuploadSourceWait, reuploadSourcePoll
+	reuploadSourceWait = 2 * time.Second
+	reuploadSourcePoll = 40 * time.Millisecond
+	defer func() {
+		reuploadSourceWait = oldWait
+		reuploadSourcePoll = oldPoll
+	}()
+
+	f := &fakeO2{}
+	f.set(false, false)
+	srv, payload := uploadThenServer(t, f)
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		f.set(true, false)
+	}()
+
+	if got := readBack(srv); !bytes.Equal(got, payload) {
+		t.Fatalf("primera lectura inmediata tras PUT: %d bytes, esperados %d", len(got), len(payload))
+	}
+	if n := f.queryCount(); n < 2 {
+		t.Errorf("esperados al menos 2 sondeos en waitForDownloadURL, hubo %d", n)
+	}
+}
+
+// Error de SAPI: se usa la URL conocida y MemoryFile.downloadURL no vuelve a consultar
+// ese archivo hasta pasado urlLookupErrorBackoff (downloadRange sí intenta 1 refresco si el
+// cuerpo llega vacío).
 func TestFreshRead_ErrorBacksOffBeforeRetrying(t *testing.T) {
 	old := urlLookupErrorBackoff
-	urlLookupErrorBackoff = 200 * time.Millisecond
+	urlLookupErrorBackoff = 800 * time.Millisecond
 	defer func() { urlLookupErrorBackoff = old }()
 
 	f := &fakeO2{}
 	f.set(true, true) // la consulta por ID falla
 	srv, payload := uploadThenServer(t, f)
 
-	_ = readBack(srv)
-	_ = readBack(srv) // dentro del intervalo: no debe consultar
-	if n := f.queryCount(); n != 1 {
-		t.Fatalf("dentro del intervalo de espera: esperada 1 consulta, hubo %d", n)
+	_ = readBack(srv) // 1 consulta en downloadURL + 1 en downloadRange (cuerpo vacío) = 2
+	_ = readBack(srv) // dentro del intervalo: downloadURL no consulta (+1 en downloadRange) = 3
+	if n := f.queryCount(); n != 3 {
+		t.Fatalf("dentro del intervalo de espera: esperadas 3 consultas (downloadURL en backoff), hubo %d", n)
 	}
 
 	f.set(true, false)
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(850 * time.Millisecond)
 	if got := readBack(srv); !bytes.Equal(got, payload) {
 		t.Fatalf("tras el intervalo: %d bytes, esperados %d", len(got), len(payload))
 	}
-	if n := f.queryCount(); n != 2 {
-		t.Errorf("tras el intervalo: esperadas 2 consultas, hubo %d", n)
+	if n := f.queryCount(); n != 4 {
+		t.Errorf("tras el intervalo: esperadas 4 consultas, hubo %d", n)
 	}
 }

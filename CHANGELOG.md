@@ -2,6 +2,20 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.5.2] - 2026-11-15
+
+### 🔄 Paridad entre modo normal (OAuth) y modo web (`#41`)
+- **Descargas de archivos recién subidos o con URL caducada (`#41`):** unificados `downloadRange` y `OpenFile` (`waitForDownloadURL`) para ambos modos. Las lecturas inmediatas tras `PUT` esperan a que SAPI indexe la URL (respetando el backoff ante errores) y las respuestas con cuerpo vacío o rango ignorado renuevan la URL vía `GetMediaByID` en lugar de devolver `503`.
+- **Copia en la nube (`COPY`):** `tryServerCopy` (`/media/file?action=copy`) habilitado también en modo normal, con fallback automático a descarga y re-subida si el archivo aún se está indexando (`MED-1032`) o el servidor lo rechaza.
+- **Validación al mover (`MOVE`):** ante `MED-1017`, `UpdateMedia`/`MoveFile` sondea `get-validation-status` también en modo normal antes de reintentar.
+- **Borrados unificados (`DELETE`):** `DeleteFolder` y `DeleteFile` intentan primero los endpoints modernos (`softdelete` / `/media/<tipo>?action=delete&softdelete=true`) en ambos modos y hacen fallback a los legacy si el servidor los rechaza.
+- **Límites de transferencia por defecto:** `TransferLimits` pasa a **4 descargas / 2 subidas** por defecto para ambos modos (`WEBDAV_MAX_DOWNLOADS`, `WEBDAV_MAX_UPLOADS`).
+
+### 🛠️ Correcciones
+- **Subidas (`UploadFileToFolder`):** reintentos ante errores transitorios `HTTP >= 500`, `MED-1048` y `PAPI-0000`.
+- **Hyper Backup (`@writer` `.cinfo`):** `isEphemeralEmptyFile` solo purga bloqueos y `@reader`, conservando los archivos de estado `.cinfo` dentro de `@writer`.
+- **Transferencias WebDAV (`transferWriter.WriteHeader`):** propagación limpia de cabeceras en respuestas en streaming.
+
 ## [v2.5.1] - 2026-11-15
 
 ### 🛡️ Resiliencia ante WAF (403) y Subidas Masivas/Grandes (`#26`, PR `#44`)
