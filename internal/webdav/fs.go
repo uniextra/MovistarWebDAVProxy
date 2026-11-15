@@ -1068,6 +1068,20 @@ func (mfs *MovistarFS) ResolvePath(rawPath string) (*sapi.FolderItem, *sapi.Medi
 }
 
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
+	return mfs.resolvePathOpts(rawPath, true)
+}
+
+// localMetadataReady indica si la base SQLite ya tiene la sincronización inicial hecha:
+// entonces "¿existe ya?" se puede responder en local, sin consultar a la API.
+func (mfs *MovistarFS) localMetadataReady() bool {
+	ms := mfs.MetadataStore()
+	return ms != nil && ms.HasInitialSync()
+}
+
+// resolvePathOpts es resolvePath con la consulta de respaldo a SAPI (fallbackQuerySAPI)
+// opcional. Con allowSAPI=false, lo que no está en SQLite se da por inexistente sin
+// llamar a la API (ver OpenFile: la comprobación previa a cada subida).
+func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	cleanPath := path.Clean("/" + rawPath)
 	lowerPath := strings.ToLower(cleanPath)
 
@@ -1222,7 +1236,9 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 			}
 
 			// 5. Fallback to direct SAPI query with cooldown and write-through to SQLite
-			mfs.fallbackQuerySAPI(currentID, isLast)
+			if allowSAPI {
+				mfs.fallbackQuerySAPI(currentID, isLast)
+			}
 
 			// Re-check SQLite after SAPI write-through
 			f, fErr = ms.GetFolderByParentAndName(currentID, part)
@@ -1397,7 +1413,12 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		// DEBE ser rechazado con 405 Method Not Allowed (retornando os.ErrInvalid).
 		// Esto es crítico para Windows Explorer: al arrastrar carpetas, hace MKCOL y luego un PUT de 0 bytes;
 		// si se acepta el PUT, crea un archivo plano en lugar de mantener la carpeta, rompiendo la copia de sus hijos.
-		existingFolder, mediaInfo, isF, err := mfs.resolvePath(cleanPath)
+		// ¿Existe ya el destino? Con la base SQLite ya sincronizada se responde en local.
+		// Consultar a la API cada archivo nuevo (fallbackQuerySAPI: ListAllSubfolders +
+		// ListAllMediaInFolder) costaba 2 llamadas por subida y era lo que disparaba el
+		// 403 del WAF en subidas masivas (medido el 12/11/2026 con la v2.3.0). Lo creado
+		// desde otro cliente entra por la sincronización de cambios (SYNC_INTERVAL_SEC).
+		existingFolder, mediaInfo, isF, err := mfs.resolvePathOpts(cleanPath, !mfs.localMetadataReady())
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}

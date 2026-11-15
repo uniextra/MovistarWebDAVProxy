@@ -208,3 +208,34 @@ func TestSubidaCon401RenuevaLaSesion(t *testing.T) {
 		t.Fatalf("una subida con 401 debe renovar la sesión una vez; renovaciones=%d", n)
 	}
 }
+
+// Un 403 del WAF al borrar no se reintenta: cada reintento cuenta para el WAF y lo alarga
+// (Hyper Backup borra en ráfagas). Un 403 que no es del WAF sigue reintentándose.
+func TestDeleteFile_403DelWAFNoSeReintenta(t *testing.T) {
+	var intentos int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&intentos, 1)
+		w.Header().Set("Server", "CloudFront")
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, cloudFrontBlockPage)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(config.AccountConfig{RefreshToken: "r", ValidationKey: "vk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetBaseURLs(srv.URL+"/sapi", srv.URL)
+
+	inicio := time.Now()
+	err = c.DeleteFile("123", "a.jpg")
+	if !errors.Is(err, ErrWAFBlocked) {
+		t.Fatalf("esperado un error ErrWAFBlocked, obtenido %v", err)
+	}
+	if n := atomic.LoadInt32(&intentos); n != 1 {
+		t.Fatalf("un 403 del WAF no debe reintentarse: %d peticiones", n)
+	}
+	if d := time.Since(inicio); d > 2*time.Second {
+		t.Errorf("no debe esperar antes de rendirse; tardó %s", d)
+	}
+}

@@ -180,3 +180,55 @@ func TestSubidaDuranteBloqueoDeLaAPI(t *testing.T) {
 		t.Errorf("con la API en pausa no debe salir ninguna llamada a la API; salieron %d", n-apiAntes)
 	}
 }
+
+// Con la base SQLite ya sincronizada, comprobar si el destino de un PUT existe se hace en
+// local: subir un archivo nuevo no debe hacer ninguna llamada a la API (antes, 2 por
+// archivo: ListAllSubfolders + ListAllMediaInFolder, lo que disparaba el WAF).
+func TestSubidaNuevaSinConsultarALaAPI(t *testing.T) {
+	var apiHits, uploadHits int32
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/sapi/upload") {
+			atomic.AddInt32(&uploadHits, 1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"id":"888","name":"nueva.jpg"}}`))
+			return
+		}
+		atomic.AddInt32(&apiHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	t.Cleanup(mock.Close)
+
+	ms, err := cache.NewMetadataStore(filepath.Join(t.TempDir(), "meta_put.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 1, Name: "/", Magic: true})
+	_ = ms.SetSyncState("root_folder_id", "1")
+	_ = ms.SetInitialSync()
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 10, Name: "Fotos", ParentID: 1})
+
+	client, err := sapi.NewClient(config.AccountConfig{
+		Provider: "o2", Phone: "612345678",
+		AccessToken: "a", RefreshToken: "r", ValidationKey: "vk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetBaseURLs(mock.URL+"/sapi", mock.URL)
+	srv := NewServerWithAuth(client, config.AuthConfig{AuthDisabled: true}, ms)
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest("PUT", "/Fotos/nueva.jpg", bytes.NewReader([]byte("foto nueva"))))
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusNoContent && rec.Code != http.StatusOK {
+		t.Fatalf("PUT: esperado 201/204, obtenido %d (%s)", rec.Code, rec.Body.String())
+	}
+	if n := atomic.LoadInt32(&uploadHits); n != 1 {
+		t.Errorf("esperada 1 subida, hubo %d", n)
+	}
+	if n := atomic.LoadInt32(&apiHits); n != 0 {
+		t.Errorf("con la base sincronizada, subir un archivo nuevo no debe llamar a la API; hubo %d llamadas", n)
+	}
+}

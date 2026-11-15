@@ -440,7 +440,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(lw, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
 			return
 		}
-		if folder, _, isFolder, err := s.fs.resolvePath(urlPath); err == nil && isFolder && folder != nil {
+		// Con la base SQLite sincronizada se comprueba en local (sin consultar a la API).
+		if folder, _, isFolder, err := s.fs.resolvePathOpts(urlPath, !s.fs.localMetadataReady()); err == nil && isFolder && folder != nil {
 			logger.Log("[WebDAV] ℹ️ Rechazado PUT sobre carpeta existente: '%s' (RFC 4918 405 Method Not Allowed)", urlPath)
 			http.Error(lw, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
 			return

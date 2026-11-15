@@ -1970,6 +1970,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		// Si CloudFront devuelve 403 (posible rate limit WAF), reintentar con backoff
 		if resp.StatusCode == http.StatusForbidden {
+			// Si es el bloqueo del WAF (el freno ya está puesto), no se reintenta: cada
+			// reintento cuenta para el WAF y lo alarga (Hyper Backup borra en ráfagas).
+			if !c.WAFBlockedUntil().IsZero() {
+				lastErr = fmt.Errorf("delete file failed: %w", ErrWAFBlocked)
+				break
+			}
 			if attempt < maxRetries {
 				backoff := delete403Backoff(attempt)
 				logger.Log("[SAPI] ⚠️ 403 de CloudFront al borrar '%s'. Esperando %v (%d/%d)...", mediaID, backoff, attempt+1, maxRetries)
