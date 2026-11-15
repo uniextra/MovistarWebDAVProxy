@@ -1068,6 +1068,20 @@ func (mfs *MovistarFS) ResolvePath(rawPath string) (*sapi.FolderItem, *sapi.Medi
 }
 
 func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
+	return mfs.resolvePathOpts(rawPath, true)
+}
+
+// localMetadataReady indica si la base SQLite ya tiene la sincronización inicial hecha:
+// entonces "¿existe ya?" se puede responder en local, sin consultar a la API.
+func (mfs *MovistarFS) localMetadataReady() bool {
+	ms := mfs.MetadataStore()
+	return ms != nil && ms.HasInitialSync()
+}
+
+// resolvePathOpts es resolvePath con la consulta de respaldo a SAPI (fallbackQuerySAPI)
+// opcional. Con allowSAPI=false, lo que no está en SQLite se da por inexistente sin
+// llamar a la API (ver OpenFile: la comprobación previa a cada subida).
+func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	cleanPath := path.Clean("/" + rawPath)
 	lowerPath := strings.ToLower(cleanPath)
 
@@ -1222,7 +1236,9 @@ func (mfs *MovistarFS) resolvePath(rawPath string) (folderInfo *sapi.FolderItem,
 			}
 
 			// 5. Fallback to direct SAPI query with cooldown and write-through to SQLite
-			mfs.fallbackQuerySAPI(currentID, isLast)
+			if allowSAPI {
+				mfs.fallbackQuerySAPI(currentID, isLast)
+			}
 
 			// Re-check SQLite after SAPI write-through
 			f, fErr = ms.GetFolderByParentAndName(currentID, part)
@@ -1397,7 +1413,12 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		// DEBE ser rechazado con 405 Method Not Allowed (retornando os.ErrInvalid).
 		// Esto es crítico para Windows Explorer: al arrastrar carpetas, hace MKCOL y luego un PUT de 0 bytes;
 		// si se acepta el PUT, crea un archivo plano en lugar de mantener la carpeta, rompiendo la copia de sus hijos.
-		existingFolder, mediaInfo, isF, err := mfs.resolvePath(cleanPath)
+		// ¿Existe ya el destino? Con la base SQLite ya sincronizada se responde en local.
+		// Consultar a la API cada archivo nuevo (fallbackQuerySAPI: ListAllSubfolders +
+		// ListAllMediaInFolder) costaba 2 llamadas por subida y era lo que disparaba el
+		// 403 del WAF en subidas masivas (medido el 12/11/2026 con la v2.3.0). Lo creado
+		// desde otro cliente entra por la sincronización de cambios (SYNC_INTERVAL_SEC).
+		existingFolder, mediaInfo, isF, err := mfs.resolvePathOpts(cleanPath, !mfs.localMetadataReady())
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
@@ -1453,24 +1474,30 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		if mem.Size == 0 || len(mem.Content) > 0 {
 			return NewWebDAVMemoryReader(cleanPath, mem), nil
 		}
+		mfs.cacheMu.RLock()
+		knownURL := mem.URL
+		mfs.cacheMu.RUnlock()
 		item := sapi.MediaItem{
 			ID:               mem.ID,
 			Name:             mem.Name,
 			Size:             mem.Size,
-			URL:              mem.URL,
+			URL:              knownURL,
 			FolderID:         mem.FolderID,
 			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 		}
-		if !mfs.client.WebMode() {
-			item.URL = mem.downloadURL(mfs)
-			return NewWebDAVFileReader(mfs, cleanPath, item), nil
-		}
-		// Modo web: la subida no devuelve URL de descarga y la URL por defecto nunca
-		// sirve, así que hay que esperar a que SAPI indexe el archivo (unos segundos).
-		// Se espera en la primera lectura, no aquí, para no frenar los PROPFIND (que
-		// también abren el archivo).
+		// La URL de descarga se consulta a SAPI solo si de verdad se lee el contenido
+		// (primer Read), en los dos modos. x/net/webdav abre el archivo en cada PROPFIND
+		// solo para leer sus propiedades, y rclone hace un PROPFIND tras cada PUT:
+		// consultarla aquí suponía una petición extra a O2 por cada archivo subido (el
+		// doble de tráfico en una subida masiva, y más cerca del límite del WAF).
 		r := NewWebDAVFileReader(mfs, cleanPath, item)
-		r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		if mfs.client.WebMode() {
+			// Modo web: la subida no devuelve URL de descarga y la URL por defecto nunca
+			// sirve, así que hay que esperar a que SAPI indexe el archivo (unos segundos).
+			r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		} else {
+			r.resolveURL = func() string { return mem.downloadURL(mfs) }
+		}
 		return r, nil
 	}
 	mfs.cacheMu.RUnlock()

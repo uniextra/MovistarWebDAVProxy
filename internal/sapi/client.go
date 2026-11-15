@@ -282,6 +282,11 @@ type Client struct {
 	pacingMu       sync.Mutex
 	lastReqTime    time.Time
 	pacingInterval time.Duration
+
+	refreshFn func() bool // solo para pruebas: sustituye a RefreshSession (que llama a O2 de verdad)
+
+	waf       wafBreaker // pausa las llamadas a la API de O2 tras un 403 del cortafuegos (waf_breaker.go)
+	wafUpload wafBreaker // pausa las subidas (servidor de subidas) tras un 403 del cortafuegos en ese servidor
 }
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
@@ -779,10 +784,33 @@ func (c *Client) releaseSlot() {
 	}
 }
 
+func (c *Client) refreshSession() bool {
+	if c.refreshFn != nil {
+		return c.refreshFn()
+	}
+	return c.RefreshSession()
+}
+
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
+	freno, que, quien := c.breakerFor(req)
+	if until := freno.blockedUntil(); !until.IsZero() {
+		return nil, wafBlockedError(until, req.Method, req.URL.Path)
+	}
 	c.acquireSlot()
 	defer c.releaseSlot()
-	return c.doRequestLocked(req)
+	// Las peticiones que esperaban turno cuando saltó el bloqueo tampoco se envían.
+	if until := freno.blockedUntil(); !until.IsZero() {
+		return nil, wafBlockedError(until, req.Method, req.URL.Path)
+	}
+	resp, err := c.doRequestLocked(req)
+	if err == nil && resp != nil {
+		if isWAFBlockResponse(resp) {
+			freno.trip(que)
+		} else if resp.StatusCode < 500 {
+			freno.ok(quien)
+		}
+	}
+	return resp, err
 }
 
 func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
@@ -845,6 +873,13 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		if req.Body != nil && req.GetBody == nil {
+			// Cuerpo en flujo (una subida): no se puede repetir aquí, pero sí renovar la sesión
+			// para que el reintento del llamante (la subida desde disco) ya vaya con credenciales
+			// válidas. Antes solo la renovaban las llamadas a la API; con la API en pausa por el
+			// WAF nadie la renovaba y cada subida daba 401 (12/11/2026).
+			if c.HasCredentials() && !c.IsSessionExpired() {
+				c.refreshSession()
+			}
 			return resp, nil
 		}
 		if c.HasCredentials() && !c.IsSessionExpired() {
@@ -1935,6 +1970,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		// Si CloudFront devuelve 403 (posible rate limit WAF), reintentar con backoff
 		if resp.StatusCode == http.StatusForbidden {
+			// Si es el bloqueo del WAF (el freno ya está puesto), no se reintenta: cada
+			// reintento cuenta para el WAF y lo alarga (Hyper Backup borra en ráfagas).
+			if !c.WAFBlockedUntil().IsZero() {
+				lastErr = fmt.Errorf("delete file failed: %w", ErrWAFBlocked)
+				break
+			}
 			if attempt < maxRetries {
 				backoff := delete403Backoff(attempt)
 				logger.Log("[SAPI] ⚠️ 403 de CloudFront al borrar '%s'. Esperando %v (%d/%d)...", mediaID, backoff, attempt+1, maxRetries)
