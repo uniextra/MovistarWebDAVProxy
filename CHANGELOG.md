@@ -2,6 +2,13 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.5.3] - 2026-11-15
+
+### 🔒 Seguridad WebUI, `DESKTOP_USER_AGENT` y modo oscuro en login (PR `#43`)
+- **Cabeceras de seguridad y protección CSRF (`internal/webui/server.go`):** añadidas `base-uri 'self'` y `form-action 'self'` al `Content-Security-Policy`, cabeceras `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin` y `Permissions-Policy`, además de bloqueo de peticiones `Sec-Fetch-Site: cross-site` en métodos que modifican estado (`POST`, `PUT`, `DELETE`, `PATCH`).
+- **User-Agent configurable (`DESKTOP_USER_AGENT`):** añadido `GetDesktopUserAgent()` en `internal/auth/oauth.go` para permitir sobreescribir el `User-Agent` en `ExchangeCodeForTokens` y `RefreshOAuthToken`.
+- **Plantillas WebUI (`login.html`, `index.html`):** añadido soporte de modo oscuro y favicon en `login.html`, y carga de fuentes/Tailwind con `crossorigin` y `referrerpolicy="no-referrer"` sin `@import` externo.
+
 ## [v2.5.2] - 2026-11-15
 
 ### 🔄 Paridad entre modo normal (OAuth) y modo web (`#41`)
