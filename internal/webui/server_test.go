@@ -732,3 +732,148 @@ func TestWebUI_Logout_DirectNavigationAndResidualBasicAuth(t *testing.T) {
 		t.Errorf("expected 303 -> /login for browser navigation without session cookie, got %d -> %s", blockedPanelRec.Code, blockedPanelRec.Header().Get("Location"))
 	}
 }
+
+func TestWebUI_CompleteLogin_O2_DirectOAuth(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := config.TokensDir
+	config.TokensDir = tmpDir
+	t.Cleanup(func() { config.TokensDir = origTokensDir })
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "o2-access-token-123",
+			"refresh_token": "o2-refresh-token-456",
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	client, err := sapi.NewClient(config.AccountConfig{})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	authCfg := config.AuthConfig{AuthDisabled: true}
+	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
+	handler := uiSrv.Routes()
+
+	// 1. /start_login for O2
+	startBody := strings.NewReader(`{"phone":"612345678","provider":"o2"}`)
+	startReq := httptest.NewRequest("POST", "/start_login", startBody)
+	startReq.Header.Set("Content-Type", "application/json")
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, startReq)
+
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("/start_login failed with code %d: %s", startRec.Code, startRec.Body.String())
+	}
+
+	// 2. /complete_login with code for O2
+	completeBody := strings.NewReader(`{"phone":"612345678","provider":"o2","code_or_url":"test-code"}`)
+	completeReq := httptest.NewRequest("POST", "/complete_login", completeBody)
+	completeReq.Header.Set("Content-Type", "application/json")
+	completeRec := httptest.NewRecorder()
+	handler.ServeHTTP(completeRec, completeReq)
+
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("/complete_login failed with code %d: %s", completeRec.Code, completeRec.Body.String())
+	}
+
+	savedCfg := config.LoadAccountConfig("612345678")
+	if savedCfg.Provider != "o2" {
+		t.Errorf("Provider = %q, want o2", savedCfg.Provider)
+	}
+	if savedCfg.AccessToken != "o2-access-token-123" {
+		t.Errorf("AccessToken = %q, want o2-access-token-123", savedCfg.AccessToken)
+	}
+	if savedCfg.RefreshToken != "o2-refresh-token-456" {
+		t.Errorf("RefreshToken = %q, want o2-refresh-token-456", savedCfg.RefreshToken)
+	}
+
+	clientCfg := client.GetConfig()
+	if clientCfg.AccessToken != "o2-access-token-123" {
+		t.Errorf("clientCfg.AccessToken = %q, want 'o2-access-token-123'", clientCfg.AccessToken)
+	}
+}
+
+func TestWebUI_CompleteLogin_Movistar_CapturesSAPISession(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := config.TokensDir
+	config.TokensDir = tmpDir
+	t.Cleanup(func() { config.TokensDir = origTokensDir })
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "mov-access-token-123",
+			"refresh_token": "mov-refresh-token-456",
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/login/oauth") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"validationkey": "mov-sapi-valkey",
+					"jsessionid":    "mov-sapi-jsess",
+				},
+				"responsetime": 1794834400000,
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"status": "ok"}})
+	}))
+	defer sapiServer.Close()
+	t.Setenv("SAPI_BASE_URL", sapiServer.URL+"/sapi")
+
+	client, err := sapi.NewClient(config.AccountConfig{})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	authCfg := config.AuthConfig{AuthDisabled: true}
+	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
+	handler := uiSrv.Routes()
+
+	// 1. /start_login for Movistar
+	startBody := strings.NewReader(`{"phone":"622334455","provider":"movistar"}`)
+	startReq := httptest.NewRequest("POST", "/start_login", startBody)
+	startReq.Header.Set("Content-Type", "application/json")
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, startReq)
+
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("/start_login failed with code %d: %s", startRec.Code, startRec.Body.String())
+	}
+
+	// 2. /complete_login with code for Movistar
+	completeBody := strings.NewReader(`{"phone":"622334455","provider":"movistar","code_or_url":"test-code"}`)
+	completeReq := httptest.NewRequest("POST", "/complete_login", completeBody)
+	completeReq.Header.Set("Content-Type", "application/json")
+	completeRec := httptest.NewRecorder()
+	handler.ServeHTTP(completeRec, completeReq)
+
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("/complete_login failed with code %d: %s", completeRec.Code, completeRec.Body.String())
+	}
+
+	savedCfg := config.LoadAccountConfig("622334455")
+	if savedCfg.Provider != "movistar" {
+		t.Errorf("Provider = %q, want movistar", savedCfg.Provider)
+	}
+	if savedCfg.ValidationKey != "mov-sapi-valkey" {
+		t.Errorf("savedCfg.ValidationKey = %q, want 'mov-sapi-valkey'", savedCfg.ValidationKey)
+	}
+	if savedCfg.JSessionID != "mov-sapi-jsess" {
+		t.Errorf("savedCfg.JSessionID = %q, want 'mov-sapi-jsess'", savedCfg.JSessionID)
+	}
+}

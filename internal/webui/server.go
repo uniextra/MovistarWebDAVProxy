@@ -39,7 +39,7 @@ var loginTmpl = template.Must(template.New("login").Parse(string(loginHTML)))
 
 const (
 	maxBodyBytes       = 1 << 20 // 1 MB
-	loginStateTTL      = 10 * time.Minute
+	loginStateTTL      = 30 * time.Minute
 	maxPendingLogin    = 50
 	sessionCookieName  = "mc_webui_session"
 	defaultSessionTTL  = 24 * time.Hour
@@ -946,6 +946,16 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var inputValidationKey string
+	if parsedInputURL, err := url.Parse(rawCode); err == nil {
+		q := parsedInputURL.Query()
+		if vk := q.Get("validationkey"); vk != "" {
+			inputValidationKey = vk
+		} else if vk := q.Get("validationKey"); vk != "" {
+			inputValidationKey = vk
+		}
+	}
+
 	callbackURL := strings.TrimSpace(rawCode)
 	if !strings.HasPrefix(strings.ToLower(callbackURL), "http") {
 		callback, parseErr := url.Parse(auth.GetOAuthRedirectURI(provider))
@@ -960,7 +970,7 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		callbackURL = callback.String()
 	}
 
-	_, primedCookies, sessionErr := auth.NewSAPILoginSessionAt(provider, callbackURL)
+	primedClient, primedCookies, sessionErr := auth.NewSAPILoginSessionAt(provider, callbackURL)
 	if sessionErr != nil {
 		logger.Log("[OAuth] ⚠️ No se pudo preparar la sesión web previa a SAPI: %v", sessionErr)
 	} else {
@@ -980,8 +990,9 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	if devID == "" {
 		devID = auth.GenerateDeviceID()
 	}
-	logger.Log("[OAuth] ✔ Tokens obtenidos. Usando autorización OAuth directa para el dispositivo %s (%s)...", logger.Mask(devID), provider)
+	logger.Log("[OAuth] ✔ Tokens obtenidos para el dispositivo %s (%s)...", logger.Mask(devID), provider)
 
+	sapiBase := auth.GetSAPIBaseURL(provider)
 	nowMS := time.Now().UnixMilli()
 
 	cfg := config.AccountConfig{
@@ -997,11 +1008,57 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		TelegramChatID:   existingCfg.TelegramChatID,
 	}
 
-	if primedCookies.JSessionID != "" {
-		cfg.JSessionID = primedCookies.JSessionID
-	}
-	if primedCookies.ValidationKey != "" {
-		cfg.ValidationKey = primedCookies.ValidationKey
+	if provider == "movistar" {
+		var sapiRes auth.SAPILoginResult
+		for attempt := 0; attempt < 3; attempt++ {
+			sapiRes = auth.SAPILoginOAuth(primedClient, sapiBase, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
+			if sapiRes.StatusCode == http.StatusOK && (sapiRes.ValidationKey != "" || sapiRes.JSessionID != "") {
+				break
+			}
+			if attempt < 2 {
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+			}
+		}
+
+		if sapiRes.StatusCode == http.StatusOK && (sapiRes.ValidationKey != "" || sapiRes.JSessionID != "") {
+			if sapiRes.ValidationKey != "" {
+				cfg.ValidationKey = sapiRes.ValidationKey
+			}
+			if sapiRes.JSessionID != "" {
+				cfg.JSessionID = sapiRes.JSessionID
+			}
+			if sapiRes.LastRefreshDate > 0 {
+				cfg.LastRefreshDate = sapiRes.LastRefreshDate
+			}
+			if sapiRes.RefreshedOAuth != nil {
+				if sapiRes.RefreshedOAuth.AccessToken != "" {
+					cfg.AccessToken = sapiRes.RefreshedOAuth.AccessToken
+				}
+				if sapiRes.RefreshedOAuth.RefreshToken != "" {
+					cfg.RefreshToken = sapiRes.RefreshedOAuth.RefreshToken
+				}
+			}
+			logger.Log("[OAuth] ✔ Sesión SAPI inicializada con éxito para Movistar Cloud (validationkey obtenida).")
+		} else {
+			if primedCookies.JSessionID != "" {
+				cfg.JSessionID = primedCookies.JSessionID
+			}
+			if primedCookies.ValidationKey != "" {
+				cfg.ValidationKey = primedCookies.ValidationKey
+			}
+			logger.Log("[OAuth] ⚠️ SAPI devolvió HTTP %d tras canje en Movistar (%v). Continuando con tokens OAuth.", sapiRes.StatusCode, sapiRes.Error)
+		}
+	} else {
+		if primedCookies.JSessionID != "" {
+			cfg.JSessionID = primedCookies.JSessionID
+		}
+		if primedCookies.ValidationKey != "" {
+			cfg.ValidationKey = primedCookies.ValidationKey
+		}
+		if inputValidationKey != "" {
+			cfg.ValidationKey = inputValidationKey
+		}
+		logger.Log("[OAuth] ✔ Usando autorización OAuth directa para O2 Cloud.")
 	}
 
 	if err := config.SaveAccountConfig(cfg); err != nil {

@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -26,7 +25,7 @@ const (
 	OAuthRedirectURI  = "https://micloud.movistar.es/ui/html/clientoauth.html"
 	ClientPlatform    = "windows"
 	DesktopUserAgent  = "omh windows client 32.1.3.0"
-	SAPIUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0"
+	SAPIUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
@@ -60,6 +59,9 @@ var (
 )
 
 func GetOAuthAuthorizeURL(provider string) string {
+	if env := strings.TrimSpace(os.Getenv("OAUTH_AUTHORIZE_URL")); env != "" {
+		return env
+	}
 	if strings.EqualFold(provider, "o2") {
 		return "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/authorize"
 	}
@@ -67,6 +69,9 @@ func GetOAuthAuthorizeURL(provider string) string {
 }
 
 func GetOAuthTokenURL(provider string) string {
+	if env := strings.TrimSpace(os.Getenv("OAUTH_TOKEN_URL")); env != "" {
+		return env
+	}
 	if strings.EqualFold(provider, "o2") {
 		return "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/token"
 	}
@@ -175,6 +180,9 @@ func primeSAPILoginSession(client *http.Client, sessionURL string) (SAPILoginSes
 }
 
 func GetSAPIBaseURL(provider string) string {
+	if env := strings.TrimSpace(os.Getenv("SAPI_BASE_URL")); env != "" {
+		return env
+	}
 	if strings.EqualFold(provider, "o2") {
 		return "https://cloud.o2online.es/sapi"
 	}
@@ -267,10 +275,7 @@ func mustRandRead(b []byte) {
 func GenerateDeviceID() string {
 	b := make([]byte, 16)
 	mustRandRead(b)
-	seed := fmt.Sprintf("PC+%x", b)
-	h := md5.Sum([]byte(seed))
-	b64 := base64.StdEncoding.EncodeToString(h[:])
-	return fmt.Sprintf("fol-%s", b64)
+	return fmt.Sprintf("web-%x", b)
 }
 
 func GeneratePKCE() (verifier, challenge string) {
@@ -582,6 +587,11 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "*/*")
+	if parsedEndpoint, parseErr := url.Parse(endpoint); parseErr == nil && parsedEndpoint.Host != "" {
+		req.Header.Set("Referer", parsedEndpoint.Scheme+"://"+parsedEndpoint.Host+"/")
+	}
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
 	if deviceID != "" {
 		req.Header.Set("X-deviceid", deviceID)
 	}
