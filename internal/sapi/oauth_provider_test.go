@@ -107,6 +107,88 @@ func TestRefreshSession_O2_SAPILoginSuccess(t *testing.T) {
 	if cfg.RefreshToken != "new-o2-refresh-token" {
 		t.Errorf("RefreshToken = %q, want %q", cfg.RefreshToken, "new-o2-refresh-token")
 	}
+	if !loginOAuthCalled.Load() {
+		t.Errorf("loginOAuthCalled = false, want true")
+	}
+	if cfg.ValidationKey != "new-o2-valkey" {
+		t.Errorf("ValidationKey = %q, want new-o2-valkey", cfg.ValidationKey)
+	}
+	if cfg.JSessionID != "new-o2-jsessionid" {
+		t.Errorf("JSessionID = %q, want new-o2-jsessionid", cfg.JSessionID)
+	}
+}
+
+// TestRefreshSession_O2_RecoversValidationKeyWithoutTokenRefresh verifies that if
+// an O2 account has an active access token but lacks validationkey, RefreshSession
+// initializes SAPI directly via SAPILoginOAuth without touching the refresh token.
+func TestRefreshSession_O2_RecoversValidationKeyWithoutTokenRefresh(t *testing.T) {
+	var tokenServerCalled atomic.Bool
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenServerCalled.Store(true)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	var loginOAuthCalled atomic.Bool
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/login/oauth") {
+			loginOAuthCalled.Store(true)
+			http.SetCookie(w, &http.Cookie{
+				Name:  "JSESSIONID",
+				Value: "recovered-jsessionid",
+				Path:  "/",
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"validationkey": "recovered-valkey",
+					"jsessionid":    "recovered-jsessionid",
+				},
+				"responsetime": 1794834400000,
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"status": "ok"}})
+	}))
+	defer sapiServer.Close()
+
+	client, err := NewClient(config.AccountConfig{
+		Provider:        "o2",
+		Phone:           "612345678",
+		AccessToken:     "valid-active-token",
+		RefreshToken:    "unburned-refresh-token",
+		ValidationKey:   "", // missing validation key
+		DeviceID:        "web-test-device",
+		DeviceName:      "PC Windows",
+		LastRefreshDate: 1000,
+		ExpiresIn:       "3600",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(sapiServer.URL+"/sapi", sapiServer.URL+"/upload")
+
+	ok := client.RefreshSession()
+	if !ok {
+		t.Fatalf("RefreshSession() = false, want true")
+	}
+
+	if tokenServerCalled.Load() {
+		t.Errorf("tokenServer was called, but should have been avoided to protect refresh_token")
+	}
+	if !loginOAuthCalled.Load() {
+		t.Errorf("loginOAuthCalled = false, want true")
+	}
+
+	cfg := client.GetConfig()
+	if cfg.ValidationKey != "recovered-valkey" {
+		t.Errorf("ValidationKey = %q, want recovered-valkey", cfg.ValidationKey)
+	}
+	if cfg.JSessionID != "recovered-jsessionid" {
+		t.Errorf("JSessionID = %q, want recovered-jsessionid", cfg.JSessionID)
+	}
 }
 
 // TestDoRequest_O2_SendsValidationKeyAndCookie verifies that SAPI requests for O2
