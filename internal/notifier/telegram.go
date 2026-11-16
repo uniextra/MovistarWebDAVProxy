@@ -44,6 +44,7 @@ func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
 	token := strings.TrimSpace(botToken)
 	chat := strings.TrimSpace(chatID)
 
+	// cuando no tiene valor, buscamos en las variables del entorno
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	}
@@ -51,6 +52,7 @@ func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
 		chat = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
 	}
 
+	// actualizamos si precisa
 	if Default != nil {
 		if token != "" && chat != "" {
 			Default.UpdateCredentials(token, chat)
@@ -75,10 +77,22 @@ func (t *TelegramNotifier) IsConfigured() bool {
 }
 
 func (t *TelegramNotifier) UpdateCredentials(botToken, chatID string) {
+	token := strings.TrimSpace(botToken)
+	chat := strings.TrimSpace(chatID)
+
+	// Permite que las notificaciones y alertas sigan funcionando con la cuenta desvinculada
+	// Si se limpian las credenciales en la web, volver a las variables de entorno del Docker si existen
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	}
+	if chat == "" {
+		chat = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
+	}
+	
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.botToken = strings.TrimSpace(botToken)
-	t.chatID = strings.TrimSpace(chatID)
+	t.botToken = token
+	t.chatID = chat
 }
 
 func (t *TelegramNotifier) Status() (bool, string, string) {
@@ -264,5 +278,13 @@ func (t *TelegramNotifier) SendAlert(alertKey, title, description, provider, pho
 	sb.WriteString(fmt.Sprintf("Hora: %s", time.Now().Format("2006-01-02 15:04:05")))
 
 	return t.SendMessage(sb.String())
+}
+
+
+// Credentials devuelve el token y chatID activos actualmente en memoria.
+func (t *TelegramNotifier) Credentials() (string, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.botToken, t.chatID
 }
 
