@@ -1066,6 +1066,18 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		chatID = cfg.TelegramChatID
 	}
 
+	// Si no había archivo en disco (ej. tras desvincular), usar los activos en el notificador / Docker
+	if botToken == "" || chatID == "" {
+		envToken, envChat := s.notifier.Credentials()
+		if botToken == "" {
+			botToken = envToken
+		}
+		if chatID == "" {
+			chatID = envChat
+		}
+	}
+	
+	
 	if botToken == "" || chatID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
