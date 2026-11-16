@@ -163,8 +163,8 @@ docker run -d \
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
 | `WEBDAV_MAX_DOWNLOADS` | `4` | Descargas simultáneas a la nube. |
 | `WEBDAV_MAX_UPLOADS` | `2` | Subidas simultáneas a la nube. |
-| `DESKTOP_USER_AGENT` | `omh windows client 32.1.3.0` | `User-Agent` enviado al servidor OAuth (`apiseg.telefonica.es`). Si tras vincular por SMS recibes `401` o `403`, prueba a fijar `DESKTOP_USER_AGENT=DESKTOP` junto con `SAPI_USER_AGENT=DESKTOP`. |
-| `SAPI_USER_AGENT` | `Mozilla/5.0 ... Edg/157.0.0.0` | `User-Agent` enviado a SAPI (`micloud.movistar.es/sapi`). Si recibes `401` o `403`, prueba `SAPI_USER_AGENT=DESKTOP` junto con `DESKTOP_USER_AGENT=DESKTOP`. |
+| `DESKTOP_USER_AGENT` | `omh windows client 32.1.3.0` | `User-Agent` enviado al servidor OAuth (`apiseg.telefonica.es`) al canjear o refrescar tokens. |
+| `SAPI_USER_AGENT` | `Mozilla/5.0 ... Chrome/133.0.0.0 ...` | `User-Agent` enviado a SAPI (`micloud.movistar.es/sapi`), alineado por defecto con la huella uTLS `Chrome-133` para evitar bloqueos WAF de CloudFront. *(No usar `DESKTOP`: CloudFront lo rechaza con `401`.)* |
 | `WEB_SESSION` | `false` | Activa el [Modo Web](docs/web-mode.md) (requiere la imagen `Dockerfile.web`). Sus variables (`WEB_SESSION_RENEW_BEFORE`, `WEB_TRASH_EMPTY_EVERY`, `CHROME_PATH`…) están en esa página. |
 
 > **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.

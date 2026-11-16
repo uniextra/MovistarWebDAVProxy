@@ -229,6 +229,7 @@ type SAPILoginResult struct {
 	JSessionID          string
 	RefreshedOAuth      *RotatedOAuth
 	LastRefreshDate     int64
+	ResponseTime        int64
 	RawResponse         string
 	RequestURL          string
 	Protocol            string
@@ -270,6 +271,18 @@ func mustRandRead(b []byte) {
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand.Read failed: " + err.Error())
 	}
+}
+
+// SanitizeDeviceID normaliza identificadores heredados `fol-...` (con caracteres
+// base64 `+`, `/`, `=`) al formato `web-...` aceptado por CloudFront WAF.
+func SanitizeDeviceID(devID string) string {
+	devID = strings.TrimSpace(devID)
+	if strings.HasPrefix(devID, "fol-") {
+		clean := strings.TrimPrefix(devID, "fol-")
+		clean = strings.NewReplacer("+", "", "/", "", "=", "").Replace(clean)
+		return "web-" + clean
+	}
+	return devID
 }
 
 func GenerateDeviceID() string {
@@ -593,7 +606,7 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
 	if deviceID != "" {
-		req.Header.Set("X-deviceid", deviceID)
+		req.Header.Set("X-deviceid", SanitizeDeviceID(deviceID))
 	}
 	if deviceName != "" {
 		req.Header.Set("X-devicename", deviceName)
@@ -631,16 +644,34 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 	// 2. Extraer cookies de sesión
 	for _, cookie := range resp.Cookies() {
 		result.ResponseCookieNames = append(result.ResponseCookieNames, cookie.Name)
-		if cookie.Name == "validationkey" {
+		if strings.EqualFold(cookie.Name, "validationkey") {
 			result.ValidationKey = cookie.Value
-		} else if cookie.Name == "JSESSIONID" {
+		} else if strings.EqualFold(cookie.Name, "JSESSIONID") {
 			result.JSessionID = cookie.Value
+		}
+	}
+	if result.StatusCode == http.StatusOK && client != nil && client.Jar != nil {
+		for _, u := range []*url.URL{req.URL, {Scheme: req.URL.Scheme, Host: req.URL.Host, Path: "/"}} {
+			if u == nil || u.Host == "" {
+				continue
+			}
+			for _, cookie := range client.Jar.Cookies(u) {
+				if result.ValidationKey == "" && strings.EqualFold(cookie.Name, "validationkey") {
+					result.ValidationKey = cookie.Value
+				} else if result.JSessionID == "" && strings.EqualFold(cookie.Name, "JSESSIONID") {
+					result.JSessionID = cookie.Value
+				}
+			}
 		}
 	}
 
 	// 3. Parsear JSON body
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+		if errVal, ok := bodyMap["error"]; ok && errVal != nil {
+			result.Error = fmt.Errorf("SAPI login error: %v", errVal)
+		}
+
 		findKey := func(keys ...string) string {
 			for _, k := range keys {
 				if v, ok := bodyMap[k]; ok && v != nil {
@@ -666,9 +697,20 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 			result.JSessionID = findKey("jsessionid", "jsessionId", "JSessionID", "sessionId", "sessionid")
 		}
 
-		if rt := findKey("responsetime", "responseTime", "lastrefreshdate", "lastRefreshDate"); rt != "" {
+		if rt := findKey("responsetime", "responseTime"); rt != "" {
+			var respTime int64
+			fmt.Sscanf(rt, "%d", &respTime)
+			if respTime > 0 {
+				if respTime < 100000000000 {
+					respTime = respTime * 1000
+				}
+				result.ResponseTime = respTime
+			}
+		}
+
+		if lrdStr := findKey("lastrefreshdate", "lastRefreshDate"); lrdStr != "" {
 			var lrd int64
-			fmt.Sscanf(rt, "%d", &lrd)
+			fmt.Sscanf(lrdStr, "%d", &lrd)
 			if lrd > 0 {
 				if lrd < 100000000000 {
 					lrd = lrd * 1000

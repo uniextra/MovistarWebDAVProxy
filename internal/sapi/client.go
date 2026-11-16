@@ -297,18 +297,15 @@ var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured ma
 var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily failed")
 
 func NewClient(cfg config.AccountConfig) (*Client, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
-
 	// Transporte HTTP/2 con ClientHello emitido por uTLS, imitando un navegador
 	// convencional para no disparar el AWS CloudFront WAF Bot Control (403).
 	transport := auth.NewFingerprintedTransport()
 	logger.Log("[SAPI] 🔐 Huella TLS (uTLS): %s", auth.FingerprintName())
 
+	// No usamos CookieJar automático en httpClient para evitar que respuestas 401/403
+	// HTML de SAPI inyecten cookies anónimas o duplicadas: las cabeceras Cookie de
+	// sesión (JSESSIONID / validationkey) se gestionan explícitamente desde c.cfg.
 	httpClient := &http.Client{
-		Jar:       jar,
 		Transport: transport,
 		Timeout:   0,
 	}
@@ -527,14 +524,17 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 		}
 	}
 
-	// 2. Cookies de sesión
-	for _, cookie := range resp.Cookies() {
-		if strings.EqualFold(cookie.Name, "validationkey") && cookie.Value != "" && cookie.Value != c.cfg.ValidationKey {
-			c.cfg.ValidationKey = cookie.Value
-			changed = true
-		} else if strings.EqualFold(cookie.Name, "JSESSIONID") && cookie.Value != "" && cookie.Value != c.cfg.JSessionID {
-			c.cfg.JSessionID = cookie.Value
-			changed = true
+	// 2. Cookies de sesión (solo en respuestas < 400 para no capturar cookies
+	// anónimas de páginas HTML de error 401/403 como si fueran una sesión autenticada)
+	if resp.StatusCode < 400 {
+		for _, cookie := range resp.Cookies() {
+			if strings.EqualFold(cookie.Name, "validationkey") && cookie.Value != "" && cookie.Value != c.cfg.ValidationKey {
+				c.cfg.ValidationKey = cookie.Value
+				changed = true
+			} else if strings.EqualFold(cookie.Name, "JSESSIONID") && cookie.Value != "" && cookie.Value != c.cfg.JSessionID {
+				c.cfg.JSessionID = cookie.Value
+				changed = true
+			}
 		}
 	}
 
@@ -552,7 +552,41 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 	return changed
 }
 
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+func (c *Client) newSAPILoginClient(sapiBase, provider string) (*http.Client, string) {
+	if !isLoopbackURL(sapiBase) {
+		if loginClient, primedJSess, err := auth.NewSAPILoginSession(provider); err == nil && loginClient != nil {
+			return loginClient, primedJSess
+		}
+	}
+	jar, _ := cookiejar.New(nil)
+	var transport http.RoundTripper
+	var timeout time.Duration
+	if c.httpClient != nil {
+		transport = c.httpClient.Transport
+		timeout = c.httpClient.Timeout
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		Jar:       jar,
+	}, ""
+}
+
 func (c *Client) RefreshSession() bool {
+	ok, _ := c.refreshSessionInternal(false)
+	return ok
+}
+
+func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 
@@ -564,7 +598,7 @@ func (c *Client) RefreshSession() bool {
 		// Si caducó, hay que volver a iniciarla desde el panel.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return ws.CheckLogin(ctx)
+		return ws.CheckLogin(ctx), false
 	}
 
 	c.mu.RLock()
@@ -574,17 +608,11 @@ func (c *Client) RefreshSession() bool {
 	c.mu.RUnlock()
 
 	if alreadyExpired {
-		return false
+		return false, false
 	}
 
 	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
-		return false
-	}
-
-	// Evitar rotar el refresh_token repetidamente si se renovó recientemente (cooldown de 30 segundos)
-	if lastRefresh > 0 && time.Since(time.UnixMilli(lastRefresh)) < 30*time.Second {
-		logger.Log("[OAuth] ℹ️ Tokens renovados recientemente (<30s). Omitiendo rotación redundante de refresh_token.")
-		return true
+		return false, false
 	}
 
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
@@ -600,12 +628,15 @@ func (c *Client) RefreshSession() bool {
 		sapiBase = auth.GetSAPIBaseURL(cfg.Provider)
 	}
 
-	if cfg.AccessToken != "" {
-		res := auth.SAPILoginOAuth(c.httpClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
+	if !forceOAuth && cfg.AccessToken != "" {
+		loginClient, primedJSess := c.newSAPILoginClient(sapiBase, cfg.Provider)
+		res := auth.SAPILoginOAuth(loginClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
 		// Un 200 con cookies NO garantiza que el access_token siga siendo válido:
 		// SAPI puede devolver cookies de sesión y un cuerpo de error. Exigimos además
-		// evidencia de una sesión OAuth real (credenciales rotadas o validationkey sin error).
-		if res.StatusCode == http.StatusOK && res.Error == nil && (res.ValidationKey != "" || res.RefreshedOAuth != nil) {
+		// evidencia de una sesión OAuth real (credenciales rotadas o validationkey sin error),
+		// o bien haber obtenido por primera vez la JSESSIONID que faltaba en arranque en frío.
+		hasSession := res.ValidationKey != "" || res.RefreshedOAuth != nil || (cfg.JSessionID == "" && primedJSess != "")
+		if res.StatusCode == http.StatusOK && res.Error == nil && hasSession {
 			c.mu.Lock()
 			c.sessionExpired = false
 			if res.ValidationKey != "" {
@@ -613,6 +644,8 @@ func (c *Client) RefreshSession() bool {
 			}
 			if res.JSessionID != "" {
 				c.cfg.JSessionID = res.JSessionID
+			} else if primedJSess != "" && c.cfg.JSessionID == "" {
+				c.cfg.JSessionID = primedJSess
 			}
 			if res.LastRefreshDate > 0 {
 				c.cfg.LastRefreshDate = res.LastRefreshDate
@@ -631,8 +664,15 @@ func (c *Client) RefreshSession() bool {
 
 			_ = config.SaveAccountConfig(cfgCopy)
 			logger.Log("[OAuth] ✔ Sesión SAPI refrescada con éxito.")
-			return true
+			return true, false
 		}
+	}
+
+	// Evitar rotar el refresh_token repetidamente si ya se renovó recientemente (<30s)
+	// y ya existe una sesión (JSESSIONID/validationkey) activa.
+	if !forceOAuth && lastRefresh > 0 && time.Since(time.UnixMilli(lastRefresh)) < 30*time.Second && (cfg.ValidationKey != "" || cfg.JSessionID != "") {
+		logger.Log("[OAuth] ℹ️ Tokens renovados recientemente (<30s). Omitiendo rotación redundante de refresh_token.")
+		return true, false
 	}
 
 	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es.
@@ -672,19 +712,9 @@ func (c *Client) RefreshSession() bool {
 			// Persistir inmediatamente los nuevos tokens para proteger contra RTR (Refresh Token Rotation)
 			_ = config.SaveAccountConfig(cfgCopy)
 
-			// Para O2 Cloud, la autenticación es puramente OAuth directa vía cabecera Authorization.
-			// No se realiza SAPILoginOAuth porque /sapi/login/oauth no existe en O2.
-			if strings.EqualFold(cfgCopy.Provider, "o2") {
-				logger.Log("[OAuth] ✔ Tokens renovados con éxito en apiseg.telefonica.es (o2). Sesión activa.")
-				return true
-			}
-
-			// Con nuevo access_token, inicializar SAPI para Movistar Cloud. Reintentamos el login
-			// (sin volver a rotar el refresh_token) por si el 401 es puntual.
-			loginClient, _, _ := auth.NewSAPILoginSession(cfgCopy.Provider)
-			if loginClient == nil {
-				loginClient = c.httpClient
-			}
+			// Con nuevo access_token, inicializar SAPI tanto para Movistar como para O2
+			// para autenticar la cookie JSESSIONID antes de las llamadas SAPI.
+			loginClient, primedJSess := c.newSAPILoginClient(sapiBase, cfgCopy.Provider)
 
 			var res auth.SAPILoginResult
 			for attempt := 0; attempt < 3; attempt++ {
@@ -705,6 +735,8 @@ func (c *Client) RefreshSession() bool {
 				}
 				if res.JSessionID != "" {
 					c.cfg.JSessionID = res.JSessionID
+				} else if primedJSess != "" {
+					c.cfg.JSessionID = primedJSess
 				}
 				if res.LastRefreshDate > 0 {
 					c.cfg.LastRefreshDate = res.LastRefreshDate
@@ -723,17 +755,22 @@ func (c *Client) RefreshSession() bool {
 
 				_ = config.SaveAccountConfig(cfgCopy2)
 				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
-				return true
+				return true, true
 			}
 			// Si SAPI devolvió error tras renovar tokens en apiseg, no marcamos la sesión
 			// como expirada permanentemente: el access_token recién emitido es válido y se
-			// permite que las peticiones continúen con él.
+			// permite que las peticiones continúen con él (conservando la JSESSIONID preparada).
 			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco OAuth (%v). Continuando con nuevo access_token...", res.StatusCode, res.Error)
 			c.mu.Lock()
 			c.sessionExpired = false
+			if primedJSess != "" && c.cfg.JSessionID == "" {
+				c.cfg.JSessionID = primedJSess
+			}
 			c.syncCookiesLocked()
+			cfgCopy2 := c.cfg
 			c.mu.Unlock()
-			return true
+			_ = config.SaveAccountConfig(cfgCopy2)
+			return true, true
 		} else if refreshErr != nil {
 			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", refreshErr)
 		}
@@ -758,7 +795,7 @@ func (c *Client) RefreshSession() bool {
 		}
 		logger.Log("[!] ⚠️ Error transitorio durante renovación de sesión. Conservando credenciales para futuros reintentos.")
 	}
-	return false
+	return false, true
 }
 
 func isTerminalRefreshError(err error) bool {
@@ -807,10 +844,15 @@ func (c *Client) releaseSlot() {
 }
 
 func (c *Client) refreshSession() bool {
+	ok, _ := c.refreshSessionWithMode(false)
+	return ok
+}
+
+func (c *Client) refreshSessionWithMode(forceOAuth bool) (bool, bool) {
 	if c.refreshFn != nil {
-		return c.refreshFn()
+		return c.refreshFn(), true
 	}
-	return c.RefreshSession()
+	return c.refreshSessionInternal(forceOAuth)
 }
 
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
@@ -856,15 +898,7 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 		req.Header.Set("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
 	}
 	if cfg.DeviceID != "" {
-		devID := cfg.DeviceID
-		if strings.HasPrefix(devID, "fol-") {
-			clean := strings.TrimPrefix(devID, "fol-")
-			clean = strings.ReplaceAll(clean, "+", "")
-			clean = strings.ReplaceAll(clean, "/", "")
-			clean = strings.ReplaceAll(clean, "=", "")
-			devID = "web-" + clean
-		}
-		req.Header.Set("X-deviceid", devID)
+		req.Header.Set("X-deviceid", auth.SanitizeDeviceID(cfg.DeviceID))
 	}
 	if cfg.DeviceName != "" {
 		req.Header.Set("X-devicename", cfg.DeviceName)
@@ -925,51 +959,28 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 		if c.HasCredentials() && !c.IsSessionExpired() {
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
-			if c.RefreshSession() {
-				// Reintentar petición con nuevas credenciales
-				c.mu.RLock()
-				newCfg := c.cfg
-				c.mu.RUnlock()
-
-				var retryBody io.Reader
-				if req.GetBody != nil {
-					rb, err := req.GetBody()
-					if err != nil {
-						resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-						return resp, err
+			if ok, usedStep2 := c.refreshSessionWithMode(false); ok {
+				resp2, err2 := c.retryRequestWithCurrentConfig(req)
+				if err2 == nil && resp2.StatusCode == http.StatusUnauthorized && !usedStep2 {
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp2.Body, 4096))
+					_ = resp2.Body.Close()
+					if ok2, _ := c.refreshSessionWithMode(true); ok2 {
+						resp2, err2 = c.retryRequestWithCurrentConfig(req)
+					} else {
+						resp2 = nil
+						err2 = nil
 					}
-					retryBody = rb
 				}
-
-				newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
-				if err != nil {
-					resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					return resp, err
-				}
-				newReq.Header = req.Header.Clone()
-				newReq.Header.Set("Authorization", auth.BuildOAuthHeader(newCfg.AccessToken, newCfg.RefreshToken, newCfg.LastRefreshDate, newCfg.ExpiresIn))
-				if newCfg.ValidationKey != "" || newCfg.JSessionID != "" {
-					var parts []string
-					if newCfg.JSessionID != "" {
-						parts = append(parts, "JSESSIONID="+newCfg.JSessionID)
-					}
-					if newCfg.ValidationKey != "" {
-						parts = append(parts, "validationkey="+newCfg.ValidationKey)
-					}
-					newReq.Header.Set("Cookie", strings.Join(parts, "; "))
-				}
-				newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
-
-				resp2, err2 := c.httpClient.Do(newReq)
-				if err2 == nil {
-					c.processSAPIResponse(resp2)
+				if err2 == nil && resp2 != nil {
 					return resp2, nil
 				}
-				var urlErr *url.Error
-				if errors.As(err2, &urlErr) && urlErr.Err != nil {
-					return resp2, fmt.Errorf("SAPI retry failed (%s %s): %w", newReq.Method, newReq.URL.Path, urlErr.Err)
+				if err2 != nil {
+					var urlErr *url.Error
+					if errors.As(err2, &urlErr) && urlErr.Err != nil {
+						return resp2, fmt.Errorf("SAPI retry failed (%s %s): %w", req.Method, req.URL.Path, urlErr.Err)
+					}
+					return resp2, err2
 				}
-				return resp2, err2
 			}
 			if c.RefreshTransient() {
 				return nil, fmt.Errorf("%w (%s %s)", ErrSessionRefreshTransient, req.Method, req.URL.Path)
@@ -1051,6 +1062,7 @@ func (c *Client) retryRequestWithCurrentConfig(req *http.Request) (*http.Respons
 			cookies = append(cookies, "JSESSIONID="+cfg.JSessionID)
 		}
 		if cfg.ValidationKey != "" {
+			cookies = append(cookies, "validationKey="+cfg.ValidationKey)
 			cookies = append(cookies, "validationkey="+cfg.ValidationKey)
 		}
 		newReq.Header.Set("Cookie", strings.Join(cookies, "; "))

@@ -2,6 +2,17 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.5.5] - 2026-11-16
+
+### 🛡️ Bypass de CloudFront WAF (401 de 0 bytes) y Sesión SAPI (PR `#52`, `#49`)
+- **Sanitización de `X-deviceid` (`auth.SanitizeDeviceID`):** normaliza identificadores `fol-...` (eliminando `+`, `/`, `=`) al formato `web-...` en `GenerateDeviceID`, `sapiLoginOAuthRequest`, `handleCompleteLogin` y `doRequestLocked`, evitando los descartes `HTTP 401` vacíos de CloudFront WAF.
+- **Huella de navegador alineada (`SAPIUserAgent`):** restaurado a `Chrome/133.0.0.0` (coincidente con la huella uTLS `Chrome-133`) junto con `Referer`, `X-Requested-With: XMLHttpRequest` y `Accept-Language`.
+- **Inicialización y renovación de sesión SAPI sin quemar tokens:**
+  - `sapiLoginOAuthRequest` conserva las cookies del `client.Jar` cuando `/sapi/login/oauth` responde `200 OK` HTML sin `Set-Cookie`, evitando llamadas repetidas que consumían el login.
+  - `processSAPIResponse` ignora `Set-Cookie` en respuestas `>= 400` y `NewClient` prescinde del `CookieJar` automático para no capturar `JSESSIONID` anónimas de páginas de error `401` ni enviar cookies duplicadas.
+  - Unificado el flujo de `SAPILoginOAuth` para Movistar y O2, con cooldown `< 30s` aplicado solo a la rotación de `RefreshOAuthToken` cuando ya existe sesión activa y escalado automático si el reintento sigue devolviendo `401`.
+- **Tests CI (`waf_headers_ci_test.go`, `oauth_provider_test.go`, `server_test.go`):** añadidas pruebas de regresión para cabecera WAF, respuesta HTML de `/sapi/login/oauth`, filtrado de cookies en `401` y conservación de `JSESSIONID`.
+
 ## [v2.5.4] - 2026-11-15
 
 ### 🔐 Corrección del flujo de cierre de sesión y Basic Auth en WebUI (PR `#47`)

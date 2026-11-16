@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/sapi"
@@ -751,12 +753,36 @@ func TestWebUI_CompleteLogin_O2_DirectOAuth(t *testing.T) {
 	defer tokenServer.Close()
 	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
 
+	syncDone := make(chan struct{})
+	var syncOnce sync.Once
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/profile/changes") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{}})
+			syncOnce.Do(func() { close(syncDone) })
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"status": "ok"}})
+	}))
+	defer sapiServer.Close()
+	t.Setenv("SAPI_BASE_URL", sapiServer.URL+"/sapi")
+
 	client, err := sapi.NewClient(config.AccountConfig{})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 	authCfg := config.AuthConfig{AuthDisabled: true}
 	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	t.Cleanup(func() {
+		select {
+		case <-syncDone:
+			time.Sleep(50 * time.Millisecond)
+		case <-time.After(1 * time.Second):
+		}
+		if ms := davSrv.MetadataStore(); ms != nil {
+			_ = ms.Close()
+		}
+	})
 	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
 	handler := uiSrv.Routes()
 
@@ -817,6 +843,8 @@ func TestWebUI_CompleteLogin_Movistar_CapturesSAPISession(t *testing.T) {
 	defer tokenServer.Close()
 	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
 
+	syncDone := make(chan struct{})
+	var syncOnce sync.Once
 	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/login/oauth") {
 			w.Header().Set("Content-Type", "application/json")
@@ -831,6 +859,9 @@ func TestWebUI_CompleteLogin_Movistar_CapturesSAPISession(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"status": "ok"}})
+		if strings.Contains(r.URL.Path, "/profile/changes") {
+			syncOnce.Do(func() { close(syncDone) })
+		}
 	}))
 	defer sapiServer.Close()
 	t.Setenv("SAPI_BASE_URL", sapiServer.URL+"/sapi")
@@ -841,6 +872,16 @@ func TestWebUI_CompleteLogin_Movistar_CapturesSAPISession(t *testing.T) {
 	}
 	authCfg := config.AuthConfig{AuthDisabled: true}
 	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	t.Cleanup(func() {
+		select {
+		case <-syncDone:
+			time.Sleep(50 * time.Millisecond)
+		case <-time.After(1 * time.Second):
+		}
+		if ms := davSrv.MetadataStore(); ms != nil {
+			_ = ms.Close()
+		}
+	})
 	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
 	handler := uiSrv.Routes()
 

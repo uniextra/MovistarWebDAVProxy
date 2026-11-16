@@ -986,7 +986,7 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	existingCfg := config.LoadAccountConfig(phone)
-	devID := existingCfg.DeviceID
+	devID := auth.SanitizeDeviceID(existingCfg.DeviceID)
 	if devID == "" {
 		devID = auth.GenerateDeviceID()
 	}
@@ -1008,57 +1008,44 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		TelegramChatID:   existingCfg.TelegramChatID,
 	}
 
-	if provider == "movistar" {
-		var sapiRes auth.SAPILoginResult
-		for attempt := 0; attempt < 3; attempt++ {
-			sapiRes = auth.SAPILoginOAuth(primedClient, sapiBase, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
-			if sapiRes.StatusCode == http.StatusOK && (sapiRes.ValidationKey != "" || sapiRes.JSessionID != "") {
-				break
-			}
-			if attempt < 2 {
-				time.Sleep(time.Duration(attempt+1) * time.Second)
-			}
+	var sapiRes auth.SAPILoginResult
+	for attempt := 0; attempt < 3; attempt++ {
+		sapiRes = auth.SAPILoginOAuth(primedClient, sapiBase, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
+		if sapiRes.StatusCode == http.StatusOK && sapiRes.Error == nil {
+			break
 		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * time.Second)
+		}
+	}
 
-		if sapiRes.StatusCode == http.StatusOK && (sapiRes.ValidationKey != "" || sapiRes.JSessionID != "") {
-			if sapiRes.ValidationKey != "" {
-				cfg.ValidationKey = sapiRes.ValidationKey
-			}
-			if sapiRes.JSessionID != "" {
-				cfg.JSessionID = sapiRes.JSessionID
-			}
-			if sapiRes.LastRefreshDate > 0 {
-				cfg.LastRefreshDate = sapiRes.LastRefreshDate
-			}
-			if sapiRes.RefreshedOAuth != nil {
-				if sapiRes.RefreshedOAuth.AccessToken != "" {
-					cfg.AccessToken = sapiRes.RefreshedOAuth.AccessToken
-				}
-				if sapiRes.RefreshedOAuth.RefreshToken != "" {
-					cfg.RefreshToken = sapiRes.RefreshedOAuth.RefreshToken
-				}
-			}
-			logger.Log("[OAuth] ✔ Sesión SAPI inicializada con éxito para Movistar Cloud (validationkey obtenida).")
-		} else {
-			if primedCookies.JSessionID != "" {
-				cfg.JSessionID = primedCookies.JSessionID
-			}
-			if primedCookies.ValidationKey != "" {
-				cfg.ValidationKey = primedCookies.ValidationKey
-			}
-			logger.Log("[OAuth] ⚠️ SAPI devolvió HTTP %d tras canje en Movistar (%v). Continuando con tokens OAuth.", sapiRes.StatusCode, sapiRes.Error)
+	if sapiRes.ValidationKey != "" {
+		cfg.ValidationKey = sapiRes.ValidationKey
+	} else if primedCookies.ValidationKey != "" {
+		cfg.ValidationKey = primedCookies.ValidationKey
+	} else if inputValidationKey != "" {
+		cfg.ValidationKey = inputValidationKey
+	}
+	if sapiRes.JSessionID != "" {
+		cfg.JSessionID = sapiRes.JSessionID
+	} else if primedCookies.JSessionID != "" {
+		cfg.JSessionID = primedCookies.JSessionID
+	}
+	if sapiRes.LastRefreshDate > 0 {
+		cfg.LastRefreshDate = sapiRes.LastRefreshDate
+	}
+	if sapiRes.RefreshedOAuth != nil {
+		if sapiRes.RefreshedOAuth.AccessToken != "" {
+			cfg.AccessToken = sapiRes.RefreshedOAuth.AccessToken
 		}
+		if sapiRes.RefreshedOAuth.RefreshToken != "" {
+			cfg.RefreshToken = sapiRes.RefreshedOAuth.RefreshToken
+		}
+	}
+	if sapiRes.StatusCode == http.StatusOK && sapiRes.Error == nil {
+		logger.Log("[OAuth] ✔ Sesión SAPI inicializada con éxito (%s).", provider)
 	} else {
-		if primedCookies.JSessionID != "" {
-			cfg.JSessionID = primedCookies.JSessionID
-		}
-		if primedCookies.ValidationKey != "" {
-			cfg.ValidationKey = primedCookies.ValidationKey
-		}
-		if inputValidationKey != "" {
-			cfg.ValidationKey = inputValidationKey
-		}
-		logger.Log("[OAuth] ✔ Usando autorización OAuth directa para O2 Cloud.")
+		logger.Log("[OAuth] ⚠️ SAPI devolvió HTTP %d tras canje en %s (%v). Continuando con tokens OAuth.", sapiRes.StatusCode, provider, sapiRes.Error)
 	}
 
 	if err := config.SaveAccountConfig(cfg); err != nil {
