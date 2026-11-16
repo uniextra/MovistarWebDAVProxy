@@ -699,9 +699,14 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 		BodyPreview:         summarizeSAPILoginBody(bodyBytes, previewSecretOne, previewSecretTwo),
 	}
 
-	// 1. Extraer cabecera Authorization rotada si existe
-	if authResp := resp.Header.Get("Authorization"); authResp != "" {
-		result.RefreshedOAuth = ParseOAuthResponseHeader(authResp)
+	// 1. Extraer cabecera Authorization (o WWW-Authenticate / Authentication-Info) rotada si existe
+	for _, h := range []string{"Authorization", "WWW-Authenticate", "Authentication-Info"} {
+		if authResp := resp.Header.Get(h); authResp != "" {
+			if rot := ParseOAuthResponseHeader(authResp); rot != nil {
+				result.RefreshedOAuth = rot
+				break
+			}
+		}
 	}
 
 	// 2. Extraer cookies de sesión
@@ -783,6 +788,23 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 		}
 		if result.LastRefreshDate == 0 && result.ResponseTime > 0 {
 			result.LastRefreshDate = result.ResponseTime
+		}
+
+		if result.RefreshedOAuth == nil {
+			bodyAcc := findKey("accesstoken", "access_token")
+			bodyRef := findKey("refreshtoken", "refresh_token")
+			if bodyAcc != "" || bodyRef != "" {
+				exp := findKey("expiresin", "expires_in")
+				if exp == "" {
+					exp = "3600"
+				}
+				result.RefreshedOAuth = &RotatedOAuth{
+					AccessToken:     bodyAcc,
+					RefreshToken:    bodyRef,
+					ExpiresIn:       exp,
+					LastRefreshDate: result.LastRefreshDate,
+				}
+			}
 		}
 	}
 

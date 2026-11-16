@@ -723,10 +723,11 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 	}
 
 	// Evitar rotar el refresh_token repetidamente si ya se renovó recientemente (<30s)
-	// y ya existe una sesión (JSESSIONID/validationkey) activa.
+	// y ya existe una sesión (JSESSIONID/validationkey) activa. Devolvemos usedStep2=true
+	// para impedir que doRequestLocked escale a forceOAuth=true saltándose el cooldown.
 	if !forceOAuth && lastRefresh > 0 && time.Since(time.UnixMilli(lastRefresh)) < 30*time.Second && (cfg.ValidationKey != "" || cfg.JSessionID != "") {
 		logger.Log("[OAuth] ℹ️ Tokens renovados recientemente (<30s). Omitiendo rotación redundante de refresh_token.")
-		return true, false
+		return true, true
 	}
 
 	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es.

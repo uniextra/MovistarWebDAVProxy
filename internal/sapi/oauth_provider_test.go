@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"movistar-webdav-proxy/internal/config"
 )
@@ -188,6 +189,71 @@ func TestRefreshSession_O2_RecoversValidationKeyWithoutTokenRefresh(t *testing.T
 	}
 	if cfg.JSessionID != "recovered-jsessionid" {
 		t.Errorf("JSessionID = %q, want recovered-jsessionid", cfg.JSessionID)
+	}
+}
+
+// TestRefreshSession_CooldownPreventsForceOAuthEscalationLoop verifies that a
+// 401 within the <30s cooldown window does not escalate doRequestLocked to
+// forceOAuth=true and burn refresh_token in a tight loop.
+func TestRefreshSession_CooldownPreventsForceOAuthEscalationLoop(t *testing.T) {
+	oldTokensDir := config.TokensDir
+	config.TokensDir = t.TempDir()
+	t.Cleanup(func() { config.TokensDir = oldTokensDir })
+
+	var tokenCalls atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls.Add(1)
+		http.Error(w, "should not be called during cooldown", http.StatusInternalServerError)
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	var loginCalls atomic.Int32
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/login/oauth") {
+			loginCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer sapiServer.Close()
+
+	client, err := NewClient(config.AccountConfig{
+		Provider:        "o2",
+		Phone:           "612345678",
+		AccessToken:     "fresh-access",
+		RefreshToken:    "fresh-refresh",
+		JSessionID:      "existing-jsess",
+		DeviceID:        "web-test-cooldown",
+		DeviceName:      "PC Windows",
+		LastRefreshDate: time.Now().UnixMilli(),
+		ExpiresIn:       "3600",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(sapiServer.URL+"/sapi", sapiServer.URL+"/upload")
+
+	req, err := http.NewRequest(http.MethodGet, sapiServer.URL+"/sapi/profile/changes?action=get&from=0", nil)
+	if err != nil {
+		t.Fatalf("NewRequest failed: %v", err)
+	}
+
+	resp, err := client.DoRequest(req)
+	if err != nil {
+		t.Fatalf("DoRequest returned unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if tokenCalls.Load() != 0 {
+		t.Errorf("tokenServer called %d times during <30s cooldown, want 0", tokenCalls.Load())
+	}
+	if loginCalls.Load() == 0 {
+		t.Errorf("expected Step 1 SAPILoginOAuth attempt before cooldown check")
 	}
 }
 
