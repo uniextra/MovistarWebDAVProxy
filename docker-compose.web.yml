@@ -26,7 +26,11 @@ services:
       - WEBUI_USER=${WEBUI_USER:-}
       - WEBUI_PASSWORD=${WEBUI_PASSWORD:-}
       - WEBDAV_HOST_PORT=${WEBDAV_PORT:-5050}
+      # Notificaciones de Telegram (activas desde el arranque; opcional):
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       # Opcional (valores por defecto entre paréntesis):
+      # - TOKENS_ENCRYPTION_KEY=${TOKENS_ENCRYPTION_KEY:-}  # Cifra secretos en /app/tokens con AES-256-GCM
       # - WEBDAV_MAX_DOWNLOADS=4          # Descargas simultáneas (4 en modo web)
       # - WEBDAV_MAX_UPLOADS=2            # Subidas simultáneas (2, como la web)
       # - WEB_SESSION_RENEW_BEFORE=1h     # Renueva la sesión de 24 h este margen antes (requiere "No cerrar sesión")

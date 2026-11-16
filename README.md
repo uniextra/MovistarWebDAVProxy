@@ -6,14 +6,12 @@
 [![RAM Usage](https://img.shields.io/badge/RAM%20Usage-~6.5%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 
 > [!WARNING]
-> **Proyecto en desarrollo activo:** Este proyecto está en desarrollo y evoluciona constantemente. Se realizan cambios y actualizaciones frecuentes para corregir problemas, mejorar la estabilidad y ajustar la compatibilidad con Movistar/O2 Cloud. Por este motivo, el comportamiento puede cambiar entre versiones y pueden aparecer incidencias. Consulta las últimas actualizaciones y revisa la documentación antes de actualizar o desplegar una nueva versión.
+> **Proyecto en desarrollo activo:** Este proyecto evoluciona de forma constante para mejorar la estabilidad y la compatibilidad con Movistar/O2 Cloud. Revisa el [CHANGELOG.md](CHANGELOG.md) y la documentación antes de actualizar.
 
 > [!NOTE]
-> **Aviso de Proyecto No Oficial e Independiente:** Este software es un desarrollo comunitario y no oficial para fines de interoperabilidad y copias de seguridad personales. No está afiliado, asociado, patrocinado ni respaldado por Telefónica, S.A. ni por Movistar/O2. Consulta [DISCLAIMER.md](DISCLAIMER.md) y [TRADEMARKS.md](TRADEMARKS.md) para más información.
+> **Aviso de Proyecto No Oficial e Independiente:** Software comunitario para interoperabilidad y copias de seguridad personales. No está afiliado ni respaldado por Telefónica, S.A., Movistar ni O2. Consulta [DISCLAIMER.md](DISCLAIMER.md) y [TRADEMARKS.md](TRADEMARKS.md).
 
-Proxy WebDAV nativo de alto rendimiento escrito íntegramente en **Go** que traduce peticiones estándar WebDAV (**Synology HyperBackup**, **Duplicati**, **Rclone**, mapeo de discos en **Windows / macOS / Linux**) permitiendo la interoperabilidad y sincronización directa con los servicios en la nube de **Movistar Cloud España** y **O2 Cloud** de forma local, en tiempo real y sin intermediarios.
-
-Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparente y segura para tus servidores, ordenadores y copias de seguridad de NAS.
+Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones estándar WebDAV (**Synology HyperBackup**, **Duplicati**, **Rclone**, unidades de red en **Windows / macOS / Linux**) para conectar directamente con **Movistar Cloud España** y **O2 Cloud** de forma local y en tiempo real.
 
 <p align="center">
   <img src="screenshot.png" alt="Movistar & O2 Cloud WebDAV Proxy Web Dashboard" width="850">
@@ -24,38 +22,33 @@ Transforma tu almacenamiento ilimitado en una unidad remota rápida, transparent
 ## 📑 Índice de Contenidos
 
 1. [🌟 Características Principales](#-características-principales)
-2. [🐳 Despliegue con Docker](#-despliegue-con-docker)
-3. [🔑 Vinculación Inicial (Emparejamiento SMS)](#-vinculación-inicial-emparejamiento-sms)
-   * [🌐 Modo Web (opcional)](#-modo-web-opcional)
-4. [💻 Mapear como Unidad de Red (Windows, macOS, Linux)](#-mapear-como-unidad-de-red-windows-macos-linux)
-5. [⚙️ Clientes de Copia de Seguridad (HyperBackup, Duplicati)](#️-clientes-de-copia-de-seguridad-hyperbackup-duplicati)
-6. [🧹 Filtro Inteligente de Basura del SO (v2.1.0)](#-filtro-inteligente-de-basura-del-so-v210)
-7. [⚠️ Limitaciones Conocidas de Movistar / O2 Cloud](#️-limitaciones-conocidas-de-movistar--o2-cloud)
-8. [📚 Documentación Detallada](#-documentación-detallada)
-9. [⚖️ Aviso Legal y Marcas](#️-aviso-legal-y-marcas)
-10. [📄 Licencia](#-licencia)
+2. [🐳 Paso 1: Despliegue con Docker](#-paso-1-despliegue-con-docker)
+3. [🔑 Paso 2: Vinculación Inicial de la Cuenta](#-paso-2-vinculación-inicial-de-la-cuenta)
+4. [🔌 Paso 3: Conectar Clientes y Unidades de Red](#-paso-3-conectar-clientes-y-unidades-de-red)
+5. [⚙️ Variables de Entorno Principales y Alertas de Telegram](#️-variables-de-entorno-principales-y-alertas-de-telegram)
+6. [⚠️ Aspectos Clave a Tener en Cuenta](#️-aspectos-clave-a-tener-en-cuenta)
+7. [📚 Documentación Detallada](#-documentación-detallada)
+8. [⚖️ Aviso Legal y Marcas](#️-aviso-legal-y-marcas)
+9. [📄 Licencia](#-licencia)
 
 ---
 
 ## 🌟 Características Principales
 
-* 🚀 **Extremadamente Ligero y Eficiente (Go Nativo):** Binario estático compilado en contenedor Docker de solo **~20 MB** con consumo de memoria de apenas **~6.5 MB de RAM**.
-* 🔄 **Traducción Completa de WebDAV (RFC 4918):** Soporta `PROPFIND` (paginación automática de miles de archivos), `PUT` (streaming directo a disco sin saturar RAM), `GET`/`HEAD` (con soporte para peticiones `Range` y streaming por chunks), `MKCOL`, `DELETE`, `MOVE`, `COPY` y bloqueos `LOCK`/`UNLOCK`.
-* 📊 **Cuotas Virtuales RFC 4331:** Informa del espacio disponible para que asistentes como Synology DSM o Duplicati no fallen por chequeos de espacio insuficiente.
-* 🚦 **Semáforo de Concurrencia 1:1 (Alineado con Cliente Oficial):** Serializa las transferencias y peticiones como el cliente nativo de escritorio, optimizando subidas y descargas sin provocar bloqueos de *rate-limit* ni *WAF*.
-* 📱 **Autenticación Compatible + OAuth2 PKCE:** Implementa el flujo de autenticación del cliente de escritorio (`omh windows client`) con sincronización milimétrica de timestamps y soporte para verificación SMS oficial desde el navegador.
-* 🛡️ **Protección contra Colisiones:** Previene la creación de duplicados automáticos como ` (1)` al actualizar o mover archivos.
-* 🧹 **Absorbedor de Basura de SO (*DevNull Absorber*):** Filtra y neutraliza automáticamente archivos innecesarios de Windows, macOS y Linux.
-* 🌐 **Modo Web opcional:** Alternativa al inicio de sesión del cliente de escritorio que usa Movistar Cloud exactamente como la web oficial (Chromium sin pantalla), con inicio de sesión desde el panel y renovación automática de la sesión. Ver [docs/web-mode.md](docs/web-mode.md).
-* ⇅ **Transferencias en el panel:** Subidas y descargas en curso con nombre, porcentaje, velocidad y tiempo restante.
+* 🚀 **Ligero y Nativo en Go:** Imagen Docker de solo **~20 MB** y consumo de apenas **~6.5 MB de RAM** (ejecutado sin privilegios *non-root*).
+* 🔄 **WebDAV Completo (RFC 4918) + Cuotas Virtuales:** Compatible con `PROPFIND`, `PUT` en streaming, `GET`/`HEAD` con `Range`, `MKCOL`, `DELETE`, `MOVE`, `COPY`, bloqueos `LOCK`/`UNLOCK` y espacio virtual RFC 4331 para HyperBackup y Duplicati.
+* 🚦 **Control de Concurrencia y Resiliencia WAF:** Gestiona subidas y descargas paralelas (`2` subidas / `4` descargas por defecto), huella TLS adaptada y protección frente a colisiones de nombres o bloqueos de CloudFront.
+* 🔔 **Alertas de Telegram desde el Arranque (v2.5.6):** Notificaciones automáticas desde el primer segundo si configuras `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (aviso de inicio, cuenta sin vincular, caducidad de sesión o fallos críticos), sin necesidad de abrir antes el panel web.
+* 🌐 **Modo Web Opcional:** Alternativa basada en la sesión web oficial (`micloud.movistar.es`) con renovación automática cada 24 h si el flujo OAuth del cliente de escritorio falla. Ver [docs/web-mode.md](docs/web-mode.md).
+* 🧹 **Filtro de Basura del SO y Panel de Transferencias:** Absorbe automáticamente archivos ocultos del sistema (`.DS_Store`, `desktop.ini`, `thumbs.db`) y muestra velocidad, progreso y logs en tiempo real desde la interfaz web.
 
 ---
 
-## 🐳 Despliegue con Docker
+## 🐳 Paso 1: Despliegue con Docker
 
 ### Opción 1: Docker Compose (Recomendado)
 
-Crea un archivo `docker-compose.yml`:
+Crea un archivo `docker-compose.yml` (también puedes partir directamente del [`docker-compose.yml`](docker-compose.yml) del repositorio):
 
 ```yaml
 services:
@@ -69,11 +62,17 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
+      - TZ=Europe/Madrid
       - WEBDAV_USER=admin
       - WEBDAV_PASSWORD=TuPasswordSeguroAqui
       # Opcional: credenciales distintas para el panel web (si no se definen, usa las de WebDAV)
       # - WEBUI_USER=admin
       # - WEBUI_PASSWORD=OtroPasswordSeguro
+      # Opcional: notificaciones de Telegram activas desde el arranque del contenedor
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      # Opcional: cifrar en reposo (AES-256-GCM) los tokens guardados en /app/tokens
+      # - TOKENS_ENCRYPTION_KEY=TuClaveMaestraDeCifrado
       # Opcional: guardar archivos temporales grandes en disco en lugar de RAM (/tmp)
       # - WEBDAV_TMPDIR=/app/tmp
     ports:
@@ -89,7 +88,7 @@ volumes:
     name: movistar_webdav_tokens
 ```
 
-Inicia el servicio:
+Inicia el contenedor:
 ```bash
 docker compose up -d
 ```
@@ -100,8 +99,11 @@ docker compose up -d
 docker run -d \
   --name movistar-webdav-proxy \
   --restart unless-stopped \
+  -e TZ=Europe/Madrid \
   -e WEBDAV_USER=admin \
   -e WEBDAV_PASSWORD=TuPasswordSeguroAqui \
+  -e TELEGRAM_BOT_TOKEN= \
+  -e TELEGRAM_CHAT_ID= \
   -p 5000:5000 \
   -p 5050:8080 \
   -v movistar_webdav_tokens:/app/tokens \
@@ -110,198 +112,91 @@ docker run -d \
 
 ---
 
-## 🔒 Seguridad y Variables de Entorno
+## 🔑 Paso 2: Vinculación Inicial de la Cuenta
 
-### Recomendaciones de Seguridad y Autenticación
-* **Autenticación Web y WebDAV Robusta con Normalización:**
-  * **Panel Web con Login Moderno:** El panel de control web (`:5000`) cuenta con un formulario de inicio de sesión minimalista y seguro, con soporte nativo de autocompletado para gestores de contraseñas (*Bitwarden*, *1Password*, *KeePass*, *Google Chrome*, *Apple Keychain*), cookies de sesión HttpOnly/SameSite seguras y botón de cierre de sesión.
-  * **Clientes WebDAV (RFC 4918):** El endpoint WebDAV (`:5050`) mantiene compatibilidad estándar con HTTP Basic Auth y NTLMv2 para herramientas de copia y sistemas operativos (*Duplicati*, *Synology HyperBackup*, *Rclone*, *Windows WebClient*, *macOS Finder*).
-  * **Validación en Tiempo Constante:** Ambos servicios validan credenciales contra ataques de temporización (`subtle.ConstantTimeCompare`).
-  * **Normalización de usuarios Windows:** Los prefijos de dominio habituales de Windows WebClient (`DOMAIN\\usuario` o `\\usuario`) se normalizan automáticamente a `usuario`, ignorando espacios en blanco accidentales.
-  * **Preservación intacta de contraseñas:** La contraseña se preserva exactamente tal como se envía, permitiendo contraseñas complejas con dos puntos (`:`) o espacios internos.
-  * **Desafío RFC 4918 (`401 Unauthorized`):** Toda petición WebDAV no autenticada o con credenciales erróneas recibe un código HTTP `401 Unauthorized` junto al encabezado estándar `WWW-Authenticate: Basic realm="WebDAV"`.
-  * **Descubrimiento Windows WebClient:** La petición inicial `OPTIONS /` sin credenciales devuelve `200 OK` con `MS-Author-Via: DAV` y cabeceras de conformidad `DAV: 1, 2`, permitiendo al explorador de Windows identificar el servicio antes de solicitar credenciales en `PROPFIND /`.
-* **Topologías de Red Docker y Detección de IP:**
-  * **Docker Bridge (por defecto):** Mediante `BRUTE_FORCE_EXCLUDED_IPS`, las subredes puente estándar de Docker (`172.17.0.0/16`, `172.18.0.0/16`) y loopback (`127.0.0.1`, `::1`) quedan excluidas del bloqueo por fuerza bruta (HTTP 429). Esto evita que múltiples clientes compartiendo el gateway de Docker (ej. `172.18.0.1`) queden bloqueados accidentalmente. **La autenticación Basic Auth se exige y valida en todo momento (las exclusiones solo evitan el baneo 429, nunca eluden la clave).**
-  * **Proxy Inverso (Nginx, Nginx Proxy Manager, Traefik, Caddy, Synology DSM Reverse Proxy):**
-    * Al configurar `TRUSTED_PROXIES` (ej. `127.0.0.1,172.18.0.0/16`), el proxy extrae la IP real del cliente de `X-Forwarded-For` o `X-Real-IP`. Si la petición proviene de un origen no confiable, las cabeceras de reenvío se descartan de forma estricta para evitar spoofing.
-    * ⚠️ **Importante para subidas de archivos grandes (`413 Request Entity Too Large`):** Si sitúas el contenedor detrás de **Nginx** o **Nginx Proxy Manager (NPM)**, debes desactivar el límite de cuerpo y el buffering en la pestaña *Advanced* (*Custom Nginx Configuration*) del proxy inverso para que no corte las subidas WebDAV de varios GB:
-      ```nginx
-      client_max_body_size 0;
-      proxy_request_buffering off;
-      proxy_read_timeout 3600s;
-      proxy_send_timeout 3600s;
-      ```
-    * En Linux con clientes de escritorio basados en **GVFS** (Thunar / Nautilus `davs://`), ten en cuenta que `gvfsd-dav` / `libsoup` tiene una limitación histórica de entero con signo de 32 bits (**2 GiB**) por archivo; para subir archivos de entre 2 GB y 4 GB desde Linux se recomienda usar **Rclone** o `curl`.
-  * **Docker Host (`network_mode: host`):** En Linux nativo permite ver la IP real directa del socket. En Docker Desktop (Windows/macOS), debido a la máquina virtual interna de virtualización, el modo bridge con mapeo de puertos o proxy inverso es la topología recomendada.
-* **No exponer directamente a Internet:** Si necesitas acceder desde fuera de tu red local, coloca siempre un proxy inverso con **TLS/HTTPS** delante (Caddy, Nginx, Traefik o túnel VPN/WireGuard/Tailscale).
-* **Contenedor sin privilegios (`non-root`):** La imagen oficial ejecuta el servidor bajo el usuario sin privilegios `app` (`UID 10001`). En actualizaciones sobre volúmenes existentes, el entrypoint migra automáticamente los permisos de `/app/tokens` antes de soltar privilegios.
-
-### Tabla de Variables de Entorno
-
-| Variable | Por defecto | Descripción |
-| :--- | :--- | :--- |
-| `WEBDAV_USER` | *(vacío)* | Usuario para clientes WebDAV (y para el panel web si `WEBUI_USER` no se define). |
-| `WEBDAV_PASSWORD` | *(vacío)* | Contraseña en texto plano para clientes WebDAV. |
-| `WEBDAV_PASSWORD_HASH` | *(vacío)* | Alternativa a `WEBDAV_PASSWORD`: hash SHA-256 en hexadecimal (ej. `sha256:e3b0c44...`). |
-| `WEBUI_USER` | `WEBDAV_USER` | Usuario específico para el panel de control web (`:5000`). |
-| `WEBUI_PASSWORD` | `WEBDAV_PASSWORD` | Contraseña específica para el panel de control web. |
-| `REQUIRE_AUTH` | `false` | Si es `true`, el servidor aborta el arranque si no se han configurado credenciales. |
-| `AUTH_DISABLED` | `false` | Si es `true`, desactiva explícitamente la autenticación. |
-| `PORT` | `5000` | Puerto interno del servidor del Panel Web. |
-| `WEBDAV_PORT` | `8080` | Puerto interno del servidor WebDAV. |
-| `TOKENS_DIR` | `/app/tokens` | Directorio donde se almacenan las credenciales OAuth2 (`0700`). |
-| `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave opcional para cifrar en reposo (AES-256-GCM) los tokens guardados en disco. |
-| `WEBDAV_HOST_PORT` | `5050` | Puerto público de WebDAV que se muestra en el panel; en Compose se toma de `WEBDAV_PORT`. |
-| `TELEGRAM_BOT_TOKEN` | *(vacío)* | Token del bot de Telegram para alertas de sesión. |
-| `TELEGRAM_CHAT_ID` | *(vacío)* | Chat o canal de Telegram que recibirá las alertas. |
-| `MAX_UPLOAD_MB` | `4096` | Tamaño máximo permitido por archivo en subidas `PUT` (en MB). |
-| `WEBDAV_BUFFER_MB` | `32` | Tamaño máximo del búfer en RAM (MB) antes de hacer spool a disco (óptimo Duplicati). |
-| `TRUSTED_PROXIES` | *(vacío)* | Lista de IPs/CIDRs de proxies de confianza para evaluar `X-Forwarded-For` / `X-Real-IP`. |
-| `BRUTE_FORCE_EXCLUDED_IPS` | `127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16` | IPs/subredes exentas de bloqueo HTTP 429 (mantiene Basic Auth activo). |
-| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. Si montas un volumen en disco (ej. `/app/tmp`), debes definir `WEBDAV_TMPDIR=/app/tmp` para que se utilice. |
-| `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
-| `WEBDAV_MAX_DOWNLOADS` | `4` | Descargas simultáneas a la nube. |
-| `WEBDAV_MAX_UPLOADS` | `2` | Subidas simultáneas a la nube. |
-| `DESKTOP_USER_AGENT` | `omh windows client 32.1.3.0` | `User-Agent` enviado al servidor OAuth (`apiseg.telefonica.es`) al canjear o refrescar tokens. |
-| `SAPI_USER_AGENT` | `Mozilla/5.0 ... Chrome/133.0.0.0 ...` | `User-Agent` enviado a SAPI (`micloud.movistar.es/sapi`), alineado por defecto con la huella uTLS `Chrome-133` para evitar bloqueos WAF de CloudFront. *(No usar `DESKTOP`: CloudFront lo rechaza con `401`.)* |
-| `WEB_SESSION` | `false` | Activa el [Modo Web](docs/web-mode.md) (requiere la imagen `Dockerfile.web`). Sus variables (`WEB_SESSION_RENEW_BEFORE`, `WEB_TRASH_EMPTY_EVERY`, `CHROME_PATH`…) están en esa página. |
-
-> **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.
-
----
-
-## 🔑 Vinculación Inicial (Emparejamiento SMS)
+### Opción A (Recomendada): Emparejamiento por SMS (OAuth2)
 
 1. Abre tu navegador y entra al panel de control: `http://IP_DE_TU_SERVIDOR:5000`.
-2. Haz clic en **"Vincular Dispositivo (OAuth2 SMS)"**.
-3. Selecciona tu proveedor (**Movistar Cloud** u **O2 Cloud**) e introduce tu número de teléfono móvil.
-4. Pulsa en **"Abrir Página de Login en Nueva Pestaña"** para acceder al portal oficial de Telefónica y escribe el código SMS recibido.
-5. Copia la URL final redirigida en tu navegador (ej: `https://micloud.movistar.es/...code=...`), pégala en el panel y pulsa **"Completar Vinculación"**.
-6. ¡Listo! El servidor WebDAV quedará activo y escuchando en el puerto `5050`.
+2. Inicia sesión con tus credenciales (`WEBDAV_USER` / `WEBDAV_PASSWORD`, o `WEBUI_*` si las definiste).
+3. Haz clic en **"Vincular Dispositivo (OAuth2 SMS)"**, elige **Movistar Cloud** u **O2 Cloud** e introduce tu número de móvil.
+4. Pulsa **"Abrir Página de Login en Nueva Pestaña"**, accede al portal oficial de Telefónica e introduce el código SMS recibido.
+5. Copia la URL final redirigida (ej. `https://micloud.movistar.es/...code=...`), pégala en el panel y pulsa **"Completar Vinculación"**.
+6. ¡Listo! El servidor WebDAV quedará activo en el puerto `5050`.
 
-### 🌐 Modo Web (opcional)
+### Opción B (Alternativa): Modo Web con navegador integrado
 
-Si el emparejamiento por SMS del cliente de escritorio no funciona en tu caso, el proxy puede usar **la sesión de la web oficial** (`micloud.movistar.es`) con un Chromium sin pantalla:
+Si el emparejamiento por SMS del cliente de escritorio falla o es bloqueado en tu línea, puedes usar la **sesión web oficial** mediante un Chromium integrado sin pantalla (solo Movistar Cloud):
 
 ```bash
 docker compose -f docker-compose.web.yml up -d --build
 ```
 
-En el panel, pulsa **🔐 Abrir inicio de sesión**, entra con **e-mail y contraseña** y marca **«No cerrar sesión»**: así el proxy renueva solo la sesión, que Movistar caduca a las 24 h. Todos los detalles en [docs/web-mode.md](docs/web-mode.md).
+Abre el panel web (`:5000`), pulsa **🔐 Abrir inicio de sesión**, entra con **e-mail y contraseña** y marca **«No cerrar sesión»** para que el proxy la renueve automáticamente. Consulta todos los detalles en [docs/web-mode.md](docs/web-mode.md).
 
 ---
 
-## 💻 Mapear como Unidad de Red (Windows, macOS, Linux)
+## 🔌 Paso 3: Conectar Clientes y Unidades de Red
 
-Puedes montar la nube como si fuera un disco duro o carpeta compartida local:
+### 🛡️ Clientes de Copia de Seguridad
 
-| Sistema Operativo | Método Rápido | Ruta / Comando |
+* **Synology HyperBackup:** Destino `WebDAV` → `http://TU_IP:5050` → Usuario/Clave `WEBDAV_USER` / `WEBDAV_PASSWORD` → Carpeta `HyperBackup_NAS` → Directorio `Copia.hbk`.
+* **Duplicati:** Tipo de almacenamiento `WebDAV` → Servidor `TU_IP`, puerto `5050` → Ruta `Duplicati_Server`.
+* **Rclone:** Configura un remoto `type = webdav` con `vendor = owncloud` apuntando a `http://TU_IP:5050`. Si vas a subir archivos individuales de **más de 4 GB**, añade el overlay `chunker` (y opcionalmente `crypt`).
+
+👉 **Paso a paso, capturas y configuración completa de Rclone (`chunker` + `crypt`) en [docs/backup-clients.md](docs/backup-clients.md).**
+
+### 💻 Mapear como Unidad de Red
+
+| Sistema Operativo | Método Recomendado | Ruta / Comando Rápido |
 | :--- | :--- | :--- |
-| **🪟 Windows** | ⚠️ No soportado nativamente (Usar Rclone + WinFsp) | Ver [Aviso de Soporte en Windows](#-soporte-limitado-y-montaje-en-windows) |
-| **🍏 macOS** | Finder (`Cmd + K`) | `http://TU_IP:5050` (Usuario: `admin` / Clave: `admin`) |
-| **🐧 Linux** | GNOME Nautilus / `davfs2` | `dav://TU_IP:5050/` o `mount -t davfs http://TU_IP:5050 /mnt/cloud` |
+| **🪟 Windows** | **Rclone + WinFsp** *(el WebClient nativo está obsoleto)* | `rclone mount movistar: M: --vfs-cache-mode full` |
+| **🍏 macOS** | Finder (`Cmd + K`) | `http://TU_IP:5050` |
+| **🐧 Linux** | GNOME Files / KDE / `davfs2` / Rclone | `dav://TU_IP:5050/` o `mount -t davfs http://TU_IP:5050 /mnt/cloud` |
 
-### 🪟 Soporte Limitado y Montaje en Windows
-
-> [!WARNING]
-> **El montaje como unidad de red nativa en Windows (`net use` / `WebClient`) NO está soportado al 100% ni se recomienda para uso diario.**  
-> El cliente WebDAV integrado de Windows (`mrxdav.sys` / servicio `WebClient`) es un componente heredado que **Microsoft marcó oficialmente como obsoleto (*deprecated*) en 2023** y presenta graves deficiencias estructurales del propio sistema operativo:
-> 
-> 1. **Descarga obligatoria de archivos enteros al interactuar:** El Explorador de Windows intenta descargar a su caché local (`TfsStore`) el archivo completo (incluso si pesa varios gigabytes) solo para extraer miniaturas o al pulsar la tecla Supr para borrarlo.
-> 2. **Fallo de reconexión tras reiniciar ([Microsoft KB 2673544](https://learn.microsoft.com/en-US/troubleshoot/windows-client/networking/cannot-automatically-reconnect-dav-share)):** Por diseño de Windows, el Administrador de Credenciales envía una contraseña vacía al reconectar tras un reinicio, provocando fallos continuos de autenticación y bloqueos en bucle.
-> 3. **Límites de tamaño y timeouts:** Windows impone un límite de 4 GB por archivo en su registro y tiempos de espera agresivos de 60 segundos.
->
-> 💡 **Solución Oficial Recomendada en Windows:**  
-> Si necesitas mapear la nube como un disco local real en Windows con streaming de vídeo, navegación fluida y sin bloqueos del Explorador, utiliza **[Rclone con WinFsp](docs/network-drive.md#método-1-montaje-de-alto-rendimiento-con-rclone--winfsp-recomendado-en-windows)**.
->
-> *(Si aun así deseas probar el montaje nativo de Windows mediante script al iniciar sesión, las instrucciones experimentales se encuentran en la [Guía Completa de Mapeo de Red](docs/network-drive.md#método-2-montaje-nativo-de-windows-experimental--no-soportado-oficialmente)).*
-
-👉 **Para instrucciones paso a paso detalladas y montaje con Rclone, consulta la [Guía Completa de Mapeo de Red](docs/network-drive.md).**
+👉 **Guía completa por sistema operativo (incluyendo montaje nativo experimental en Windows) en [docs/network-drive.md](docs/network-drive.md).**
 
 ---
 
-## ⚙️ Clientes de Copia de Seguridad (HyperBackup, Duplicati)
+## ⚙️ Variables de Entorno Principales y Alertas de Telegram
 
-El proxy está optimizado para actuar como repositorio remoto de copias automáticas:
+Estas son las variables habituales para el primer despliegue:
 
-* **Synology HyperBackup:** Destino `WebDAV` > `http://TU_IP:5050` > Usuario/Clave `admin` > Carpeta `HyperBackup_NAS` > Repositorio `Copia.hbk`.
-* **Duplicati:** Tipo de almacenamiento `WebDAV` > Servidor `TU_IP`, puerto `5050` > Carpeta `Duplicati_Server`.
-* **Rclone:** Remoto tipo `webdav` con soporte de `--transfers 3` y comandos `sync` / `copy`.
+| Variable | Por defecto | Descripción |
+| :--- | :--- | :--- |
+| `WEBDAV_USER` | *(vacío)* | Usuario para clientes WebDAV (y para el panel web si `WEBUI_USER` no se define). |
+| `WEBDAV_PASSWORD` | *(vacío)* | Contraseña para clientes WebDAV. |
+| `WEBUI_USER` | `WEBDAV_USER` | Usuario independiente opcional para acceder al panel web (`:5000`). |
+| `WEBUI_PASSWORD` | `WEBDAV_PASSWORD` | Contraseña independiente opcional para el panel web. |
+| `TELEGRAM_BOT_TOKEN` | *(vacío)* | Token de tu bot de Telegram para alertas operativas y de sesión. |
+| `TELEGRAM_CHAT_ID` | *(vacío)* | Chat o canal de Telegram donde recibir las notificaciones. |
+| `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave maestra opcional para cifrar con **AES-256-GCM** los tokens guardados en disco. |
+| `TZ` | `Europe/Madrid` | Zona horaria del contenedor para logs y alertas. |
 
-👉 **Instrucciones detalladas y capturas en la [Guía de Clientes de Backup](docs/backup-clients.md).**
+### 🔔 Notificaciones de Telegram (PR #53)
 
-### 📦 Configuración recomendada de rclone (archivos de más de 4 GB y cifrado)
+Al incluir `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en tu `docker-compose.yml`, el notificador global queda activo desde el arranque sin tener que entrar primero al panel web:
+* **Arranque y estado inicial:** Notifica cuando el proxy inicia y avisa si la cuenta aún está pendiente de vinculación o de inicio de sesión web.
+* **Errores y caducidad:** Avisa ante fallos críticos de inicialización o cuando la sesión de Movistar/O2 caduca (con límite antispam de 1 hora por alerta).
+* **Prioridad y respaldo:** Si configuras Telegram desde el panel web, esas credenciales se guardan en `/app/tokens`; si desvinculas la cuenta, el proxy vuelve a usar automáticamente los valores de entorno de Docker.
 
-Para subir archivos de más de 4 GB hay que trocearlos con [`chunker`](https://rclone.org/chunker/), y opcionalmente cifrarlos con [`crypt`](https://rclone.org/crypt/). Esta configuración está probada con varios TB de datos:
-
-```ini
-[movistar]
-type = webdav
-url = http://TU_IP:5050
-# owncloud envía X-OC-Mtime: se conserva la fecha de modificación original
-vendor = owncloud
-user = admin
-pass = TuContraseñaOfuscadaConRcloneObscure
-
-[movistar-chunk]
-type = chunker
-remote = movistar:datos
-chunk_size = 1Gi
-# Sin punto: el formato por defecto (*.rclone_chunk.###) cambia la extensión al
-# renombrar, SAPI no lo permite (MED-1050) y el proxy tiene que volver a subir el trozo
-name_format = *-chunk###
-# Cada trozo se sube directamente con su nombre definitivo: sin MOVE ni 423 Locked
-transactions = norename
-hash_type = none
-
-# Opcional: cifrado de contenido y nombres
-[movistar-crypt]
-type = crypt
-remote = movistar-chunk:
-```
-
-* **Sin comentarios al final de la línea:** rclone no los reconoce y el comentario pasa a formar parte del valor (`name_format = *-chunk###  # …` deja un formato inválido). Ponlos en una línea aparte, como arriba.
-* **Úsalo en un remoto nuevo:** `name_format` y `transactions` cambian cómo se llaman los trozos en la nube; no los cambies en un remoto con datos ya subidos.
-* **Nombres de hasta 255 caracteres:** Movistar Cloud recorta los más largos sin avisar y el proxy los rechaza con `400`. Con `crypt` (codificación `base32`) eso pasa con nombres originales de unos 140 caracteres o más; acórtalos o usa `filename_encoding = base64` en un remoto `crypt` nuevo.
+👉 **Consulta la referencia completa de variables avanzadas (`SAPI_USER_AGENT`, `DESKTOP_USER_AGENT`, `TRUSTED_PROXIES`, `WEBDAV_TMPDIR`, concurrencia), configuración de Nginx Reverse Proxy y detalles de seguridad en [docs/configuration.md](docs/configuration.md).**
 
 ---
 
-## 🧹 Filtro Inteligente de Basura del SO (v2.0.5)
+## ⚠️ Aspectos Clave a Tener en Cuenta
 
-Al conectar la unidad en red, los sistemas operativos intentan generar archivos de indexación y metadatos que ensucian la nube. A partir de la versión **v2.0.5**, el proxy integra un absorbedor en memoria (*DevNull Absorber*) que responde con éxito al SO pero evita que se suban a la nube:
-
-* **Windows:** `desktop.ini`, `autorun.inf`, `thumbs.db`, carpetas `$RECYCLE.BIN` y `System Volume Information`.
-* **macOS:** `.DS_Store`, AppleDouble `._*`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`.
-* **Linux:** Carpetas `.Trash-*` y `.directory` de KDE.
-
----
-
-## ⚠️ Limitaciones Conocidas de Movistar / O2 Cloud
-
-Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la infraestructura de Telefónica (SAPI) impone ciertas limitaciones técnicas que es importante tener en cuenta:
-
-1. **📦 Límite de tamaño máximo por archivo individual (4 GB):**
-   * La API SAPI de Movistar/O2 Cloud rechaza la subida de cualquier archivo individual que supere los **4 GB (4096 MB)**.
-   * **¿Cómo afecta a las copias de seguridad?**
-     * **Duplicati:** No se ve afectado. Trabaja por defecto dividiendo las copias en volúmenes pequeños de 50 MB (configurables hasta 1 o 2 GB).
-     * **Synology HyperBackup:** No se ve afectado. El formato de repositorio `.hbk` fragmenta los datos en bloques pequeños.
-     * **Mapeo directo / Rclone:** Si intentas arrastrar manualmente un archivo mayor de 4 GB (como una imagen ISO de gran tamaño o un disco virtual), la subida fallará. Para archivos gigantes con Rclone, utiliza el overlay [`rclone chunker`](https://rclone.org/chunker/) con la [configuración recomendada](#-configuración-recomendada-de-rclone-archivos-de-más-de-4-gb-y-cifrado).
-
-2. **🚦 Límite de conexiones concurrentes:**
-   * La API aplica restricciones de tasa (*rate-limiting*) si se satura con peticiones paralelas simultáneas.
-   * El proxy gestiona esto automáticamente mediante un **semáforo de concurrencia 1:1** (idéntico al motor serie del cliente oficial de escritorio) para operar siempre sin provocar bloqueos de CloudFront WAF ni errores `HTTP 429`.
-
-3. **🔤 Caracteres reservados en nombres de archivo:**
-   * Evita el uso de caracteres especiales no compatibles con URLs o APIs REST (`\\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en los nombres de archivos o directorios.
+1. **📦 Límite de 4 GB por archivo en Movistar / O2 Cloud:** La API de Telefónica rechaza archivos individuales mayores de **4 GB (4096 MB)**. **Duplicati** y **HyperBackup** dividen los datos automáticamente en bloques pequeños; para archivos grandes sueltos con **Rclone**, usa [`chunker`](docs/backup-clients.md#-configuración-avanzada-archivos-de-más-de-4-gb-chunker-y-cifrado-crypt).
+2. **🧹 Limpieza automática de archivos del SO:** El proxy absorbe sin subir a la nube ficheros temporales de sistema como `.DS_Store`, `._*`, `desktop.ini`, `thumbs.db`, `$RECYCLE.BIN` o `.Trash-*`.
+3. **🔒 Acceso remoto seguro:** No expongas los puertos `:5000` o `:5050` directamente a Internet sin cifrado. Si necesitas acceso externo, usa una VPN (WireGuard / Tailscale) o un proxy inverso con **HTTPS** configurado según [docs/configuration.md](docs/configuration.md#-5-topologías-de-red-docker-y-proxies-inversos).
 
 ---
 
 ## 📚 Documentación Detallada
 
-* [📖 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)
-* [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone](docs/backup-clients.md)
-* [🌐 Modo Web: sesión del navegador, renovación automática y rclone chunker](docs/web-mode.md)
+* [🔧 Configuración Avanzada, Seguridad, Proxies Inversos y Variables de Entorno](docs/configuration.md)
+* [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone (>4 GB y Cifrado)](docs/backup-clients.md)
+* [💻 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)
+* [🌐 Modo Web: Sesión del Navegador y Renovación Automática](docs/web-mode.md)
 
 ---
 

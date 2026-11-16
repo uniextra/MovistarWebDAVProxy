@@ -2,6 +2,18 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.5.6] - 2026-11-16
+
+### 🔔 Notificaciones Globales de Telegram y Diagnóstico de User-Agent (PR `#53`)
+- **Notificador global de Telegram (`internal/notifier/telegram.go`, `cmd/server/main.go`, `internal/webui/server.go`):**
+  - Instancia global `notifier.Default` inicializada automáticamente desde `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` al arrancar, sin esperar a abrir el panel web.
+  - Prioridad para las credenciales guardadas en `/app/tokens` al cargar la cuenta, con fallback automático a las variables de entorno de Docker si se limpia o desvincula la cuenta.
+  - Nuevas funciones `Send` y `Alert` / `SendAlert` con control antispam de 1 hora independiente por clave (`lastAlerts`) y notificaciones automáticas de arranque (`WebDAV Proxy iniciado`), cuenta sin vincular / sesión web no iniciada y fallos críticos (SAPI / Chromium).
+- **Logs de `User-Agent` al inicio (`internal/auth/oauth.go`, `cmd/server/main.go`):**
+  - Añadidas `GetSAPIUserAgentInfo` y `GetDesktopUserAgentInfo` para registrar en el arranque (en modo estándar) si `SAPI_USER_AGENT` y `DESKTOP_USER_AGENT` usan su valor por defecto o uno personalizado, facilitando el diagnóstico ante errores `401`/`403`.
+- **Documentación y Compose (`README.md`, `docs/configuration.md`, `docs/backup-clients.md`, `docs/network-drive.md`, `docker-compose.yml`, `docker-compose.web.yml`):**
+  - Reestructurado el `README.md` para facilitar la primera integración, actualizados los archivos YAML con `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` y `TOKENS_ENCRYPTION_KEY`, y separados los detalles técnicos avanzados en `docs/configuration.md` y `docs/backup-clients.md`.
+
 ## [v2.5.5] - 2026-11-16
 
 ### 🛡️ Bypass de CloudFront WAF (401 de 0 bytes) y Sesión SAPI (PR `#52`, `#49`)
