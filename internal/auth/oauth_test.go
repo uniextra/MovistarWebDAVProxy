@@ -98,15 +98,16 @@ func TestBuildOAuthHeaderMatchesOfficialClientFieldOrder(t *testing.T) {
 	}
 }
 
-func TestDesktopUserAgentMatchesCurrentWindowsClient(t *testing.T) {
+func TestDesktopUserAgentDefault(t *testing.T) {
 	const want = "omh windows client 32.1.3.0"
-	if DesktopUserAgent != want {
-		t.Fatalf("DesktopUserAgent = %q, want %q", DesktopUserAgent, want)
+	if got := GetDesktopUserAgent(); got != want {
+		t.Fatalf("GetDesktopUserAgent() = %q, want %q", got, want)
 	}
 }
 
-func TestSAPIUserAgentUsesEdgeBrowserProfile(t *testing.T) {
-	if got := GetSAPIUserAgent(); !strings.Contains(got, "Edg/157.0.0.0") {
-		t.Fatalf("GetSAPIUserAgent() = %q, want Edge profile", got)
+func TestSAPIUserAgentDefault(t *testing.T) {
+	const want = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+	if got := GetSAPIUserAgent(); got != want {
+		t.Fatalf("GetSAPIUserAgent() = %q, want %q", got, want)
 	}
 }

@@ -64,7 +64,9 @@ Logs */
 .DS_Store
 Thumbs.db
 
-# Temporary & Scratch
+# Go Binaries
+dev-server
+server
 scratch*/
 tmp/
 /tmp/

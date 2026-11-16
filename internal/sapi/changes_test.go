@@ -155,6 +155,7 @@ func TestGetProfileChanges_Errors(t *testing.T) {
 		client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
 		})
+		client.cfg.RefreshToken = ""
 		_, err := client.GetProfileChanges("0")
 		if err == nil || !strings.Contains(err.Error(), "401") {
 			t.Errorf("expected 401 error, got %v", err)

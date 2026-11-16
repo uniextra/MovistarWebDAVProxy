@@ -403,6 +403,11 @@ func (c *Client) syncCookiesLocked() {
 			Value:  c.cfg.ValidationKey,
 			Path:   "/",
 			Domain: cookieDomain,
+		}, &http.Cookie{
+			Name:   "validationKey",
+			Value:  c.cfg.ValidationKey,
+			Path:   "/",
+			Domain: cookieDomain,
 		})
 	}
 	if c.cfg.JSessionID != "" {
@@ -473,15 +478,19 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	vk := c.cfg.ValidationKey
 	c.mu.RUnlock()
 
-	if vk == "" || strings.Contains(rawURL, "validationkey=") {
+	if vk == "" {
 		return rawURL
 	}
 
-	sep := "?"
-	if strings.Contains(rawURL, "?") {
-		sep = "&"
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
 	}
-	return rawURL + sep + "validationkey=" + url.QueryEscape(vk)
+
+	q := parsed.Query()
+	q.Set("validationkey", vk)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
 }
 
 func (c *Client) processSAPIResponse(resp *http.Response) bool {
@@ -561,6 +570,7 @@ func (c *Client) RefreshSession() bool {
 	c.mu.RLock()
 	cfg := c.cfg
 	alreadyExpired := c.sessionExpired
+	lastRefresh := c.cfg.LastRefreshDate
 	c.mu.RUnlock()
 
 	if alreadyExpired {
@@ -571,21 +581,31 @@ func (c *Client) RefreshSession() bool {
 		return false
 	}
 
+	// Evitar rotar el refresh_token repetidamente si se renovó recientemente (cooldown de 30 segundos)
+	if lastRefresh > 0 && time.Since(time.UnixMilli(lastRefresh)) < 30*time.Second {
+		logger.Log("[OAuth] ℹ️ Tokens renovados recientemente (<30s). Omitiendo rotación redundante de refresh_token.")
+		return true
+	}
+
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
 	c.mu.Lock()
 	c.refreshTransient = false
 	c.mu.Unlock()
 
 	// 1. Intento primario: SAPILoginOAuth con access_token actual
-	sapiBase := auth.GetSAPIBaseURL(cfg.Provider)
+	c.mu.RLock()
+	sapiBase := c.baseURL
+	c.mu.RUnlock()
+	if sapiBase == "" {
+		sapiBase = auth.GetSAPIBaseURL(cfg.Provider)
+	}
+
 	if cfg.AccessToken != "" {
 		res := auth.SAPILoginOAuth(c.httpClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
 		// Un 200 con cookies NO garantiza que el access_token siga siendo válido:
 		// SAPI puede devolver cookies de sesión y un cuerpo de error. Exigimos además
-		// evidencia de una sesión OAuth real (credenciales rotadas o responsetime) para
-		// no dar por buena una renovación falsa y quedarnos en bucle de 401.
-		if res.StatusCode == http.StatusOK && (res.ValidationKey != "" || res.JSessionID != "") &&
-			(res.RefreshedOAuth != nil || res.LastRefreshDate > 0) {
+		// evidencia de una sesión OAuth real (credenciales rotadas o validationkey sin error).
+		if res.StatusCode == http.StatusOK && res.Error == nil && (res.ValidationKey != "" || res.RefreshedOAuth != nil) {
 			c.mu.Lock()
 			c.sessionExpired = false
 			if res.ValidationKey != "" {
@@ -652,23 +672,32 @@ func (c *Client) RefreshSession() bool {
 			// Persistir inmediatamente los nuevos tokens para proteger contra RTR (Refresh Token Rotation)
 			_ = config.SaveAccountConfig(cfgCopy)
 
-			// Con nuevo access_token, inicializar SAPI. Reintentamos el login
+			// Para O2 Cloud, la autenticación es puramente OAuth directa vía cabecera Authorization.
+			// No se realiza SAPILoginOAuth porque /sapi/login/oauth no existe en O2.
+			if strings.EqualFold(cfgCopy.Provider, "o2") {
+				logger.Log("[OAuth] ✔ Tokens renovados con éxito en apiseg.telefonica.es (o2). Sesión activa.")
+				return true
+			}
+
+			// Con nuevo access_token, inicializar SAPI para Movistar Cloud. Reintentamos el login
 			// (sin volver a rotar el refresh_token) por si el 401 es puntual.
+			loginClient, _, _ := auth.NewSAPILoginSession(cfgCopy.Provider)
+			if loginClient == nil {
+				loginClient = c.httpClient
+			}
+
 			var res auth.SAPILoginResult
 			for attempt := 0; attempt < 3; attempt++ {
-				res = auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
-				if res.StatusCode == http.StatusOK {
-					break
-				}
-				if res.StatusCode != http.StatusUnauthorized {
+				res = auth.SAPILoginOAuth(loginClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
+				if res.StatusCode == http.StatusOK && res.Error == nil {
 					break
 				}
 				if attempt < 2 {
-					logger.Log("[OAuth] ⏳ SAPI devolvió 401 tras refresco; reintentando login en %v...", time.Duration(attempt+1)*time.Second)
+					logger.Log("[OAuth] ⏳ SAPI devolvió %d tras refresco; reintentando login en %v...", res.StatusCode, time.Duration(attempt+1)*time.Second)
 					time.Sleep(time.Duration(attempt+1) * time.Second)
 				}
 			}
-			if res.StatusCode == http.StatusOK {
+			if res.StatusCode == http.StatusOK && res.Error == nil {
 				c.mu.Lock()
 				c.sessionExpired = false
 				if res.ValidationKey != "" {
@@ -696,22 +725,15 @@ func (c *Client) RefreshSession() bool {
 				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
 				return true
 			}
-			if res.StatusCode == http.StatusUnauthorized {
-				c.mu.Lock()
-				c.sessionExpired = true
-				c.refreshTransient = false
-				c.mu.Unlock()
-				logger.Log("[!] ⚠️ Tokens renovados pero SAPI rechaza la sesión (401). Revincula la cuenta desde el panel web para evitar rotaciones inútiles del refresh_token.")
-				if c.OnSessionExpired != nil {
-					go c.OnSessionExpired(errors.New("sesión SAPI rechazada tras refresco (HTTP 401)"))
-				}
-				return false
-			}
-			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
+			// Si SAPI devolvió error tras renovar tokens en apiseg, no marcamos la sesión
+			// como expirada permanentemente: el access_token recién emitido es válido y se
+			// permite que las peticiones continúen con él.
+			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco OAuth (%v). Continuando con nuevo access_token...", res.StatusCode, res.Error)
 			c.mu.Lock()
-			c.refreshTransient = true
+			c.sessionExpired = false
+			c.syncCookiesLocked()
 			c.mu.Unlock()
-			return false
+			return true
 		} else if refreshErr != nil {
 			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", refreshErr)
 		}
@@ -824,8 +846,25 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "*/*")
 	}
+	if req.Header.Get("Referer") == "" && req.URL != nil && req.URL.Host != "" {
+		req.Header.Set("Referer", req.URL.Scheme+"://"+req.URL.Host+"/")
+	}
+	if req.Header.Get("X-Requested-With") == "" {
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	}
+	if req.Header.Get("Accept-Language") == "" {
+		req.Header.Set("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
+	}
 	if cfg.DeviceID != "" {
-		req.Header.Set("X-deviceid", cfg.DeviceID)
+		devID := cfg.DeviceID
+		if strings.HasPrefix(devID, "fol-") {
+			clean := strings.TrimPrefix(devID, "fol-")
+			clean = strings.ReplaceAll(clean, "+", "")
+			clean = strings.ReplaceAll(clean, "/", "")
+			clean = strings.ReplaceAll(clean, "=", "")
+			devID = "web-" + clean
+		}
+		req.Header.Set("X-deviceid", devID)
 	}
 	if cfg.DeviceName != "" {
 		req.Header.Set("X-devicename", cfg.DeviceName)
@@ -839,6 +878,7 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 			parts = append(parts, "JSESSIONID="+cfg.JSessionID)
 		}
 		if cfg.ValidationKey != "" {
+			parts = append(parts, "validationKey="+cfg.ValidationKey)
 			parts = append(parts, "validationkey="+cfg.ValidationKey)
 		}
 		req.Header.Set("Cookie", strings.Join(parts, "; "))
