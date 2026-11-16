@@ -236,14 +236,14 @@ func Send(text string) error {
 
 // Alert envía una alerta genérica con control antispam de 1 hora por cada alertKey.
 // Si alertKey es "", se envía siempre sin esperar.
-func Alert(alertKey, title, description, provider, phone, details string) error {
+func Alert(alertKey, icon, title, description, provider, phone, details string) error {
 	if Default == nil || !Default.IsConfigured() {
 		return nil
 	}
-	return Default.SendAlert(alertKey, title, description, provider, phone, details)
+	return Default.SendAlert(alertKey, icon, title, description, provider, phone, details)
 }
 
-func (t *TelegramNotifier) SendAlert(alertKey, title, description, provider, phone, details string) error {
+func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, provider, phone, details string) error {
 	t.mu.Lock()
 	if t.lastAlerts == nil {
 		t.lastAlerts = make(map[string]time.Time)
@@ -258,8 +258,12 @@ func (t *TelegramNotifier) SendAlert(alertKey, title, description, provider, pho
 	t.mu.Unlock()
 
 	// Construir el mensaje dinámicamente
+	if strings.TrimSpace(icon) == "" {
+		icon = "⚠️"
+	}
+	
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("⚠️ *%s*\n\n", title))
+	sb.WriteString(fmt.Sprintf("%s *%s*\n\n", icon, title))
 	sb.WriteString(fmt.Sprintf("%s\n\n", description))
 
 	if provider != "" {
