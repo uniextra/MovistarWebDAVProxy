@@ -236,14 +236,14 @@ func Send(text string) error {
 
 // Alert envía una alerta genérica con control antispam de 1 hora por cada alertKey.
 // Si alertKey es "", se envía siempre sin esperar.
-func Alert(alertKey, icon, title, description, provider, phone, details string) error {
+func Alert(alertKey, icon, title, description, details string) error {
 	if Default == nil || !Default.IsConfigured() {
 		return nil
 	}
-	return Default.SendAlert(alertKey, icon, title, description, provider, phone, details)
+	return Default.SendAlert(alertKey, icon, title, description, details)
 }
 
-func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, provider, phone, details string) error {
+func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, details string) error {
 	t.mu.Lock()
 	if t.lastAlerts == nil {
 		t.lastAlerts = make(map[string]time.Time)
@@ -266,16 +266,6 @@ func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, provide
 	sb.WriteString(fmt.Sprintf("%s *%s*\n\n", icon, title))
 	sb.WriteString(fmt.Sprintf("%s\n\n", description))
 
-	if provider != "" {
-		providerName := "Movistar Cloud"
-		if strings.EqualFold(provider, "o2") {
-			providerName = "O2 Cloud"
-		}
-		sb.WriteString(fmt.Sprintf("Servicio: *%s*\n", providerName))
-	}
-	if phone != "" {
-		sb.WriteString(fmt.Sprintf("Línea: *%s*\n", logger.Mask(phone)))
-	}
 	if details != "" {
 		sb.WriteString(fmt.Sprintf("Detalle: %s\n", details))
 	}
