@@ -16,6 +16,7 @@ import (
 	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/notifier"
 	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/webclient"
 	"movistar-webdav-proxy/internal/webdav"
@@ -54,7 +55,13 @@ func main() {
 		logger.Log("[Security] 🔒 Autenticación habilitada para WebDAV (Basic Auth: %s) y Panel Web (Formulario Web: %s)", logger.Mask(davAuth.Username), logger.Mask(uiAuth.Username))
 	}
 
+	// cargar configuración
 	cfg := config.LoadAccountConfig("")
+	// Actualizamos con las credenciales guardadas. Estas prevalecen ante variables del entorno TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ??
+	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
+		notifier.Default.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
+	}
+
 	if config.WebSessionEnabled() {
 		// El modo de autenticación se anuncia al iniciar la sesión web.
 	} else if cfg.DeviceID != "" {
@@ -65,6 +72,14 @@ func main() {
 		logger.Log("[WebDAV] 🌐 Modo Autenticación: Sesión Web (Fallback)")
 	} else {
 		logger.Log("[!] ⚠️ No se encontraron credenciales. Abre el panel web para vincular.")
+		_ = notifier.Alert(
+			"",	// se mandará siempre, sino poner faltan_credenciales para recibir 1 a la hora
+			"", "Sin credenciales configuradas, cuenta no vinculada",
+			"El Proxy WebDAV ha arrancado pero no hay ninguna cuenta vinculada. Accede al panel web para vincular tu cuenta de Movistar/O2 Cloud y activar el acceso.",
+			"Arranque sin sesión activa, en espera de vinculación",
+		)
+		
+		// PDTE No debería iniciarse servicios para evitar bloqueos, aborar arranque os.Exit(1) ????  o bien luego aplicar SetRunning(false) para pararlo??
 	}
 
 	// mejoras logs, indicamos valores User-Agent, cuando no esté en modo web
@@ -83,9 +98,16 @@ func main() {
 	}
 
 
+	// log Huella TLS (uTLS)
 	client, err := sapi.NewClient(cfg)
 	if err != nil {
 		logger.Log("[FATAL] Error inicializando cliente SAPI: %v", err)
+		_ = notifier.Alert(
+			"",
+			"❌", "Fallo crítico en cliente SAPI",
+			"No se pudo inicializar el cliente de conexión con Movistar/O2 Cloud usando la configuración actual. El proxy se ha detenido. Revisa los archivos de configuración o logs y reinicia el contenedor.",
+			err.Error(),
+		)
 		os.Exit(1)
 	}
 
@@ -100,6 +122,12 @@ func main() {
 		})
 		if err != nil {
 			logger.Log("[FATAL] Error iniciando la sesión web (Chromium): %v", err)
+			_ = notifier.Alert(
+				"",
+				"❌", "Fallo crítico al iniciar el navegador (Modo Web)",
+				"No se pudo arrancar (NewSession) el navegador sin pantalla con el perfil indicado y el proxy se ha detenido.",
+				err.Error(),
+			)
 			os.Exit(1)
 		}
 		defer webSess.Close()
@@ -110,6 +138,12 @@ func main() {
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		if !webSess.CheckLogin(checkCtx) {
 			logger.Log("[!] ⚠️ Sesión web no iniciada. Abre el panel en /web-login/ para iniciar sesión en Movistar Cloud.")
+			_ = notifier.Alert(
+				"",
+				"", "Sesión web no iniciada (Modo Web)",
+				"Accede al panel web en /web-login/ para iniciar sesión en Movistar/O2 Cloud.",
+				"Arranque sin sesión activa, en espera de vinculación",
+			)
 		}
 		checkCancel()
 	}
@@ -193,7 +227,9 @@ func main() {
 		}
 	}()
 
+	
 	// 3. Servidor Web UI
+	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
 	if webSess != nil {
 		view := webSess.LoginView()
@@ -221,6 +257,13 @@ func main() {
 			logger.Log("[FATAL] Error en servidor Web UI: %v", err)
 		}
 	}()
+
+	_ = notifier.Alert(
+		"",
+		"🚀", "WebDAV Proxy iniciado",
+		"El servicio Movistar/O2 Cloud ha arrancado.",
+		fmt.Sprintf("WebDAV :%s | Panel Web :%s", webdavPort, webPort),
+	)
 
 	// Manejo de señales de terminación
 	sigChan := make(chan os.Signal, 1)
