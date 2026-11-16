@@ -179,6 +179,10 @@ func main() {
 
 	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
 	webdavServer := webdav.NewServerWithAuth(client, davAuth, metaStore)
+	if !client.HasCredentials() {
+		webdavServer.SetRunning(false)
+		logger.Log("[WebDAV] ⏸️ Proxy WebDAV pausado: esperando vinculación de cuenta en el panel web.")
+	}
 
 	syncInterval := config.GetSyncInterval()
 	logger.Log("[Metadata] ⏱️ Intervalo de sincronización periódica: %v (SYNC_INTERVAL_SEC)", syncInterval)
