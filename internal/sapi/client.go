@@ -503,6 +503,7 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 		strings.HasPrefix(strings.ToLower(resp.Request.URL.Hostname()), "upload.")
 
 	var changed bool
+	var tokensRotated bool
 	c.mu.Lock()
 
 	// 1. Cabecera Authorization devuelta con tokens rotados
@@ -511,10 +512,12 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 			if rotated.AccessToken != "" && rotated.AccessToken != c.cfg.AccessToken {
 				c.cfg.AccessToken = rotated.AccessToken
 				changed = true
+				tokensRotated = true
 			}
 			if rotated.RefreshToken != "" && rotated.RefreshToken != c.cfg.RefreshToken {
 				c.cfg.RefreshToken = rotated.RefreshToken
 				changed = true
+				tokensRotated = true
 			}
 			if rotated.LastRefreshDate > 0 && rotated.LastRefreshDate != c.cfg.LastRefreshDate {
 				c.cfg.LastRefreshDate = rotated.LastRefreshDate
@@ -527,34 +530,40 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 		}
 	}
 
-	// 2. Cookies de sesión (solo en respuestas < 400 para no capturar cookies
-	// anónimas de páginas HTML de error 401/403 como si fueran una sesión autenticada;
-	// además, no sobrescribir una JSESSIONID activa de SAPI desde el host de subidas upload.*)
-	if resp.StatusCode < 400 {
-		for _, cookie := range resp.Cookies() {
-			if strings.EqualFold(cookie.Name, "validationkey") && cookie.Value != "" && cookie.Value != c.cfg.ValidationKey {
-				c.cfg.ValidationKey = cookie.Value
-				changed = true
-			} else if strings.EqualFold(cookie.Name, "JSESSIONID") && cookie.Value != "" && cookie.Value != c.cfg.JSessionID && !(isUploadHost && c.cfg.JSessionID != "") {
-				c.cfg.JSessionID = cookie.Value
+	// Si la sesión fue marcada como expirada/revocada y esta respuesta no trae nuevos tokens OAuth,
+	// no capturar cookies ni avanzar LastRefreshDate desde descargas CDN o respuestas cacheadas.
+	if !c.sessionExpired || tokensRotated {
+		// 2. Cookies de sesión (solo en respuestas < 400 para no capturar cookies
+		// anónimas de páginas HTML de error 401/403 como si fueran una sesión autenticada;
+		// además, no sobrescribir una JSESSIONID activa de SAPI desde el host de subidas upload.*)
+		if resp.StatusCode < 400 {
+			for _, cookie := range resp.Cookies() {
+				if strings.EqualFold(cookie.Name, "validationkey") && cookie.Value != "" && cookie.Value != c.cfg.ValidationKey {
+					c.cfg.ValidationKey = cookie.Value
+					changed = true
+				} else if strings.EqualFold(cookie.Name, "JSESSIONID") && cookie.Value != "" && cookie.Value != c.cfg.JSessionID && !(isUploadHost && c.cfg.JSessionID != "") {
+					c.cfg.JSessionID = cookie.Value
+					changed = true
+				}
+			}
+		}
+
+		// 3. Ventana deslizante de LastRefreshDate: SAPI rechaza cabeceras oauth cuando
+		// (now - lastrefreshdate) supera expiresin (3600s). Durante copias largas (>= 1h),
+		// si las peticiones 2xx siguen siendo válidas y han pasado > 25 min, refrescamos el timestamp.
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && c.cfg.AccessToken != "" {
+			if c.cfg.LastRefreshDate > 1750000000000 && time.Since(time.UnixMilli(c.cfg.LastRefreshDate)) > 25*time.Minute {
+				c.cfg.LastRefreshDate = time.Now().UnixMilli()
 				changed = true
 			}
 		}
 	}
 
-	// 3. Ventana deslizante de LastRefreshDate: SAPI rechaza cabeceras oauth cuando
-	// (now - lastrefreshdate) supera expiresin (3600s). Durante copias largas (>= 1h),
-	// si las peticiones 2xx siguen siendo válidas y han pasado > 25 min, refrescamos el timestamp.
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && c.cfg.AccessToken != "" {
-		if c.cfg.LastRefreshDate > 1750000000000 && time.Since(time.UnixMilli(c.cfg.LastRefreshDate)) > 25*time.Minute {
-			c.cfg.LastRefreshDate = time.Now().UnixMilli()
-			changed = true
-		}
-	}
-
 	if changed {
 		c.syncCookiesLocked()
-		c.sessionExpired = false
+		if tokensRotated {
+			c.sessionExpired = false
+		}
 	}
 	cfgCopy := c.cfg
 	c.mu.Unlock()

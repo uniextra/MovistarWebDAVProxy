@@ -489,3 +489,110 @@ func TestEphemeralEmptyFiles_FilteredAndPurged(t *testing.T) {
 		t.Fatalf("expected 3 persistent @writer files after purge, got %d: %+v", len(remaining), remaining)
 	}
 }
+
+func TestVirtualEmptyFiles_BootstrapAfterDelayedSync(t *testing.T) {
+	manifestJSON := `{"version":1,"files":[{"path":"/Backups/Control/@writer/v1.cformat","mod_time":"20261116T200000Z"}]}`
+
+	var mockSAPI *httptest.Server
+	mockSAPI = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/media/folder/root"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"folders":[{"id":100,"name":"/","magic":true}]}}`))
+		case strings.Contains(r.URL.Path, "/download/manifest"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(manifestJSON))
+		case strings.Contains(r.URL.Path, "/media"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"media":[{"id":"manifest-1","name":"empty-files.json","url":"` + mockSAPI.URL + `/download/manifest"}]}}`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	}))
+	defer mockSAPI.Close()
+
+	client, err := sapi.NewClient(config.AccountConfig{
+		Provider:      "movistar",
+		AccessToken:   "test-access",
+		RefreshToken:  "test-refresh",
+		ValidationKey: "test-vk",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(mockSAPI.URL+"/sapi", mockSAPI.URL)
+
+	tmpDir := t.TempDir()
+	ms, err := cache.NewMetadataStore(filepath.Join(tmpDir, "delayed_sync.db"))
+	if err != nil {
+		t.Fatalf("NewMetadataStore failed: %v", err)
+	}
+	defer ms.Close()
+
+	srv := NewServerWithAuth(client, config.AuthConfig{AuthDisabled: true})
+	// Simula revinculación: SetMetadataStore se llama cuando SQLite aún está vacía.
+	srv.SetMetadataStore(ms)
+	srv.FS().BootstrapEmptyFiles()
+
+	// Simula finalización tardía de SyncChanges (>2s): inserta raíz, .movistar-webdav-proxy y el manifiesto.
+	_ = ms.SetInitialSync("cursor-1")
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 100, Name: "/", Magic: true})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 150, Name: ProxyInternalDir, ParentID: 100})
+	_ = ms.UpsertMedia(sapi.MediaItem{ID: "manifest-1", Name: ManifestFileName, FolderID: 150, Size: int64(len(manifestJSON)), URL: mockSAPI.URL + "/download/manifest"})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 200, Name: "Backups", ParentID: 100})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 300, Name: "Control", ParentID: 200})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 302, Name: "@writer", ParentID: 300})
+
+	// Al completar SyncChanges se invoca BootstrapEmptyFiles()
+	srv.FS().BootstrapEmptyFiles()
+
+	vf, err := ms.GetVirtualEmptyFile(302, "v1.cformat")
+	if err != nil || vf == nil {
+		t.Fatalf("expected v1.cformat loaded after delayed sync, got vf=%v err=%v", vf, err)
+	}
+}
+
+func TestAutoHealHyperBackupWriter_WithoutSeqMapping(t *testing.T) {
+	client, err := sapi.NewClient(config.AccountConfig{
+		Provider:      "movistar",
+		AccessToken:   "test-access",
+		RefreshToken:  "test-refresh",
+		ValidationKey: "test-vk",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	ms, err := cache.NewMetadataStore(filepath.Join(tmpDir, "autoheal.db"))
+	if err != nil {
+		t.Fatalf("NewMetadataStore failed: %v", err)
+	}
+	defer ms.Close()
+
+	_ = ms.SetInitialSync("cursor-1")
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 100, Name: "/", Magic: true})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 200, Name: "task.hbk", ParentID: 100})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 300, Name: "Control", ParentID: 200})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 302, Name: "@writer", ParentID: 300})
+
+	srv := NewServerWithAuth(client, config.AuthConfig{AuthDisabled: true})
+	srv.SetMetadataStore(ms)
+
+	healed := srv.FS().autoHealHyperBackupWriter("/task.hbk/Control/@writer", 302, nil, nil)
+	if len(healed) != 2 {
+		t.Fatalf("expected 2 healed virtual files without seq_mapping, got %d (%+v)", len(healed), healed)
+	}
+
+	names := map[string]bool{}
+	for _, vf := range healed {
+		names[vf.Name] = true
+	}
+	if !names["v1.cformat"] {
+		t.Fatalf("expected v1.cformat in healed files, got %+v", healed)
+	}
+	if !names["v1.1.-1.0.0.none.none.cinfo"] {
+		t.Fatalf("expected v1.1.-1.0.0.none.none.cinfo in healed files, got %+v", healed)
+	}
+}

@@ -497,6 +497,14 @@ func (mfs *MovistarFS) SetMetadataStore(ms *cache.MetadataStore) {
 	}
 }
 
+// BootstrapEmptyFiles carga desde la nube el manifiesto de archivos vacíos emulados hacia SQLite.
+func (mfs *MovistarFS) BootstrapEmptyFiles() {
+	if mfs == nil || mfs.emptyFileManager == nil {
+		return
+	}
+	mfs.emptyFileManager.BootstrapLoad()
+}
+
 // HasTombstones reports whether there are any active deleted tombstones in memory.
 func (mfs *MovistarFS) HasTombstones() bool {
 	if mfs == nil {
@@ -2987,7 +2995,7 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 	}
 	mfs.cacheMu.RUnlock()
 
-	if seqMappingItem == nil || (hasCformat && hasCinfo) {
+	if hasCformat && hasCinfo {
 		return vFiles
 	}
 
@@ -3010,7 +3018,10 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 		}
 	}
 
-	modTimeStr := string(seqMappingItem.ModificationDate)
+	modTimeStr := ""
+	if seqMappingItem != nil {
+		modTimeStr = string(seqMappingItem.ModificationDate)
+	}
 	if modTimeStr == "" {
 		modTimeStr = time.Now().UTC().Format("20060102T150405Z")
 	}
@@ -3028,7 +3039,12 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 		}
 	}
 	if !hasCinfo {
-		maxSeq := mfs.extractSeqIDFromSeqMapping(*seqMappingItem)
+		maxSeq := int64(1)
+		source := "por defecto al no existir seq_mapping"
+		if seqMappingItem != nil {
+			maxSeq = mfs.extractSeqIDFromSeqMapping(*seqMappingItem)
+			source = "recuperado de seq_mapping"
+		}
 		cinfoName := fmt.Sprintf("v1.%d.-1.0.0.none.none.cinfo", maxSeq)
 		if err := ms.UpsertVirtualEmptyFile(folderID, cinfoName, modTimeStr); err == nil {
 			vFiles = append(vFiles, cache.VirtualEmptyFileRecord{
@@ -3037,7 +3053,7 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 				ModTime:  modTimeStr,
 			})
 			healed = true
-			logger.Log("[WebDAV] 🔧 Auto-reparado fichero de estado Hyper Backup en '%s': '%s' (seq_id=%d recuperado de seq_mapping)", clean, cinfoName, maxSeq)
+			logger.Log("[WebDAV] 🔧 Auto-reparado fichero de estado Hyper Backup en '%s': '%s' (seq_id=%d %s)", clean, cinfoName, maxSeq, source)
 		}
 	}
 
