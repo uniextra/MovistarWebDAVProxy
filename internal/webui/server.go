@@ -1075,6 +1075,10 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 					logger.Log("[Metadata] ⚠️ Error en sincronización inicial: %v", syncErr)
 				} else {
 					logger.Log("[Metadata] ✔ Sincronización inicial completada para %s", logger.Mask(phone))
+					if fs := s.webdavServer.FS(); fs != nil {
+						fs.RecordSyncTime(time.Now())
+						fs.BootstrapEmptyFiles()
+					}
 				}
 			}()
 		}

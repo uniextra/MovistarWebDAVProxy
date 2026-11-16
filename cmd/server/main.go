@@ -23,7 +23,7 @@ import (
 	"movistar-webdav-proxy/internal/webui"
 )
 
-const AppVersion = config.Version
+var AppVersion = config.Version
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-healthcheck" || os.Args[1] == "--healthcheck") {
@@ -200,6 +200,7 @@ func main() {
 				logger.Log("[Metadata] ✔ Sincronización inicial de metadatos completada.")
 				if fs := webdavServer.FS(); fs != nil {
 					fs.RecordSyncTime(time.Now())
+					fs.BootstrapEmptyFiles()
 				}
 			}
 		}()

@@ -37,11 +37,12 @@ func isInternalProxyPath(cleanPath string) bool {
 
 // EmptyFileManager manages debounced cloud persistence and bootstrap of virtual 0-byte files.
 type EmptyFileManager struct {
-	mfs     *MovistarFS
-	mu      sync.Mutex
-	timer   *time.Timer
-	saving  bool
-	pending bool
+	mfs         *MovistarFS
+	mu          sync.Mutex
+	bootstrapMu sync.Mutex
+	timer       *time.Timer
+	saving      bool
+	pending     bool
 }
 
 func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
@@ -181,11 +182,17 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 	if efm == nil || efm.mfs == nil {
 		return
 	}
+	efm.bootstrapMu.Lock()
+	defer efm.bootstrapMu.Unlock()
+
 	ms := efm.mfs.MetadataStore()
 	if ms == nil || efm.mfs.client == nil {
 		return
 	}
 	efm.purgeLocalEphemeralFiles()
+	if efm.mfs.client.IsSessionExpired() {
+		return
+	}
 
 	root, err := ms.GetRootFolder()
 	if err != nil || root == nil {

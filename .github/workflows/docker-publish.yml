@@ -14,6 +14,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve app version
+        id: app_version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 'dev')"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
@@ -29,6 +41,8 @@ jobs:
           load: true
           tags: movistar-webdav-proxy:scan
           platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ steps.app_version.outputs.version }}
 
       - name: Run Trivy vulnerability scanner
         run: |
@@ -66,3 +80,5 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            APP_VERSION=${{ steps.app_version.outputs.version }}
