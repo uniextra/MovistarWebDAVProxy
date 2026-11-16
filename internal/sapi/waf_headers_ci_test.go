@@ -1,7 +1,9 @@
 package sapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -353,5 +355,202 @@ func TestCI_SAPILoginOAuth_RetainsPrimedJSessionIDOn200HTMLWithoutSetCookie(t *t
 	}
 	if loginCalls.Load() != 1 {
 		t.Errorf("loginCalls = %d, want 1", loginCalls.Load())
+	}
+}
+
+func TestCI_UploadFileToFolder_RetriesOn401AndSucceeds(t *testing.T) {
+	oldTokensDir := config.TokensDir
+	config.TokensDir = t.TempDir()
+	t.Cleanup(func() { config.TokensDir = oldTokensDir })
+
+	var refreshCalls atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "fresh-access-upload",
+			"refresh_token": "fresh-refresh-upload",
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	const payload = "hello-hyperbackup-index-payload"
+	var uploadCalls atomic.Int32
+	var retriedPayloadOK atomic.Bool
+	var retriedTokenOK atomic.Bool
+
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/login/oauth"):
+			rotated := auth.ParseOAuthResponseHeader(r.Header.Get("Authorization"))
+			if rotated == nil || rotated.AccessToken != "fresh-access-upload" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"validationkey": "fresh-vk-upload",
+					"responsetime":  time.Now().UnixMilli(),
+				},
+			})
+		case strings.Contains(r.URL.Path, "/upload"):
+			call := uploadCalls.Add(1)
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if call == 1 {
+				w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`<!--?xml version="1.0" encoding="UTF-8"?--><!DOCTYPE html><html><head><title>Movistar Cloud</title></head><body>` + strings.Repeat("x", 95000) + `</body></html>`))
+				return
+			}
+			if rotated := auth.ParseOAuthResponseHeader(r.Header.Get("Authorization")); rotated != nil && rotated.AccessToken == "fresh-access-upload" {
+				retriedTokenOK.Store(true)
+			}
+			if strings.Contains(string(bodyBytes), payload) {
+				retriedPayloadOK.Store(true)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"id":   int64(7289446999),
+					"name": "387.index.2",
+					"size": int64(len(payload)),
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer sapiServer.Close()
+
+	client, err := NewClient(config.AccountConfig{
+		Provider:        "movistar",
+		Phone:           "612345678",
+		AccessToken:     "expired-access-upload",
+		RefreshToken:    "valid-refresh-upload",
+		DeviceID:        "web-upload-test",
+		DeviceName:      "PC Windows",
+		LastRefreshDate: time.Now().Add(-2 * time.Minute).UnixMilli(),
+		ExpiresIn:       "3600",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(sapiServer.URL+"/sapi", sapiServer.URL+"/upload")
+
+	item, err := client.UploadFileToFolder("387.index.2", bytes.NewReader([]byte(payload)), int64(len(payload)), 100, "application/octet-stream", "", time.Time{})
+	if err != nil {
+		t.Fatalf("UploadFileToFolder failed after 401 retry: %v", err)
+	}
+	if item == nil || item.ID != "7289446999" {
+		t.Fatalf("unexpected uploaded item: %+v", item)
+	}
+	if uploadCalls.Load() != 2 {
+		t.Errorf("uploadCalls = %d, want 2", uploadCalls.Load())
+	}
+	if refreshCalls.Load() != 1 {
+		t.Errorf("refreshCalls = %d, want 1", refreshCalls.Load())
+	}
+	if !retriedTokenOK.Load() {
+		t.Errorf("retry did not use refreshed access token")
+	}
+	if !retriedPayloadOK.Load() {
+		t.Errorf("retry did not rewind multipart file payload")
+	}
+}
+
+func TestCI_RefreshSession_StaleLastRefreshDateRenewsInStep1(t *testing.T) {
+	oldTokensDir := config.TokensDir
+	config.TokensDir = t.TempDir()
+	t.Cleanup(func() { config.TokensDir = oldTokensDir })
+
+	var refreshCalls atomic.Int32
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls.Add(1)
+		http.Error(w, "should not call apiseg when Step 1 succeeds", http.StatusUnauthorized)
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	var sawFreshLRD atomic.Bool
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/login/oauth") {
+			if parsed := auth.ParseOAuthResponseHeader(r.Header.Get("Authorization")); parsed != nil {
+				if time.Since(time.UnixMilli(parsed.LastRefreshDate)) < time.Minute {
+					sawFreshLRD.Store(true)
+				}
+			}
+			http.SetCookie(w, &http.Cookie{
+				Name:  "JSESSIONID",
+				Value: "renewed-jsess-after-1h",
+				Path:  "/",
+			})
+			w.Header().Set("Content-Type", "text/html;charset=UTF-8")
+			_, _ = w.Write([]byte(`<html><title>Movistar Cloud</title></html>`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer sapiServer.Close()
+
+	staleLRD := time.Now().Add(-65 * time.Minute).UnixMilli()
+	client, err := NewClient(config.AccountConfig{
+		Provider:        "movistar",
+		Phone:           "612345678",
+		AccessToken:     "still-valid-access",
+		RefreshToken:    "valid-refresh",
+		JSessionID:      "old-jsess",
+		ValidationKey:   "old-vk",
+		DeviceID:        "web-stale-lrd",
+		DeviceName:      "PC Windows",
+		LastRefreshDate: staleLRD,
+		ExpiresIn:       "3600",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(sapiServer.URL+"/sapi", sapiServer.URL+"/upload")
+
+	if ok := client.RefreshSession(); !ok {
+		t.Fatalf("RefreshSession() = false, want true")
+	}
+	if refreshCalls.Load() != 0 {
+		t.Errorf("RefreshOAuthToken calls = %d, want 0 (Step 1 should renew without burning refresh_token)", refreshCalls.Load())
+	}
+	if !sawFreshLRD.Load() {
+		t.Errorf("Step 1 sent stale LastRefreshDate instead of fresh timestamp")
+	}
+	cfg := client.GetConfig()
+	if cfg.JSessionID != "renewed-jsess-after-1h" {
+		t.Errorf("JSessionID = %q, want renewed-jsess-after-1h", cfg.JSessionID)
+	}
+	if time.Since(time.UnixMilli(cfg.LastRefreshDate)) > time.Minute {
+		t.Errorf("LastRefreshDate was not updated: %d", cfg.LastRefreshDate)
+	}
+}
+
+func TestCI_SummarizeHTTPErrorBody_TruncatesHTML(t *testing.T) {
+	htmlBody := []byte(`<!--?xml version="1.0" encoding="UTF-8"?--><!DOCTYPE html><html><head><title>Movistar Cloud</title></head><body>` + strings.Repeat("<div>SPA</div>", 5000) + `</body></html>`)
+	got := summarizeHTTPErrorBody(htmlBody)
+	if !strings.Contains(got, "HTML error page") || !strings.Contains(got, `title="Movistar Cloud"`) {
+		t.Fatalf("unexpected HTML summary: %q", got)
+	}
+	if len(got) >= 200 {
+		t.Fatalf("HTML summary too long (%d bytes): %q", len(got), got)
+	}
+
+	longText := []byte(strings.Repeat("a", 500))
+	gotLong := summarizeHTTPErrorBody(longText)
+	if len(gotLong) > 250 || !strings.HasSuffix(gotLong, "…") {
+		t.Fatalf("unexpected long text truncation: len=%d val=%q", len(gotLong), gotLong)
+	}
+
+	shortJSON := []byte(`{"error":{"code":"MED-1017"}}`)
+	if gotShort := summarizeHTTPErrorBody(shortJSON); gotShort != string(shortJSON) {
+		t.Fatalf("short JSON modified: %q", gotShort)
 	}
 }

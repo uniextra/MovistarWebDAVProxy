@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -109,5 +111,48 @@ func TestSAPIUserAgentDefault(t *testing.T) {
 	const want = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 	if got := GetSAPIUserAgent(); got != want {
 		t.Fatalf("GetSAPIUserAgent() = %q, want %q", got, want)
+	}
+}
+
+func TestRefreshOAuthToken_BasicAuthFirstAndErrorSummary(t *testing.T) {
+	var calls int
+	var firstHadBodyClientID, secondHadBodyClientID bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = r.ParseForm()
+		hasCreds := r.Form.Get("client_id") != "" && r.Form.Get("client_secret") != ""
+		if calls == 1 {
+			firstHadBodyClientID = hasCreds
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_request","error_description":"Invalid Token"}`))
+			return
+		}
+		secondHadBodyClientID = hasCreds
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_request","error_description":"Invalid Token"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("OAUTH_TOKEN_URL", srv.URL)
+
+	_, err := RefreshOAuthToken("secret-refresh-token", "movistar")
+	if err == nil {
+		t.Fatal("expected error on 401")
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (Basic-only first, then fallback with body creds)", calls)
+	}
+	if firstHadBodyClientID {
+		t.Errorf("first attempt sent client_id/client_secret in body alongside Basic auth")
+	}
+	if !secondHadBodyClientID {
+		t.Errorf("fallback attempt did not send client_id/client_secret in body")
+	}
+	if !strings.Contains(err.Error(), "Invalid Token") {
+		t.Errorf("error missing server description: %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-refresh-token") {
+		t.Errorf("error leaked refresh token: %v", err)
 	}
 }

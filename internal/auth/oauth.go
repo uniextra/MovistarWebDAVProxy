@@ -444,20 +444,18 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	return &tokens, nil
 }
 
-func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
-	tokenURL := GetOAuthTokenURL(provider)
-	clientID := GetOAuthClientID(provider)
-	clientSecret := GetOAuthClientSecret(provider)
-
+func doRefreshOAuthTokenRequest(tokenURL, clientID, clientSecret, refreshToken string, includeBodyCreds bool) (*OAuthTokens, int, []byte, error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
+	if includeBodyCreds {
+		data.Set("client_id", clientID)
+		data.Set("client_secret", clientSecret)
+	}
 
 	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
 
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
@@ -467,24 +465,58 @@ func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OAuth token refresh failed (HTTP %d)", resp.StatusCode)
+		return nil, resp.StatusCode, bodyBytes, nil
 	}
 
 	var tokens OAuthTokens
 	if err := json.Unmarshal(bodyBytes, &tokens); err != nil {
+		return nil, resp.StatusCode, bodyBytes, err
+	}
+	return &tokens, resp.StatusCode, bodyBytes, nil
+}
+
+func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
+	tokenURL := GetOAuthTokenURL(provider)
+	clientID := GetOAuthClientID(provider)
+	clientSecret := GetOAuthClientSecret(provider)
+
+	// Conforme a RFC 6749 §2.3.1, enviamos primero solo Authorization: Basic.
+	tokens, statusCode, bodyBytes, err := doRefreshOAuthTokenRequest(tokenURL, clientID, clientSecret, refreshToken, false)
+	if err != nil {
 		return nil, err
 	}
-	return &tokens, nil
+	if statusCode == http.StatusOK && tokens != nil {
+		return tokens, nil
+	}
+
+	// Fallback de compatibilidad incluyendo client_id y client_secret en el cuerpo
+	if statusCode >= 400 && statusCode != http.StatusTooManyRequests {
+		tokens2, statusCode2, bodyBytes2, err2 := doRefreshOAuthTokenRequest(tokenURL, clientID, clientSecret, refreshToken, true)
+		if err2 != nil {
+			return nil, err2
+		}
+		if statusCode2 == http.StatusOK && tokens2 != nil {
+			return tokens2, nil
+		}
+		statusCode = statusCode2
+		bodyBytes = bodyBytes2
+	}
+
+	summary := summarizeSAPILoginBody(bodyBytes, refreshToken, clientSecret)
+	if summary != "" {
+		return nil, fmt.Errorf("OAuth token refresh failed (HTTP %d): %s", statusCode, summary)
+	}
+	return nil, fmt.Errorf("OAuth token refresh failed (HTTP %d)", statusCode)
 }
 
 func BuildOAuthHeader(accessToken, refreshToken string, lastRefreshDate int64, expiresIn string) string {
@@ -737,6 +769,9 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 				}
 				result.LastRefreshDate = lrd
 			}
+		}
+		if result.LastRefreshDate == 0 && result.ResponseTime > 0 {
+			result.LastRefreshDate = result.ResponseTime
 		}
 	}
 

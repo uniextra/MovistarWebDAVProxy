@@ -2,6 +2,25 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.6.8] - 2026-11-16
+
+### 🛠️ Resiliencia en Subidas Largas de Hyper Backup (`HTTP 401` tras 1h)
+- **Reintento automático ante `HTTP 401` en `UploadFileToFolder` (`internal/sapi/client.go`):**
+  - Cuando una subida en streaming recibe `401`, rebobina el `io.ReadSeeker` y reintenta con la sesión renovada (escalando al Paso 2 `refreshSessionWithMode(true)` si el Paso 1 no fue suficiente), evitando abortar copias largas de Synology Hyper Backup.
+  - En `doRequestLocked`, evita lanzar una renovación redundante cuando `processSAPIResponse` ya rotó credenciales por cabecera.
+- **Ventana deslizante de `LastRefreshDate` y Paso 1 en `RefreshSession` (`internal/sapi/client.go`, `internal/auth/oauth.go`):**
+  - `processSAPIResponse` actualiza `LastRefreshDate` durante peticiones `2xx` activas cada > 25 min para no exceder la ventana de 3600 s (`expiresin`) en SAPI, e impide que cookies del host `upload.*` sobrescriban una `JSESSIONID` activa de SAPI.
+  - `RefreshSession` usa un `LastRefreshDate` fresco en el Paso 1 cuando el anterior supera 45 min, acepta la sesión renovada, rellena `LastRefreshDate` desde `ResponseTime` y registra en los logs por qué el Paso 1 escala al Paso 2.
+- **`RefreshOAuthToken` conforme a RFC 6749 §2.3.1 (`internal/auth/oauth.go`):**
+  - Envía primero `Authorization: Basic` sin duplicar credenciales en el cuerpo (con fallback automático incluyéndolas si falla) e incluye el resumen sanitizado del error real devuelto por `apiseg.telefonica.es`.
+- **Logs limpios ante respuestas HTML (`internal/sapi/client.go`, `internal/sapi/changes.go`):**
+  - Nuevo helper `summarizeHTTPErrorBody` en `UploadFileToFolder`, `GetMediaByIDs` y `GetFoldersByIDs` para resumir páginas HTML SPA de 95 KB (p. ej. `HTML error page (title="Movistar Cloud", ... bytes)`) en lugar de volcar el HTML completo al log.
+
+## [v2.6.7] - 2026-11-16
+
+### 🎨 Modo oscuro en pantalla de login (PR `#51`)
+- Añadido script de gestión automática/manual de tema oscuro en `internal/webui/templates/login.html`.
+
 ## [v2.5.6] - 2026-11-16
 
 ### 🔔 Notificaciones Globales de Telegram y Diagnóstico de User-Agent (PR `#53`)

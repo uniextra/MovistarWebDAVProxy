@@ -245,7 +245,7 @@ func (c *Client) GetFoldersByIDs(ids []int64) ([]FolderItem, error) {
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
-			return nil, fmt.Errorf("get folders by IDs failed (batch %d-%d, HTTP %d): %s", i, end, resp.StatusCode, string(b))
+			return nil, fmt.Errorf("get folders by IDs failed (batch %d-%d, HTTP %d): %s", i, end, resp.StatusCode, summarizeHTTPErrorBody(b))
 		}
 
 		var res struct {
@@ -316,7 +316,7 @@ func (c *Client) GetMediaByIDs(ids []int64) ([]MediaItem, error) {
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
-			return nil, fmt.Errorf("get media by IDs failed (batch %d-%d, HTTP %d): %s", i, end, resp.StatusCode, string(b))
+			return nil, fmt.Errorf("get media by IDs failed (batch %d-%d, HTTP %d): %s", i, end, resp.StatusCode, summarizeHTTPErrorBody(b))
 		}
 
 		var res struct {
