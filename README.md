@@ -161,8 +161,10 @@ docker run -d \
 | `BRUTE_FORCE_EXCLUDED_IPS` | `127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16` | IPs/subredes exentas de bloqueo HTTP 429 (mantiene Basic Auth activo). |
 | `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. Si montas un volumen en disco (ej. `/app/tmp`), debes definir `WEBDAV_TMPDIR=/app/tmp` para que se utilice. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
-| `WEBDAV_MAX_DOWNLOADS` | `1` (`4` en modo web) | Descargas simultáneas a la nube. |
-| `WEBDAV_MAX_UPLOADS` | `1` (`2` en modo web) | Subidas simultáneas a la nube. |
+| `WEBDAV_MAX_DOWNLOADS` | `4` | Descargas simultáneas a la nube. |
+| `WEBDAV_MAX_UPLOADS` | `2` | Subidas simultáneas a la nube. |
+| `DESKTOP_USER_AGENT` | `omh windows client 32.1.3.0` | `User-Agent` enviado al servidor OAuth (`apiseg.telefonica.es`). Si tras vincular por SMS recibes `401` o `403`, prueba a fijar `DESKTOP_USER_AGENT=DESKTOP` junto con `SAPI_USER_AGENT=DESKTOP`. |
+| `SAPI_USER_AGENT` | `Mozilla/5.0 ... Edg/157.0.0.0` | `User-Agent` enviado a SAPI (`micloud.movistar.es/sapi`). Si recibes `401` o `403`, prueba `SAPI_USER_AGENT=DESKTOP` junto con `DESKTOP_USER_AGENT=DESKTOP`. |
 | `WEB_SESSION` | `false` | Activa el [Modo Web](docs/web-mode.md) (requiere la imagen `Dockerfile.web`). Sus variables (`WEB_SESSION_RENEW_BEFORE`, `WEB_TRASH_EMPTY_EVERY`, `CHROME_PATH`…) están en esa página. |
 
 > **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.
