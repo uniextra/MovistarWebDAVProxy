@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -22,17 +23,52 @@ type TelegramNotifier struct {
 	mu       sync.Mutex
 
 	lastNotificationAt   time.Time
-	lastSessionExpiredAt time.Time
+	//lastSessionExpiredAt time.Time
+	lastAlerts         map[string]time.Time // <--- CAMBIADO (antes lastSessionExpiredAt)
 	lastError            string
 }
 
-func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
-	return &TelegramNotifier{
-		botToken: strings.TrimSpace(botToken),
-		chatID:   strings.TrimSpace(chatID),
-		client:   &http.Client{Timeout: 10 * time.Second},
+// Default es la instancia global compartida por toda la aplicación.
+var Default *TelegramNotifier
+
+func init() {
+	Default = &TelegramNotifier{
+		botToken:   strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		chatID:     strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")),
+		client:     &http.Client{Timeout: 10 * time.Second},
+		lastAlerts: make(map[string]time.Time),
 	}
 }
+
+func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
+	token := strings.TrimSpace(botToken)
+	chat := strings.TrimSpace(chatID)
+
+	// cuando no tiene valor, buscamos en las variables del entorno
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	}
+	if chat == "" {
+		chat = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
+	}
+
+	// actualizamos si precisa
+	if Default != nil {
+		if token != "" && chat != "" {
+			Default.UpdateCredentials(token, chat)
+		}
+		return Default
+	}
+
+	Default = &TelegramNotifier{
+		botToken:   token,
+		chatID:     chat,
+		client:     &http.Client{Timeout: 10 * time.Second},
+		lastAlerts: make(map[string]time.Time),
+	}
+	return Default
+}
+
 
 func (t *TelegramNotifier) IsConfigured() bool {
 	t.mu.Lock()
@@ -41,10 +77,22 @@ func (t *TelegramNotifier) IsConfigured() bool {
 }
 
 func (t *TelegramNotifier) UpdateCredentials(botToken, chatID string) {
+	token := strings.TrimSpace(botToken)
+	chat := strings.TrimSpace(chatID)
+
+	// Permite que las notificaciones y alertas sigan funcionando con la cuenta desvinculada
+	// Si se limpian las credenciales en la web, volver a las variables de entorno del Docker si existen
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	}
+	if chat == "" {
+		chat = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
+	}
+	
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.botToken = strings.TrimSpace(botToken)
-	t.chatID = strings.TrimSpace(chatID)
+	t.botToken = token
+	t.chatID = chat
 }
 
 func (t *TelegramNotifier) Status() (bool, string, string) {
@@ -135,11 +183,15 @@ func (t *TelegramNotifier) SendMessage(text string) error {
 
 func (t *TelegramNotifier) SendSessionExpiredAlert(provider, phone, details string) error {
 	t.mu.Lock()
-	if !t.lastSessionExpiredAt.IsZero() && time.Since(t.lastSessionExpiredAt) < time.Hour {
+	if t.lastAlerts == nil {
+		t.lastAlerts = make(map[string]time.Time)
+	}
+	key := "session_expired_" + phone
+	if lastTime, exists := t.lastAlerts[key]; exists && time.Since(lastTime) < time.Hour {
 		t.mu.Unlock()
 		return nil
 	}
-	t.lastSessionExpiredAt = time.Now()
+	t.lastAlerts[key] = time.Now()
 	t.mu.Unlock()
 
 	providerName := "Movistar Cloud"
@@ -171,3 +223,62 @@ func (t *TelegramNotifier) SendTestAlert(provider string) error {
 	)
 	return t.SendMessage(msg)
 }
+
+
+// Para que se use de forma global
+// Send envía un mensaje directo usando el notificador global.
+func Send(text string) error {
+	if Default == nil || !Default.IsConfigured() {
+		return nil
+	}
+	return Default.SendMessage(text)
+}
+
+// Alert envía una alerta genérica con control antispam de 1 hora por cada alertKey.
+// Si alertKey es "", se envía siempre sin esperar.
+func Alert(alertKey, icon, title, description, details string) error {
+	if Default == nil || !Default.IsConfigured() {
+		return nil
+	}
+	return Default.SendAlert(alertKey, icon, title, description, details)
+}
+
+func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, details string) error {
+	t.mu.Lock()
+	if t.lastAlerts == nil {
+		t.lastAlerts = make(map[string]time.Time)
+	}
+	if alertKey != "" {
+		if lastTime, exists := t.lastAlerts[alertKey]; exists && time.Since(lastTime) < time.Hour {
+			t.mu.Unlock()
+			return nil
+		}
+		t.lastAlerts[alertKey] = time.Now()
+	}
+	t.mu.Unlock()
+
+	// Construir el mensaje dinámicamente
+	if strings.TrimSpace(icon) == "" {
+		icon = "⚠️"
+	}
+	
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%s *%s*\n\n", icon, title))
+	sb.WriteString(fmt.Sprintf("%s\n\n", description))
+
+	if details != "" {
+		sb.WriteString(fmt.Sprintf("Detalle: %s\n", details))
+	}
+	sb.WriteString(fmt.Sprintf("Hora: %s", time.Now().Format("2006-01-02 15:04:05")))
+
+	return t.SendMessage(sb.String())
+}
+
+
+// Credentials devuelve el token y chatID activos actualmente en memoria.
+func (t *TelegramNotifier) Credentials() (string, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.botToken, t.chatID
+}
+

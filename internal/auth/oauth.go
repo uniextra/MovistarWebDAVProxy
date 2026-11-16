@@ -40,6 +40,16 @@ func GetSAPIUserAgent() string {
 		return value
 	}
 	return SAPIUserAgent
+	// ua, _ := GetSAPIUserAgentInfo()	return ua si se quiere usar función secundaria
+}
+
+// GetSAPIUserAgentInfo devuelve el User-Agent activo y true si se ha modificado
+// mediante SAPI_USER_AGENT respecto a la constante por defecto SAPIUserAgent.
+func GetSAPIUserAgentInfo() (string, bool) {
+	if value := strings.TrimSpace(os.Getenv("SAPI_USER_AGENT")); value != "" && value != SAPIUserAgent {
+		return value, true
+	}
+	return SAPIUserAgent, false
 }
 
 // DesktopUserAgent permite cambiar DesktopUserAgent.
@@ -49,6 +59,16 @@ func GetDesktopUserAgent() string {
 	}
 	return DesktopUserAgent
 }
+
+// GetDesktopUserAgentInfo devuelve el User-Agent de escritorio activo y true si
+// se ha modificado mediante DESKTOP_USER_AGENT respecto a DesktopUserAgent original.
+func GetDesktopUserAgentInfo() (string, bool) {
+	if value := strings.TrimSpace(os.Getenv("DESKTOP_USER_AGENT")); value != "" && value != DesktopUserAgent {
+		return value, true
+	}
+	return DesktopUserAgent, false
+}
+
 
 var (
 	authCodeQueryRegex = regexp.MustCompile(`code=([A-Za-z0-9\-_.~]+)`)
