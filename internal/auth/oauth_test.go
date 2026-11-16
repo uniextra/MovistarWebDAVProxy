@@ -114,6 +114,51 @@ func TestSAPIUserAgentDefault(t *testing.T) {
 	}
 }
 
+func TestGetOAuthUserAgent_DefaultMatchesSAPIUserAgent(t *testing.T) {
+	want := GetSAPIUserAgent()
+	if got := getOAuthUserAgent(); got != want {
+		t.Fatalf("getOAuthUserAgent() = %q, want %q", got, want)
+	}
+
+	t.Setenv("DESKTOP_USER_AGENT", "CustomDesktopUA/1.0")
+	if got := getOAuthUserAgent(); got != "CustomDesktopUA/1.0" {
+		t.Fatalf("getOAuthUserAgent() with custom DESKTOP_USER_AGENT = %q, want %q", got, "CustomDesktopUA/1.0")
+	}
+}
+
+func TestSAPILoginOAuth_WebDeviceKeepsWindowsPlatform(t *testing.T) {
+	var sawDeviceID, sawAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawDeviceID = r.Header.Get("X-deviceid")
+		sawAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"validationkey":"vk-123"}}`))
+	}))
+	defer srv.Close()
+
+	res := SAPILoginOAuth(srv.Client(), srv.URL, "acc-token", "ref-token", "web-e833", "PC Windows", 1700000000000, "3600")
+	if res.StatusCode != http.StatusOK || res.Error != nil {
+		t.Fatalf("SAPILoginOAuth failed: status=%d err=%v", res.StatusCode, res.Error)
+	}
+	if sawDeviceID != "web-e833" {
+		t.Fatalf("X-deviceid = %q, want %q", sawDeviceID, "web-e833")
+	}
+	if !strings.HasPrefix(sawAuth, "oauth ") {
+		t.Fatalf("Authorization = %q, want oauth prefix", sawAuth)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(sawAuth, "oauth "))
+	if err != nil {
+		t.Fatalf("decode Authorization failed: %v", err)
+	}
+	var payload OAuthCredentialHeader
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatalf("unmarshal OAuth payload failed: %v", err)
+	}
+	if payload.Data.Platform != ClientPlatform {
+		t.Fatalf("OAuth payload platform = %q, want %q", payload.Data.Platform, ClientPlatform)
+	}
+}
+
 func TestRefreshOAuthToken_BasicAuthFirstAndErrorSummary(t *testing.T) {
 	var calls int
 	var firstHadBodyClientID, secondHadBodyClientID bool

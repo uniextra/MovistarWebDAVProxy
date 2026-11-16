@@ -716,10 +716,10 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 			c.mu.Unlock()
 
 			_ = config.SaveAccountConfig(cfgCopy)
-			logger.Log("[OAuth] ✔ Sesión SAPI refrescada con éxito.")
+			logger.Log("[OAuth] ✔ Sesión SAPI refrescada con éxito (%s).", cfgCopy.Provider)
 			return true, false
 		}
-		logger.Log("[OAuth] ℹ️ Paso 1 (SAPILoginOAuth) no renovó sesión (HTTP %d, vk=%v, js=%v, err=%v); escalando a Paso 2...", res.StatusCode, res.ValidationKey != "", res.JSessionID != "" || primedJSess != "", res.Error)
+		logger.Log("[OAuth] ℹ️ Paso 1 (SAPILoginOAuth) no renovó sesión para %s (HTTP %d, vk=%v, js=%v, err=%v); escalando a Paso 2...", cfg.Provider, res.StatusCode, res.ValidationKey != "", res.JSessionID != "" || primedJSess != "", res.Error)
 	}
 
 	// Evitar rotar el refresh_token repetidamente si ya se renovó recientemente (<30s)
@@ -808,13 +808,13 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 				c.mu.Unlock()
 
 				_ = config.SaveAccountConfig(cfgCopy2)
-				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
+				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito (%s).", cfgCopy.Provider)
 				return true, true
 			}
 			// Si SAPI devolvió error tras renovar tokens en apiseg, no marcamos la sesión
 			// como expirada permanentemente: el access_token recién emitido es válido y se
 			// permite que las peticiones continúen con él (conservando la JSESSIONID preparada).
-			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco OAuth (%v). Continuando con nuevo access_token...", res.StatusCode, res.Error)
+			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco OAuth (%v) para %s. Continuando con nuevo access_token...", res.StatusCode, res.Error, cfgCopy.Provider)
 			c.mu.Lock()
 			c.sessionExpired = false
 			if primedJSess != "" && c.cfg.JSessionID == "" {

@@ -396,6 +396,17 @@ func ExtractState(input string) (string, bool) {
 	return "", true
 }
 
+// getOAuthUserAgent devuelve el User-Agent para peticiones OAuth (canje y refresco).
+// Si el usuario especificó explícitamente DESKTOP_USER_AGENT, se respeta; en caso contrario,
+// usa GetSAPIUserAgent() para alinear la cabecera con la huella TLS (uTLS Chrome-133)
+// y los tokens web tanto en Movistar como en O2.
+func getOAuthUserAgent() string {
+	if ua, custom := GetDesktopUserAgentInfo(); custom {
+		return ua
+	}
+	return GetSAPIUserAgent()
+}
+
 func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error) {
 	redirectURI := GetOAuthRedirectURI(provider)
 	tokenURL := GetOAuthTokenURL(provider)
@@ -420,7 +431,7 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	req.Header.Set("User-Agent", GetDesktopUserAgent())
+	req.Header.Set("User-Agent", getOAuthUserAgent())
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
@@ -434,7 +445,7 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OAuth token exchange failed (HTTP %d)", resp.StatusCode)
+		return nil, fmt.Errorf("OAuth token exchange failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
 	var tokens OAuthTokens
@@ -461,7 +472,7 @@ func doRefreshOAuthTokenRequest(tokenURL, clientID, clientSecret, refreshToken s
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	req.Header.Set("User-Agent", GetDesktopUserAgent())
+	req.Header.Set("User-Agent", getOAuthUserAgent())
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
