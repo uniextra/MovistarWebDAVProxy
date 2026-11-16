@@ -1,6 +1,6 @@
 # Mapear Movistar / O2 Cloud como Unidad de Red 💻📂
 
-Esta guía detalla paso a paso cómo montar tu almacenamiento de Movistar u O2 Cloud como un disco local o unidad de red en **Windows**, **macOS** y **Linux** a través del proxy WebDAV.
+Esta guía detalla paso a paso cómo montar tu almacenamiento de Movistar u O2 Cloud como un disco local o unidad de red en **Windows**, **macOS**, **Linux** y **Synology DSM (File Station)** a través del proxy WebDAV.
 
 > [!NOTE]
 > A partir de la versión **v2.0.5**, el proxy incorpora un sistema de absorción silenciosa de archivos basura (*DevNull Absorber*). Puedes navegar, crear y mover archivos sin preocuparte de que metadatos como `desktop.ini`, `.DS_Store`, `thumbs.db` o carpetas de papelera se suban a tu nube.
@@ -211,6 +211,30 @@ rclone mount movistar: /mnt/movistar_cloud \
   --allow-other \
   --daemon
 ```
+
+---
+
+## 🗄️ 4. Synology DSM (File Station)
+
+Si ejecutas el proxy en tu NAS Synology (o en otro equipo de la red), puedes explorar y gestionar tus archivos directamente desde **File Station** sin instalar clientes adicionales:
+
+1. Abre **File Station** en DSM.
+2. Entra en **Herramientas → Conexión remota → Configuración de conexión** (*Tools → Remote Connection → Connection Setup*).
+3. Selecciona **WebDAV**.
+4. Introduce estos datos (configuración orientativa para tu contenedor actual):
+
+![Conexión remota WebDAV en Synology File Station](images/dsm-file-station-webdav.png)
+
+| Campo | Valor |
+| :--- | :--- |
+| **Nombre** | `Movistar Cloud` |
+| **Protocolo** | `WebDAV` |
+| **Servidor** | IP de tu NAS (o servidor donde corre el proxy) |
+| **Puerto** | `5050` |
+| **Ruta** | `/` |
+| **Usuario** | Tu `WEBDAV_USER` |
+| **Contraseña** | Tu `WEBDAV_PASSWORD` |
+| **HTTPS** | Desactivado si no has configurado TLS |
 
 ---
 

@@ -152,6 +152,7 @@ Abre el panel web (`:5000`), pulsa **🔐 Abrir inicio de sesión**, entra con *
 | **🪟 Windows** | **Rclone + WinFsp** *(el WebClient nativo está obsoleto)* | `rclone mount movistar: M: --vfs-cache-mode full` |
 | **🍏 macOS** | Finder (`Cmd + K`) | `http://TU_IP:5050` |
 | **🐧 Linux** | GNOME Files / KDE / `davfs2` / Rclone | `dav://TU_IP:5050/` o `mount -t davfs http://TU_IP:5050 /mnt/cloud` |
+| **🗄️ Synology DSM** | File Station (*Herramientas → Conexión remota*) | [Ver guía paso a paso](docs/network-drive.md#-4-synology-dsm-file-station) |
 
 👉 **Guía completa por sistema operativo (incluyendo montaje nativo experimental en Windows) en [docs/network-drive.md](docs/network-drive.md).**
 
