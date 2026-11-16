@@ -67,6 +67,22 @@ func main() {
 		logger.Log("[!] ⚠️ No se encontraron credenciales. Abre el panel web para vincular.")
 	}
 
+	// mejoras logs, indicamos valores User-Agent, cuando no esté en modo web
+	if !config.WebSessionEnabled() {
+		if sapiUA, custom := auth.GetSAPIUserAgentInfo(); custom {
+			logger.Log("[Auth] 🔧 SAPI_USER_AGENT modificado: %s", sapiUA)
+		} else {
+			logger.Log("[Auth] 🔧 SAPI_USER_AGENT usando valor por defecto: %s", sapiUA)
+		}
+
+		if desktopUA, custom := auth.GetDesktopUserAgentInfo(); custom {
+			logger.Log("[Auth] 🔧 DESKTOP_USER_AGENT modificado: %s", desktopUA)
+		} else {
+			logger.Log("[Auth] 🔧 DESKTOP_USER_AGENT usando valor por defecto: %s", desktopUA)
+		}
+	}
+
+
 	client, err := sapi.NewClient(cfg)
 	if err != nil {
 		logger.Log("[FATAL] Error inicializando cliente SAPI: %v", err)
