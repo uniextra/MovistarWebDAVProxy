@@ -1042,11 +1042,28 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 			cfg.RefreshToken = sapiRes.RefreshedOAuth.RefreshToken
 		}
 	}
-	if sapiRes.StatusCode == http.StatusOK && sapiRes.Error == nil {
-		logger.Log("[OAuth] ✔ Sesión SAPI inicializada con éxito (%s).", provider)
-	} else {
-		logger.Log("[OAuth] ⚠️ SAPI devolvió HTTP %d tras canje en %s (%v). Continuando con tokens OAuth.", sapiRes.StatusCode, provider, sapiRes.Error)
+	if sapiRes.StatusCode != http.StatusOK || sapiRes.Error != nil || (cfg.ValidationKey == "" && cfg.JSessionID == "") {
+		logger.Log("[OAuth] ❌ Error inicializando sesión SAPI tras canje en %s (%s): HTTP %d (Server=%q, X-Cache=%q, vk=%v, js=%v, err=%v, body=%q)",
+			logger.Mask(phone), provider, sapiRes.StatusCode, sapiRes.Server, sapiRes.XCache, cfg.ValidationKey != "", cfg.JSessionID != "", sapiRes.Error, sapiRes.BodyPreview)
+
+		s.loginMu.Lock()
+		delete(s.loginState, phone)
+		s.loginMu.Unlock()
+
+		if s.client == nil || !s.client.HasCredentials() {
+			s.SetRunning(false)
+		}
+
+		msg := fmt.Sprintf("SAPI rechazó el inicio de sesión en %s (HTTP %d). Comprueba los logs y vuelve a iniciar la vinculación.", provider, sapiRes.StatusCode)
+		if sapiRes.StatusCode == 0 && sapiRes.Error != nil {
+			msg = fmt.Sprintf("No se pudo conectar con SAPI en %s: %v", provider, sapiRes.Error)
+		} else if sapiRes.StatusCode == http.StatusOK && cfg.ValidationKey == "" && cfg.JSessionID == "" {
+			msg = fmt.Sprintf("SAPI respondió HTTP 200 en %s sin credenciales de sesión (validationkey/JSESSIONID).", provider)
+		}
+		jsonResponse(w, http.StatusBadGateway, map[string]interface{}{"status": "error", "message": msg})
+		return
 	}
+	logger.Log("[OAuth] ✔ Sesión SAPI inicializada con éxito (%s).", provider)
 
 	if err := config.SaveAccountConfig(cfg); err != nil {
 		logger.Log("[OAuth] ⚠️ Error guardando credenciales: %v", err)
