@@ -67,7 +67,7 @@ Esta guía reúne toda la referencia técnica del proxy: variables de entorno co
 | `DESKTOP_USER_AGENT` | `omh windows client 4.0.1` | `User-Agent` del cliente de escritorio: lo usan el canje del código OAuth en `apiseg.telefonica.es` y, en el perfil `desktop`, las llamadas a SAPI. |
 | `SAPI_USER_AGENT` | *(según perfil)* | Fuerza el `User-Agent` enviado a SAPI. Por defecto: `DESKTOP_USER_AGENT` en el perfil `desktop`, `Mozilla/5.0 ... Chrome/133.0.0.0 ...` en `browser`. *(No usar `DESKTOP`: CloudFront lo rechaza con `401`.)* |
 | `OAUTH_REFRESH_FALLBACK` | `false` | Solo perfil `desktop`: si SAPI rechaza la sesión, permite como último recurso canjear el `refresh_token` en `apiseg` (el cliente oficial no lo hace nunca). |
-| `UTLS_CLIENT_HELLO` | `chrome_auto` | Perfil de huella TLS (`chrome_auto`, `firefox_auto`, `safari_auto`, `ios`, `android`, `edge`, `chrome_120`, `golang`, `randomized`). |
+| `UTLS_CLIENT_HELLO` | *(según perfil)* | Huella TLS (`ClientHello`) hacia SAPI. Por defecto: `o2` (la del cliente oficial de Windows) en el perfil `desktop`, `chrome_auto` en `browser`. Otros valores para pruebas: `golang`, `chrome_auto`, `firefox_auto`, `safari_auto`, `ios`, `android`, `edge`, `chrome_120`, `randomized`. Ver la sección 4. |
 | `WEB_SESSION` | `false` | Activa el [Modo Web](web-mode.md) (requiere la imagen `Dockerfile.web`, donde viene a `true`). Sus variables específicas (`WEB_SESSION_RENEW_BEFORE`, `WEB_TRASH_EMPTY_EVERY`, `CHROME_PATH`, `CHROME_NO_SANDBOX`) se detallan en esa guía. |
 
 ---
@@ -101,11 +101,14 @@ Esto facilita comprobar de inmediato qué cabeceras se están enviando si necesi
 
 El perfil por defecto fuera del Modo Web (`SAPI_CLIENT_PROFILE=desktop`) reproduce el tráfico del cliente oficial de Windows de O2 (`O2 Cloud.exe` 32.1.3, instalador publicado en `/sapi/system/information` → `clientspathinfo.windowspath`), capturado con Fiddler:
 
-* **Transporte:** HTTP/1.1 hacia SAPI (el cliente es Qt 5). El `ClientHello` de uTLS anuncia solo `http/1.1` en ALPN.
+* **Transporte:** HTTP/1.1 hacia SAPI (el cliente es Qt 5).
+* **Huella TLS:** el `ClientHello` del cliente oficial (Qt 5 + OpenSSL 1.1.1), capturado sin intermediario con `tcpdump` (la captura con Fiddler muestra el HTTP, pero el `ClientHello` que ve CloudFront es el de Fiddler): JA3 `57fbe0aefee44901190849b0e877a5e1`, 512 bytes, TLS 1.3 a 1.0, grupos x25519, P-256, x448, P-521 y P-384, y **sin ALPN** (el servidor responde en HTTP/1.1). El proxy lo reproduce con uTLS (`UTLS_CLIENT_HELLO=o2`, valor por defecto en este perfil). Las subidas a `upload.*` usan la pila TLS estándar de Go.
 * **Cabeceras:** `User-Agent: omh windows client 4.0.1`, `x-deviceid: fol-<base64>`, `Accept: */*`, `Accept-Language: es-ES,en,*`, `x-request-id` (UUID por petición), `Authorization: oauth …` con `"platform":"windows"`, cookie `JSESSIONID` y `validationkey` en la URL. Sin `Referer`, `X-Requested-With` ni `X-devicename`.
 * **Renovación:** el cliente envía sus tokens aunque `lastrefreshdate + expiresin` haya vencido; SAPI responde `200` con una cabecera `Authorization: oauth …` (en la captura, con los mismos tokens y sin `lastrefreshdate`) y el cliente pone `lastrefreshdate` a la hora de esa respuesta. No contacta nunca con `apiseg.telefonica.es` para renovar.
 
 CloudFront exige esa coherencia: un `X-deviceid` `fol-…` llega a SAPI con `User-Agent` `omh windows client …` **por HTTP/1.1**, pero se corta (`401`, `Server: CloudFront`, 0 bytes) si llega por HTTP/2, con `User-Agent` de navegador o con `DESKTOP`.
+
+La huella TLS también cuenta: con la de Chrome (`chrome_auto`) y el `User-Agent` del cliente de Windows, CloudFront acabó devolviendo esos `401` vacíos a todas las peticiones tras unas 11 horas de funcionamiento normal, mientras que con las mismas credenciales y la huella `golang` la sesión se renovó sin problemas. Con `o2` el proxy presenta la misma huella que la aplicación oficial.
 
 ---
 
