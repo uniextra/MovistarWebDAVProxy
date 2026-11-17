@@ -197,6 +197,7 @@ func TestRefreshSession_O2_RecoversValidationKeyWithoutTokenRefresh(t *testing.T
 // 401 within the <30s cooldown window does not escalate doRequestLocked to
 // forceOAuth=true and burn refresh_token in a tight loop.
 func TestRefreshSession_CooldownPreventsForceOAuthEscalationLoop(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	oldTokensDir := config.TokensDir
 	config.TokensDir = t.TempDir()
 	t.Cleanup(func() { config.TokensDir = oldTokensDir })

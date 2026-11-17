@@ -119,9 +119,16 @@ func TestSAPIUserAgentDefault(t *testing.T) {
 }
 
 func TestGetOAuthUserAgent_DefaultMatchesSAPIUserAgent(t *testing.T) {
-	want := GetSAPIUserAgent()
-	if got := getOAuthUserAgent(); got != want {
-		t.Fatalf("getOAuthUserAgent() = %q, want %q", got, want)
+	t.Setenv("DESKTOP_USER_AGENT", "")
+	t.Setenv("SAPI_USER_AGENT", "")
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	if got, want := getOAuthUserAgent(), GetDesktopUserAgent(); got != want {
+		t.Fatalf("getOAuthUserAgent() in desktop profile = %q, want %q", got, want)
+	}
+
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+	if got, want := getOAuthUserAgent(), SAPIUserAgent; got != want {
+		t.Fatalf("getOAuthUserAgent() in browser profile = %q, want %q", got, want)
 	}
 
 	t.Setenv("DESKTOP_USER_AGENT", "CustomDesktopUA/1.0")
@@ -131,6 +138,7 @@ func TestGetOAuthUserAgent_DefaultMatchesSAPIUserAgent(t *testing.T) {
 }
 
 func TestSAPILoginOAuth_WebDeviceKeepsWindowsPlatform(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	var sawDeviceID, sawAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawDeviceID = r.Header.Get("X-deviceid")
