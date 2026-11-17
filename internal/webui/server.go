@@ -1011,7 +1011,7 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	var sapiRes auth.SAPILoginResult
 	for attempt := 0; attempt < 3; attempt++ {
 		sapiRes = auth.SAPILoginOAuth(primedClient, sapiBase, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
-		if sapiRes.StatusCode == http.StatusOK && sapiRes.Error == nil {
+		if sapiRes.StatusCode == http.StatusOK && sapiRes.Error == nil && (sapiRes.ValidationKey != "" || sapiRes.JSessionID != "") {
 			break
 		}
 		if attempt < 2 {

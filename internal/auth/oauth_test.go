@@ -101,16 +101,73 @@ func TestBuildOAuthHeaderMatchesOfficialClientFieldOrder(t *testing.T) {
 }
 
 func TestDesktopUserAgentDefault(t *testing.T) {
-	const want = "omh windows client 32.1.3.0"
+	t.Setenv("DESKTOP_USER_AGENT", "")
+	// User-Agent del cliente oficial de Windows de O2 (capturado, noviembre de 2026).
+	const want = "omh windows client 4.0.1"
 	if got := GetDesktopUserAgent(); got != want {
 		t.Fatalf("GetDesktopUserAgent() = %q, want %q", got, want)
 	}
 }
 
 func TestSAPIUserAgentDefault(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+	t.Setenv("SAPI_USER_AGENT", "")
 	const want = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 	if got := GetSAPIUserAgent(); got != want {
 		t.Fatalf("GetSAPIUserAgent() = %q, want %q", got, want)
+	}
+}
+
+func TestGetOAuthUserAgent_DefaultMatchesSAPIUserAgent(t *testing.T) {
+	t.Setenv("DESKTOP_USER_AGENT", "")
+	t.Setenv("SAPI_USER_AGENT", "")
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	if got, want := getOAuthUserAgent(), GetDesktopUserAgent(); got != want {
+		t.Fatalf("getOAuthUserAgent() in desktop profile = %q, want %q", got, want)
+	}
+
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+	if got, want := getOAuthUserAgent(), SAPIUserAgent; got != want {
+		t.Fatalf("getOAuthUserAgent() in browser profile = %q, want %q", got, want)
+	}
+
+	t.Setenv("DESKTOP_USER_AGENT", "CustomDesktopUA/1.0")
+	if got := getOAuthUserAgent(); got != "CustomDesktopUA/1.0" {
+		t.Fatalf("getOAuthUserAgent() with custom DESKTOP_USER_AGENT = %q, want %q", got, "CustomDesktopUA/1.0")
+	}
+}
+
+func TestSAPILoginOAuth_WebDeviceKeepsWindowsPlatform(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+	var sawDeviceID, sawAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawDeviceID = r.Header.Get("X-deviceid")
+		sawAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"validationkey":"vk-123"}}`))
+	}))
+	defer srv.Close()
+
+	res := SAPILoginOAuth(srv.Client(), srv.URL, "acc-token", "ref-token", "web-e833", "PC Windows", 1700000000000, "3600")
+	if res.StatusCode != http.StatusOK || res.Error != nil {
+		t.Fatalf("SAPILoginOAuth failed: status=%d err=%v", res.StatusCode, res.Error)
+	}
+	if sawDeviceID != "web-e833" {
+		t.Fatalf("X-deviceid = %q, want %q", sawDeviceID, "web-e833")
+	}
+	if !strings.HasPrefix(sawAuth, "oauth ") {
+		t.Fatalf("Authorization = %q, want oauth prefix", sawAuth)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(sawAuth, "oauth "))
+	if err != nil {
+		t.Fatalf("decode Authorization failed: %v", err)
+	}
+	var payload OAuthCredentialHeader
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatalf("unmarshal OAuth payload failed: %v", err)
+	}
+	if payload.Data.Platform != ClientPlatform {
+		t.Fatalf("OAuth payload platform = %q, want %q", payload.Data.Platform, ClientPlatform)
 	}
 }
 

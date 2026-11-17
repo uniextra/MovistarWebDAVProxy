@@ -18,6 +18,7 @@ import (
 )
 
 func TestCI_CloudFrontWAF_RejectsLegacyFolDeviceIDAndBadUserAgent(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	t.Setenv("SAPI_USER_AGENT", "")
 	t.Setenv("DESKTOP_USER_AGENT", "")
 
@@ -115,6 +116,7 @@ func TestCI_CloudFrontWAF_RejectsLegacyFolDeviceIDAndBadUserAgent(t *testing.T) 
 }
 
 func TestCI_RefreshSession_WhenSAPILoginReturnsHTMLShell(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	t.Setenv("SAPI_USER_AGENT", "")
 	t.Setenv("DESKTOP_USER_AGENT", "")
 
@@ -211,6 +213,7 @@ func TestCI_RefreshSession_WhenSAPILoginReturnsHTMLShell(t *testing.T) {
 }
 
 func TestCI_ProcessSAPIResponse_Ignores401AnonymousJSessionIDCookie(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	t.Setenv("SAPI_USER_AGENT", "")
 	t.Setenv("DESKTOP_USER_AGENT", "")
 
@@ -308,6 +311,7 @@ func TestCI_ProcessSAPIResponse_Ignores401AnonymousJSessionIDCookie(t *testing.T
 }
 
 func TestCI_SAPILoginOAuth_RetainsPrimedJSessionIDOn200HTMLWithoutSetCookie(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	var loginCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -359,6 +363,7 @@ func TestCI_SAPILoginOAuth_RetainsPrimedJSessionIDOn200HTMLWithoutSetCookie(t *t
 }
 
 func TestCI_UploadFileToFolder_RetriesOn401AndSucceeds(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	oldTokensDir := config.TokensDir
 	config.TokensDir = t.TempDir()
 	t.Cleanup(func() { config.TokensDir = oldTokensDir })
@@ -464,6 +469,7 @@ func TestCI_UploadFileToFolder_RetriesOn401AndSucceeds(t *testing.T) {
 }
 
 func TestCI_RefreshSession_StaleLastRefreshDateRenewsInStep1(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	oldTokensDir := config.TokensDir
 	config.TokensDir = t.TempDir()
 	t.Cleanup(func() { config.TokensDir = oldTokensDir })

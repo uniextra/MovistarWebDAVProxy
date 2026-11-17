@@ -992,6 +992,10 @@ func (mfs *MovistarFS) getRootFolderID() (int64, error) {
 		return 0, errors.New("sapi client is nil")
 	}
 
+	if !mfs.client.HasCredentials() {
+		return 0, errors.New("sesión SAPI no autorizada: vincula la cuenta en el panel web")
+	}
+
 	rootID, err := mfs.client.GetRootFolderID()
 	if err != nil {
 		return 0, err

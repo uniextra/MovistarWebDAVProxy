@@ -84,6 +84,11 @@ func main() {
 
 	// mejoras logs, indicamos valores User-Agent, cuando no esté en modo web
 	if !config.WebSessionEnabled() {
+		if auth.IsDesktopProfile() {
+			logger.Log("[Auth] 🔧 Perfil de cliente SAPI: desktop (como el cliente oficial de Windows: HTTP/1.1, X-deviceid fol-, sin renovar en apiseg). SAPI_CLIENT_PROFILE=browser para el perfil de navegador.")
+		} else {
+			logger.Log("[Auth] 🔧 Perfil de cliente SAPI: browser (HTTP/2, X-deviceid web-).")
+		}
 		if sapiUA, custom := auth.GetSAPIUserAgentInfo(); custom {
 			logger.Log("[Auth] 🔧 SAPI_USER_AGENT modificado: %s", sapiUA)
 		} else {
@@ -179,6 +184,10 @@ func main() {
 
 	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
 	webdavServer := webdav.NewServerWithAuth(client, davAuth, metaStore)
+	if !client.HasCredentials() {
+		webdavServer.SetRunning(false)
+		logger.Log("[WebDAV] ⏸️ Proxy WebDAV pausado: esperando vinculación de cuenta en el panel web.")
+	}
 
 	syncInterval := config.GetSyncInterval()
 	logger.Log("[Metadata] ⏱️ Intervalo de sincronización periódica: %v (SYNC_INTERVAL_SEC)", syncInterval)

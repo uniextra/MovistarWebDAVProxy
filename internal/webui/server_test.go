@@ -735,7 +735,7 @@ func TestWebUI_Logout_DirectNavigationAndResidualBasicAuth(t *testing.T) {
 	}
 }
 
-func TestWebUI_CompleteLogin_O2_DirectOAuth(t *testing.T) {
+func TestWebUI_CompleteLogin_O2_CapturesSAPISession(t *testing.T) {
 	tmpDir := t.TempDir()
 	origTokensDir := config.TokensDir
 	config.TokensDir = tmpDir
@@ -757,6 +757,16 @@ func TestWebUI_CompleteLogin_O2_DirectOAuth(t *testing.T) {
 	var syncOnce sync.Once
 	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/login/oauth") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"validationkey": "o2-sapi-valkey",
+					"jsessionid":    "o2-sapi-jsess",
+				},
+				"responsetime": 1794834400000,
+			})
+			return
+		}
 		if strings.Contains(r.URL.Path, "/profile/changes") {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{}})
 			syncOnce.Do(func() { close(syncDone) })
@@ -818,10 +828,22 @@ func TestWebUI_CompleteLogin_O2_DirectOAuth(t *testing.T) {
 	if savedCfg.RefreshToken != "o2-refresh-token-456" {
 		t.Errorf("RefreshToken = %q, want o2-refresh-token-456", savedCfg.RefreshToken)
 	}
+	if savedCfg.ValidationKey != "o2-sapi-valkey" {
+		t.Errorf("ValidationKey = %q, want o2-sapi-valkey", savedCfg.ValidationKey)
+	}
+	if savedCfg.JSessionID != "o2-sapi-jsess" {
+		t.Errorf("JSessionID = %q, want o2-sapi-jsess", savedCfg.JSessionID)
+	}
 
 	clientCfg := client.GetConfig()
 	if clientCfg.AccessToken != "o2-access-token-123" {
 		t.Errorf("clientCfg.AccessToken = %q, want 'o2-access-token-123'", clientCfg.AccessToken)
+	}
+	if clientCfg.ValidationKey != "o2-sapi-valkey" {
+		t.Errorf("clientCfg.ValidationKey = %q, want 'o2-sapi-valkey'", clientCfg.ValidationKey)
+	}
+	if clientCfg.JSessionID != "o2-sapi-jsess" {
+		t.Errorf("clientCfg.JSessionID = %q, want 'o2-sapi-jsess'", clientCfg.JSessionID)
 	}
 }
 
