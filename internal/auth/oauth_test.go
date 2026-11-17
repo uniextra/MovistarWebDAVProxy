@@ -101,13 +101,17 @@ func TestBuildOAuthHeaderMatchesOfficialClientFieldOrder(t *testing.T) {
 }
 
 func TestDesktopUserAgentDefault(t *testing.T) {
-	const want = "omh windows client 32.1.3.0"
+	t.Setenv("DESKTOP_USER_AGENT", "")
+	// User-Agent del cliente oficial de Windows de O2 (capturado, noviembre de 2026).
+	const want = "omh windows client 4.0.1"
 	if got := GetDesktopUserAgent(); got != want {
 		t.Fatalf("GetDesktopUserAgent() = %q, want %q", got, want)
 	}
 }
 
 func TestSAPIUserAgentDefault(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+	t.Setenv("SAPI_USER_AGENT", "")
 	const want = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 	if got := GetSAPIUserAgent(); got != want {
 		t.Fatalf("GetSAPIUserAgent() = %q, want %q", got, want)

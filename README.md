@@ -188,7 +188,7 @@ Al incluir `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en tu `docker-compose.yml`,
 
 1. **📦 Límite de 4 GB por archivo en Movistar / O2 Cloud:** La API de Telefónica rechaza archivos individuales mayores de **4 GB (4096 MB)**. **Duplicati** y **HyperBackup** dividen los datos automáticamente en bloques pequeños; para archivos grandes sueltos con **Rclone**, usa [`chunker`](docs/backup-clients.md#-configuración-avanzada-archivos-de-más-de-4-gb-chunker-y-cifrado-crypt).
 2. **🧹 Limpieza automática de archivos del SO:** El proxy absorbe sin subir a la nube ficheros temporales de sistema como `.DS_Store`, `._*`, `desktop.ini`, `thumbs.db`, `$RECYCLE.BIN` o `.Trash-*`.
-3. **🔒 Acceso remoto seguro:** No expongas los puertos `:5000` o `:5050` directamente a Internet sin cifrado. Si necesitas acceso externo, usa una VPN (WireGuard / Tailscale) o un proxy inverso con **HTTPS** configurado según [docs/configuration.md](docs/configuration.md#-5-topologías-de-red-docker-y-proxies-inversos).
+3. **🔒 Acceso remoto seguro:** No expongas los puertos `:5000` o `:5050` directamente a Internet sin cifrado. Si necesitas acceso externo, usa una VPN (WireGuard / Tailscale) o un proxy inverso con **HTTPS** configurado según [docs/configuration.md](docs/configuration.md#-6-topologías-de-red-docker-y-proxies-inversos).
 
 ---
 

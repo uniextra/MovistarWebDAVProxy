@@ -89,6 +89,62 @@ func dialTLSContextWithUTLSHTTP1(ctx context.Context, network, addr string) (net
 	return dialTLSContextWithUTLSALPN(ctx, network, addr, []string{"http/1.1"})
 }
 
+// dialTLSContextHTTP1Only es como dialTLSContextWithUTLSHTTP1 pero garantiza que el
+// ClientHello anuncie solo "http/1.1". Con los perfiles de navegador de uTLS
+// (Chrome, Firefox, Edge…) la extensión ALPN del preset ("h2", "http/1.1") manda
+// sobre Config.NextProtos, y CloudFront elige h2 aunque el transporte sea
+// HTTP/1.1 ("malformed HTTP response \x00\x00\x12\x04…"). Aquí se toma el
+// preset, se cambia su ALPN y se aplica como ClientHello a medida.
+// http1OnlySpec devuelve el ClientHello del perfil indicado con la extensión ALPN
+// reducida a "http/1.1".
+func http1OnlySpec(helloID utls.ClientHelloID) (utls.ClientHelloSpec, error) {
+	spec, err := utls.UTLSIdToSpec(helloID)
+	if err != nil {
+		return spec, err
+	}
+	for _, ext := range spec.Extensions {
+		if alpn, ok := ext.(*utls.ALPNExtension); ok {
+			alpn.AlpnProtocols = []string{"http/1.1"}
+		}
+	}
+	return spec, nil
+}
+
+func dialTLSContextHTTP1Only(ctx context.Context, network, addr string) (net.Conn, error) {
+	helloID := clientHelloIDFromEnv()
+	spec, err := http1OnlySpec(helloID)
+	if err != nil {
+		// Perfiles sin especificación fija (p. ej. HelloGolang): NextProtos basta.
+		return dialTLSContextWithUTLSALPN(ctx, network, addr, []string{"http/1.1"})
+	}
+
+	plainConn, err := (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		host = addr
+	}
+	uConn := utls.UClient(plainConn, &utls.Config{ServerName: host, NextProtos: []string{"http/1.1"}}, utls.HelloCustom)
+	if err := uConn.ApplyPreset(&spec); err != nil {
+		_ = plainConn.Close()
+		return nil, fmt.Errorf("utls preset %s: %w", helloID.Str(), err)
+	}
+	if err := uConn.HandshakeContext(ctx); err != nil {
+		_ = plainConn.Close()
+		return nil, fmt.Errorf("utls handshake with %s: %w", host, err)
+	}
+	if proto := uConn.ConnectionState().NegotiatedProtocol; proto != "" && proto != "http/1.1" {
+		_ = uConn.Close()
+		return nil, fmt.Errorf("utls handshake with %s: el servidor eligió %q en lugar de http/1.1", host, proto)
+	}
+	return uConn, nil
+}
+
 func dialTLSContextWithUTLSNoALPN(ctx context.Context, network, addr string) (net.Conn, error) {
 	return dialTLSContextWithUTLSALPN(ctx, network, addr, nil)
 }
@@ -114,13 +170,25 @@ func UploadResponseTimeout() time.Duration {
 type fingerprintedTransport struct {
 	h1 *http.Transport
 	h2 *http2.Transport
+	// sapiH1, si no es nil, sustituye a h2 para los hosts SAPI: el perfil
+	// "desktop" habla HTTP/1.1, como el cliente oficial (Qt 5). CloudFront corta
+	// las peticiones de un dispositivo "fol-" que llegan por HTTP/2.
+	sapiH1 *http.Transport
 }
 
 func (t *fingerprintedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme == "https" && !strings.HasPrefix(req.URL.Hostname(), "upload.") {
+		if t.sapiH1 != nil {
+			return t.sapiH1.RoundTrip(req)
+		}
 		return t.h2.RoundTrip(req)
 	}
 	return t.h1.RoundTrip(req)
+}
+
+// UsesHTTP1ForSAPI indica si los hosts SAPI van por HTTP/1.1 (perfil "desktop").
+func (t *fingerprintedTransport) UsesHTTP1ForSAPI() bool {
+	return t.sapiH1 != nil
 }
 
 // HTTP1Transport expone el transporte HTTP/1.1 subyacente (subidas y URLs planas)
@@ -157,7 +225,30 @@ func NewFingerprintedTransport() http.RoundTripper {
 		MaxConnsPerHost:       100,
 	}
 
-	return &fingerprintedTransport{h1: h1, h2: h2}
+	ft := &fingerprintedTransport{h1: h1, h2: h2}
+	if IsDesktopProfile() {
+		ft.sapiH1 = newSAPIHTTP1Transport()
+	}
+	return ft
+}
+
+// newSAPIHTTP1Transport es el transporte de los hosts SAPI en el perfil "desktop":
+// HTTP/1.1 con keep-alive (como el cliente oficial) y ALPN "http/1.1".
+func newSAPIHTTP1Transport() *http.Transport {
+	return &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		DialTLSContext:        dialTLSContextHTTP1Only,
+		ForceAttemptHTTP2:     false,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		MaxConnsPerHost:       100,
+	}
 }
 
 // NewHTTP1FingerprintedTransport mantiene la huella uTLS pero fuerza ALPN

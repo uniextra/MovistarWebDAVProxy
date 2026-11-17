@@ -63,8 +63,10 @@ Esta guía reúne toda la referencia técnica del proxy: variables de entorno co
 
 | Variable | Por defecto | Descripción |
 | :--- | :--- | :--- |
-| `DESKTOP_USER_AGENT` | `omh windows client 32.1.3.0` | `User-Agent` enviado al servidor OAuth (`apiseg.telefonica.es`) al canjear o refrescar tokens. |
-| `SAPI_USER_AGENT` | `Mozilla/5.0 ... Chrome/133.0.0.0 ...` | `User-Agent` enviado a SAPI (`micloud.movistar.es/sapi`), alineado por defecto con la huella uTLS `Chrome-133` para evitar bloqueos WAF de CloudFront. *(No usar `DESKTOP`: CloudFront lo rechaza con `401`.)* |
+| `SAPI_CLIENT_PROFILE` | `desktop` (`browser` en Modo Web) | Cómo se presenta el proxy ante SAPI. `desktop` imita al cliente oficial de Windows: HTTP/1.1, `User-Agent` `omh windows client 4.0.1`, `X-deviceid: fol-…`, `"platform":"windows"`, sus mismas cabeceras, y renovación de la sesión a través de SAPI (sin canjear el `refresh_token` en `apiseg`). `browser` mantiene el comportamiento anterior: navegador Chrome por HTTP/2 con `X-deviceid: web-…`. Ver la sección 4. |
+| `DESKTOP_USER_AGENT` | `omh windows client 4.0.1` | `User-Agent` del cliente de escritorio: lo usan el canje del código OAuth en `apiseg.telefonica.es` y, en el perfil `desktop`, las llamadas a SAPI. |
+| `SAPI_USER_AGENT` | *(según perfil)* | Fuerza el `User-Agent` enviado a SAPI. Por defecto: `DESKTOP_USER_AGENT` en el perfil `desktop`, `Mozilla/5.0 ... Chrome/133.0.0.0 ...` en `browser`. *(No usar `DESKTOP`: CloudFront lo rechaza con `401`.)* |
+| `OAUTH_REFRESH_FALLBACK` | `false` | Solo perfil `desktop`: si SAPI rechaza la sesión, permite como último recurso canjear el `refresh_token` en `apiseg` (el cliente oficial no lo hace nunca). |
 | `UTLS_CLIENT_HELLO` | `chrome_auto` | Perfil de huella TLS (`chrome_auto`, `firefox_auto`, `safari_auto`, `ios`, `android`, `edge`, `chrome_120`, `golang`, `randomized`). |
 | `WEB_SESSION` | `false` | Activa el [Modo Web](web-mode.md) (requiere la imagen `Dockerfile.web`, donde viene a `true`). Sus variables específicas (`WEB_SESSION_RENEW_BEFORE`, `WEB_TRASH_EMPTY_EVERY`, `CHROME_PATH`, `CHROME_NO_SANDBOX`) se detallan en esa guía. |
 
@@ -86,15 +88,28 @@ Con `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` configurados en tu `docker-compose
 En el modo estándar (cuando `WEB_SESSION` no está activo), el proxy registra explícitamente al arrancar el valor activo de `SAPI_USER_AGENT` y `DESKTOP_USER_AGENT`, indicando si se está utilizando el valor por defecto o una versión personalizada por variable de entorno:
 
 ```text
-[Auth] 🔧 SAPI_USER_AGENT usando valor por defecto: Mozilla/5.0 ...
-[Auth] 🔧 DESKTOP_USER_AGENT usando valor por defecto: omh windows client 32.1.3.0
+[Auth] 🔧 Perfil de cliente SAPI: desktop (como el cliente oficial de Windows: HTTP/1.1, X-deviceid fol-, sin renovar en apiseg). SAPI_CLIENT_PROFILE=browser para el perfil de navegador.
+[Auth] 🔧 SAPI_USER_AGENT usando valor por defecto: omh windows client 4.0.1
+[Auth] 🔧 DESKTOP_USER_AGENT usando valor por defecto: omh windows client 4.0.1
 ```
 
 Esto facilita comprobar de inmediato qué cabeceras se están enviando si necesitas diagnosticar un rechazo `401` o `403` en el inicio de sesión o en llamadas a la API.
 
 ---
 
-## 🔒 4. Seguridad y Autenticación Detallada
+## 🖥️ 4. Perfil de cliente de escritorio
+
+El perfil por defecto fuera del Modo Web (`SAPI_CLIENT_PROFILE=desktop`) reproduce el tráfico del cliente oficial de Windows de O2 (`O2 Cloud.exe` 32.1.3, instalador publicado en `/sapi/system/information` → `clientspathinfo.windowspath`), capturado con Fiddler:
+
+* **Transporte:** HTTP/1.1 hacia SAPI (el cliente es Qt 5). El `ClientHello` de uTLS anuncia solo `http/1.1` en ALPN.
+* **Cabeceras:** `User-Agent: omh windows client 4.0.1`, `x-deviceid: fol-<base64>`, `Accept: */*`, `Accept-Language: es-ES,en,*`, `x-request-id` (UUID por petición), `Authorization: oauth …` con `"platform":"windows"`, cookie `JSESSIONID` y `validationkey` en la URL. Sin `Referer`, `X-Requested-With` ni `X-devicename`.
+* **Renovación:** el cliente envía sus tokens aunque `lastrefreshdate + expiresin` haya vencido; SAPI responde `200` con una cabecera `Authorization: oauth …` (en la captura, con los mismos tokens y sin `lastrefreshdate`) y el cliente pone `lastrefreshdate` a la hora de esa respuesta. No contacta nunca con `apiseg.telefonica.es` para renovar.
+
+CloudFront exige esa coherencia: un `X-deviceid` `fol-…` llega a SAPI con `User-Agent` `omh windows client …` **por HTTP/1.1**, pero se corta (`401`, `Server: CloudFront`, 0 bytes) si llega por HTTP/2, con `User-Agent` de navegador o con `DESKTOP`.
+
+---
+
+## 🔒 5. Seguridad y Autenticación Detallada
 
 * **Panel Web con Login Moderno (`:5000`):**
   * Formulario de inicio de sesión compatible con autocompletado de gestores de contraseñas (*Bitwarden*, *1Password*, *KeePass*, *Google Chrome*, *Apple Keychain*).
@@ -113,7 +128,7 @@ Esto facilita comprobar de inmediato qué cabeceras se están enviando si necesi
 
 ---
 
-## 🌐 5. Topologías de Red Docker y Proxies Inversos
+## 🌐 6. Topologías de Red Docker y Proxies Inversos
 
 * **No exponer directamente a Internet:** Si necesitas acceder desde fuera de tu red local, coloca siempre un proxy inverso con **TLS/HTTPS** delante (Caddy, Nginx, Traefik) o utiliza un túnel VPN (WireGuard / Tailscale).
 * **Docker Bridge (por defecto):** Mediante `BRUTE_FORCE_EXCLUDED_IPS` (`127.0.0.1,::1,172.16.0.0/12`), el loopback y las subredes puente estándar de Docker (`172.17.0.0/16`, `172.18.0.0/16`, etc.) quedan exentas del bloqueo por fuerza bruta (`HTTP 429`). Esto evita que varios clientes compartiendo el gateway de Docker queden bloqueados accidentalmente. **La autenticación Basic Auth se exige y valida en todo momento; la exclusión nunca elude la contraseña.**
@@ -131,7 +146,7 @@ Esto facilita comprobar de inmediato qué cabeceras se están enviando si necesi
 
 ---
 
-## 🧹 6. Filtro Inteligente de Basura del SO (*DevNull Absorber*)
+## 🧹 7. Filtro Inteligente de Basura del SO (*DevNull Absorber*)
 
 Al conectar la unidad en red, los sistemas operativos intentan crear archivos de indexación, miniaturas y papeleras que ensucian la nube. El proxy integra un absorbedor en memoria que responde con éxito al cliente pero evita subir estos elementos a Movistar / O2 Cloud:
 
@@ -141,7 +156,7 @@ Al conectar la unidad en red, los sistemas operativos intentan crear archivos de
 
 ---
 
-## ⚠️ 7. Limitaciones Técnicas de Movistar / O2 Cloud (SAPI)
+## ⚠️ 8. Limitaciones Técnicas de Movistar / O2 Cloud (SAPI)
 
 Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la infraestructura de Telefónica (SAPI) impone ciertas restricciones técnicas:
 

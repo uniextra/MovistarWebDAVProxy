@@ -18,6 +18,7 @@ import (
 // initializes SAPI via SAPILoginOAuth, captures validationkey and jsessionid,
 // and returns true with an active session.
 func TestRefreshSession_O2_SAPILoginSuccess(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	// 1. Mock token server (apiseg.telefonica.es)
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -260,6 +261,7 @@ func TestRefreshSession_CooldownPreventsForceOAuthEscalationLoop(t *testing.T) {
 // TestDoRequest_O2_SendsValidationKeyAndCookie verifies that SAPI requests for O2
 // include validationkey and Cookie: JSESSIONID headers as required by Synchronoss.
 func TestDoRequest_O2_SendsValidationKeyAndCookie(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	var receivedCookie string
 	var receivedAuth string
 	var receivedURL string
@@ -322,6 +324,7 @@ func TestDoRequest_O2_SendsValidationKeyAndCookie(t *testing.T) {
 // TestRefreshSession_Movistar_SAPILoginSuccess verifies the existing Movistar
 // flow completes SAPILoginOAuth after refreshing tokens.
 func TestRefreshSession_Movistar_SAPILoginSuccess(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // comportamiento del perfil "browser"
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
