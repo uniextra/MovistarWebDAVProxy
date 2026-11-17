@@ -103,3 +103,23 @@ func TestHTTP1OnlySpec_AdvertisesOnlyHTTP11(t *testing.T) {
 		}
 	}
 }
+
+func TestClientHelloIDFromEnv_DefaultsByProfile(t *testing.T) {
+	t.Setenv("UTLS_CLIENT_HELLO", "")
+
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	if got := clientHelloIDFromEnv(); got != utls.HelloGolang {
+		t.Errorf("desktop default ClientHello = %v, want HelloGolang", got)
+	}
+
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+	if got := clientHelloIDFromEnv(); got != utls.HelloChrome_Auto {
+		t.Errorf("browser default ClientHello = %v, want HelloChrome_Auto", got)
+	}
+
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	t.Setenv("UTLS_CLIENT_HELLO", "chrome_auto")
+	if got := clientHelloIDFromEnv(); got != utls.HelloChrome_Auto {
+		t.Errorf("explicit UTLS_CLIENT_HELLO=chrome_auto = %v, want HelloChrome_Auto", got)
+	}
+}

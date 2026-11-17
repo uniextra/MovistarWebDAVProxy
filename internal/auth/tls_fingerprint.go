@@ -34,6 +34,8 @@ func clientHelloIDFromEnv() utls.ClientHelloID {
 		return utls.HelloAndroid_11_OkHttp
 	case "edge":
 		return utls.HelloEdge_Auto
+	case "chrome", "chrome_auto":
+		return utls.HelloChrome_Auto
 	case "chrome_120":
 		return utls.HelloChrome_120
 	case "golang":
@@ -41,6 +43,12 @@ func clientHelloIDFromEnv() utls.ClientHelloID {
 	case "randomized":
 		return utls.HelloRandomized
 	default:
+		if IsDesktopProfile() {
+			// En perfil desktop (HTTP/1.1 + User-Agent "omh windows client ..."), emitir
+			// la huella TLS de Chrome con ALPN reducido a http/1.1 provoca descartes 401
+			// vacíos de CloudFront en O2; HelloGolang con ALPN http/1.1 pasa limpio.
+			return utls.HelloGolang
+		}
 		return utls.HelloChrome_Auto
 	}
 }
