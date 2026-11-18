@@ -992,8 +992,19 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 	if until := freno.blockedUntil(); !until.IsZero() {
 		return nil, wafBlockedError(until, req.Method, req.URL.Path)
 	}
-	c.acquireSlot()
-	defer c.releaseSlot()
+	// El envío de contenido al servidor de subidas no ocupa el hueco de la API: dura
+	// todo lo que tarde en llegar el archivo (en flujo, lo que tarde el cliente en
+	// mandarlo), y retenerlo bloqueaba cualquier otra llamada a la API mientras
+	// tanto: el interbloqueo con restic -> rclone, que necesita respuesta a otras
+	// peticiones para seguir enviando. Las subidas tienen su propio límite (uploadSem)
+	// y su propio freno del cortafuegos; la app oficial también sigue con su latido y
+	// sus consultas a la API mientras sube.
+	if freno == &c.wafUpload {
+		c.paceRequest()
+	} else {
+		c.acquireSlot()
+		defer c.releaseSlot()
+	}
 	// Las peticiones que esperaban turno cuando saltó el bloqueo tampoco se envían.
 	if until := freno.blockedUntil(); !until.IsZero() {
 		return nil, wafBlockedError(until, req.Method, req.URL.Path)

@@ -2477,10 +2477,10 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 // cuerpo se recibe entero (RAM o spool) y la subida no depende del cliente.
 func streamUploadsEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("WEBDAV_STREAM_UPLOAD"))) {
-	case "1", "true", "yes", "on":
-		return true
+	case "0", "false", "no", "off":
+		return false
 	}
-	return false
+	return true
 }
 
 // tryAcquireUploadTurn intenta coger, sin esperar, el turno de subida a SAPI
