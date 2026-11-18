@@ -399,6 +399,26 @@ func (s *MetadataStore) GetFolderPath(folderID int64) (string, error) {
 	return "/" + strings.Join(segments, "/"), nil
 }
 
+// CaseInsensitiveNames indica si las búsquedas por nombre ignoran mayúsculas
+// (WEBDAV_CASE_INSENSITIVE=true). Por defecto no: O2 Cloud distingue mayúsculas
+// («A.txt» y «a.txt» son dos archivos), y responder a «a.txt» con «A.txt» hacía que
+// rclone diera por subido un archivo que no lo estaba o, en un cambio solo de
+// mayúsculas, borrara el origen creyendo que era el destino.
+func CaseInsensitiveNames() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WEBDAV_CASE_INSENSITIVE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func nameCollation() string {
+	if CaseInsensitiveNames() {
+		return "NOCASE"
+	}
+	return "BINARY"
+}
+
 // GetFolderByParentAndName retrieves a folder by parent ID and name (case-insensitive).
 // Includes Synology HyperBackup .hbk tolerance: if name has .hbk suffix, searches without it,
 // and if name has no .hbk suffix, searches with .hbk appended.
@@ -415,7 +435,7 @@ func (s *MetadataStore) GetFolderByParentAndName(parentID int64, name string) (*
 	query := `
 		SELECT id, name, parent_id, magic, offline, creation_date, modification_date
 		FROM folders
-		WHERE parent_id = ? AND name = ? COLLATE NOCASE
+		WHERE parent_id = ? AND name = ? COLLATE ` + nameCollation() + `
 		ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END
 		LIMIT 1
 	`
@@ -531,7 +551,7 @@ func (s *MetadataStore) GetMediaByFolderAndName(folderID int64, name string) (*s
 	query := `
 		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
 		FROM media
-		WHERE folder_id = ? AND name = ? COLLATE NOCASE
+		WHERE folder_id = ? AND name = ? COLLATE ` + nameCollation() + `
 		ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END, modification_date DESC, id DESC
 	`
 	// O2 distingue mayúsculas ("A.txt" y "a.txt" son archivos distintos): manda el

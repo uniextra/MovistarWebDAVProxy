@@ -361,30 +361,27 @@ func newCachedFolders(folders []sapi.FolderItem) *cachedFolders {
 }
 
 func (cf *cachedFolders) find(name string) (*sapi.FolderItem, bool) {
-	if item, ok := cf.byExact[name]; ok {
-		itemCopy := item
-		return &itemCopy, true
+	get := func(n string) (*sapi.FolderItem, bool) {
+		if item, ok := cf.byExact[n]; ok {
+			itemCopy := item
+			return &itemCopy, true
+		}
+		if caseInsensitiveNames() {
+			if item, ok := cf.byLower[strings.ToLower(n)]; ok {
+				itemCopy := item
+				return &itemCopy, true
+			}
+		}
+		return nil, false
 	}
-	lower := strings.ToLower(name)
-	if item, ok := cf.byLower[lower]; ok {
-		itemCopy := item
-		return &itemCopy, true
+	if item, ok := get(name); ok {
+		return item, true
 	}
 	// Tolerancia Synology HyperBackup .hbk
-	if strings.HasSuffix(lower, ".hbk") && len(lower) > 4 {
-		base := lower[:len(lower)-4]
-		if item, ok := cf.byLower[base]; ok {
-			itemCopy := item
-			return &itemCopy, true
-		}
-	} else {
-		hbk := lower + ".hbk"
-		if item, ok := cf.byLower[hbk]; ok {
-			itemCopy := item
-			return &itemCopy, true
-		}
+	if strings.HasSuffix(strings.ToLower(name), ".hbk") && len(name) > 4 {
+		return get(name[:len(name)-4])
 	}
-	return nil, false
+	return get(name + ".hbk")
 }
 
 type cachedMedia struct {
@@ -438,6 +435,9 @@ func (cm *cachedMedia) find(name string) (*sapi.MediaItem, bool) {
 	if item, ok := cm.byExact[name]; ok {
 		itemCopy := item
 		return &itemCopy, true
+	}
+	if !caseInsensitiveNames() {
+		return nil, false
 	}
 	if item, ok := cm.byLower[strings.ToLower(name)]; ok {
 		itemCopy := item
@@ -582,17 +582,29 @@ func pickByName(n int, nameAt func(int) string, want string, hbk bool) int {
 			return i
 		}
 	}
+	fold := caseInsensitiveNames()
+	same := func(a, b string) bool {
+		if fold {
+			return strings.EqualFold(a, b)
+		}
+		return a == b
+	}
 	for i := 0; i < n; i++ {
 		got := nameAt(i)
-		if strings.EqualFold(got, want) {
+		if same(got, want) {
 			return i
 		}
-		if hbk && strings.HasSuffix(strings.ToLower(want), ".hbk") && strings.EqualFold(got, want[:len(want)-4]) {
+		if hbk && strings.HasSuffix(strings.ToLower(want), ".hbk") && same(got, want[:len(want)-4]) {
 			return i
 		}
 	}
 	return -1
 }
+
+// caseInsensitiveNames: WEBDAV_CASE_INSENSITIVE=true vuelve al comportamiento
+// anterior (un nombre con otras mayúsculas encuentra el archivo). Por defecto los
+// nombres son exactos, como en O2.
+func caseInsensitiveNames() bool { return cache.CaseInsensitiveNames() }
 
 // isSameEntryName: el mismo elemento de O2 (nombre idéntico, mayúsculas incluidas).
 func isSameEntryName(a, b string) bool { return a == b }
@@ -1000,9 +1012,11 @@ func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, 
 			return &items[i], true, nil
 		}
 	}
-	for i := range items {
-		if strings.EqualFold(items[i].Name, name) {
-			return &items[i], true, nil
+	if caseInsensitiveNames() {
+		for i := range items {
+			if strings.EqualFold(items[i].Name, name) {
+				return &items[i], true, nil
+			}
 		}
 	}
 	return nil, false, nil
@@ -1163,7 +1177,7 @@ func (mfs *MovistarFS) localMetadataReady() bool {
 // llamar a la API (ver OpenFile: la comprobación previa a cada subida).
 func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	folderInfo, mediaInfo, isFolder, err = mfs.resolvePathExact(rawPath, allowSAPI)
-	if !errors.Is(err, os.ErrNotExist) {
+	if !errors.Is(err, os.ErrNotExist) || !caseInsensitiveNames() {
 		return
 	}
 	// Nada con ese nombre exacto ni en la base ni en O2: un archivo o una carpeta
@@ -1595,7 +1609,7 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 
 	// Comprobar memoria primero (con otras mayúsculas, solo si es el mismo archivo resuelto)
 	mfs.cacheMu.RLock()
-	if _, mem, ok := foldLookup(mfs.uploadCache, lowerPath); ok && (mem.Name == path.Base(cleanPath) || mediaInfo == nil || mediaInfo.ID == mem.ID) {
+	if _, mem, ok := foldLookup(mfs.uploadCache, lowerPath); ok && (mem.Name == path.Base(cleanPath) || (caseInsensitiveNames() && (mediaInfo == nil || mediaInfo.ID == mem.ID))) {
 		mfs.cacheMu.RUnlock()
 		if mem.Size == 0 || len(mem.Content) > 0 {
 			return NewWebDAVMemoryReader(cleanPath, mem), nil
@@ -2320,7 +2334,7 @@ func (mfs *MovistarFS) Stat(ctx context.Context, name string) (os.FileInfo, erro
 	}
 
 	mfs.cacheMu.RLock()
-	if _, mem, ok := foldLookup(mfs.uploadCache, cacheKey(cleanPath)); ok && (mem.Name == path.Base(cleanPath) || mediaInfo == nil || mediaInfo.ID == mem.ID) {
+	if _, mem, ok := foldLookup(mfs.uploadCache, cacheKey(cleanPath)); ok && (mem.Name == path.Base(cleanPath) || (caseInsensitiveNames() && (mediaInfo == nil || mediaInfo.ID == mem.ID))) {
 		mfs.cacheMu.RUnlock()
 		return &VirtualFileInfo{
 			name:    mem.Name,

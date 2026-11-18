@@ -175,9 +175,29 @@ func TestMayusculas_RenombrarSoloMayusculasNoBorraElArchivo(t *testing.T) {
 	}
 }
 
-// Un cliente que pide el archivo con otras mayúsculas (Windows) lo sigue
-// encontrando mientras no haya otro con ese nombre exacto.
-func TestMayusculas_OtrasMayusculasSinAmbiguedadSigueFuncionando(t *testing.T) {
+// Por defecto los nombres son exactos, como en O2: pedir «foto.jpg» cuando solo
+// existe «Foto.JPG» es «no existe». Si el proxy respondiera con «Foto.JPG», rclone
+// daría por subido un archivo que no lo está, o en un cambio solo de mayúsculas
+// (moveto b.txt -> B.txt) creería que origen y destino son el mismo y BORRARÍA el
+// origen (visto en la prueba real del 18/11/2026).
+func TestMayusculas_PorDefectoNombresExactos(t *testing.T) {
+	srv, _ := nuevaNubeConMayusculas(t)
+	put(t, srv, "/b.txt", "tres")
+	for _, m := range []string{"PROPFIND", "GET"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(m, "/B.txt", nil)
+		req.Header.Set("Depth", "0")
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s /B.txt = %d; con solo 'b.txt' debe ser 404", m, rec.Code)
+		}
+	}
+}
+
+// Con WEBDAV_CASE_INSENSITIVE=true (Explorador de Windows), un nombre con otras
+// mayúsculas sigue encontrando el archivo si no hay otro con ese nombre exacto.
+func TestMayusculas_ModoOpcionalSinDistinguir(t *testing.T) {
+	t.Setenv("WEBDAV_CASE_INSENSITIVE", "true")
 	srv, _ := nuevaNubeConMayusculas(t)
 	put(t, srv, "/Foto.JPG", "jpg")
 	if got := get(t, srv, "/foto.jpg"); got != "jpg" {
