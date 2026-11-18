@@ -461,3 +461,23 @@ func TestOfficialUpload_RefreshAfterUploadIsOptional(t *testing.T) {
 		}
 	}
 }
+
+// Sobrescritura como la app (captura del 18/11/2026): id, size, modificationdate
+// nuevos y la creationdate ORIGINAL del archivo.
+func TestOfficialUpload_ReplacingSendsOriginalCreationDate(t *testing.T) {
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	existing := MediaItem{ID: "1598146690", Name: "sobrescritura.txt", CreationDate: "20261118T193902Z"}
+	if _, err := c.UploadFileReplacing(existing, "sobrescritura.txt", bytes.NewReader([]byte("version 2")), 9, 37224270, "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	meta := f.metaBodies[0]
+	for _, k := range []string{"contenttype", "creationdate", "folderid", "id", "modificationdate", "name", "size"} {
+		if _, ok := meta[k]; !ok {
+			t.Errorf("falta %q: %v", k, meta)
+		}
+	}
+	if meta["creationdate"] != "20261118T193902Z" || fmt.Sprint(meta["id"]) != "1598146690" {
+		t.Errorf("save-metadata = %v", meta)
+	}
+}

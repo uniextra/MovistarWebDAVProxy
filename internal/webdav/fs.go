@@ -1557,6 +1557,9 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}
 
 		fw := NewWebDAVFileWriter(mfs, cleanPath, fileName, parentFolder.ID, existingID)
+		if existingID != "" {
+			fw.existingItem = mediaInfo
+		}
 		fw.modTime = ocMtimeFromContext(ctx)
 		fw.guard, _ = ctx.Value(uploadGuardKey{}).(*uploadGuard)
 		return fw, nil
@@ -2381,6 +2384,7 @@ type WebDAVFileWriter struct {
 	name           string
 	parentFolderID int64
 	existingID     string
+	existingItem   *sapi.MediaItem // el archivo que se sobrescribe (para reenviar su fecha de creación)
 	buf            *bytes.Buffer
 	tmpFile        *os.File
 	size           int64
@@ -2422,6 +2426,15 @@ func (w *WebDAVFileWriter) releasePathLock() {
 		w.pathUnlock = nil
 		unlock()
 	}
+}
+
+// upload sube el contenido: sobrescribe el archivo existente (con su fecha de
+// creación, como la app) o crea uno nuevo.
+func (w *WebDAVFileWriter) upload(body io.Reader, size int64, mimeType string) (*sapi.MediaItem, error) {
+	if id := w.sapiExistingID(); id != "" && w.existingItem != nil && w.existingItem.ID == id {
+		return w.mfs.client.UploadFileReplacing(*w.existingItem, w.name, body, size, w.parentFolderID, mimeType, w.modTime)
+	}
+	return w.mfs.client.UploadFileToFolder(w.name, body, size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
 }
 
 // sapiExistingID devuelve el ID real de SAPI que se puede sobrescribir. Los IDs
@@ -2500,7 +2513,7 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 			<-uploadSem
 		}()
 		body, tr := trackUpload(w.path, expectedSize, pr)
-		media, err := w.mfs.client.UploadFileToFolder(w.name, body, expectedSize, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		media, err := w.upload(body, expectedSize, mimeType)
 		tr.Done()
 		_ = pr.Close()
 		w.streamDone <- streamUploadResult{media: media, err: err}
@@ -2790,7 +2803,7 @@ func (w *WebDAVFileWriter) Close() error {
 			if w.pending != nil {
 				w.mfs.client.DiscardInterruptedUpload(w.pending, w.name)
 			}
-			media, err = w.mfs.client.UploadFileToFolder(w.name, body, w.size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+			media, err = w.upload(body, w.size, mimeType)
 		}
 		w.pending = nil
 		tr.Done()

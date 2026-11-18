@@ -103,10 +103,28 @@ type officialUpload struct {
 	size       int64
 	folderID   int64
 	mime       string
-	existing   string // archivo que se sobrescribe (su ID se conserva)
-	pendingID  string // ID de un intento anterior cuyo contenido quedó a medias
-	pendingNew bool   // pendingID lo creó ese intento (no es un archivo que ya existía)
+	existing   string    // archivo que se sobrescribe (su ID se conserva)
+	created    time.Time // fecha de creación del archivo que se sobrescribe (la app la reenvía)
+	pendingID  string    // ID de un intento anterior cuyo contenido quedó a medias
+	pendingNew bool      // pendingID lo creó ese intento (no es un archivo que ya existía)
 	modTime    time.Time
+}
+
+// UploadFileReplacing sobrescribe el archivo existing (mismo ID), reenviando su
+// fecha de creación original como hace la app. Fuera del perfil desktop equivale a
+// UploadFileToFolder con existing.ID.
+func (c *Client) UploadFileReplacing(existing MediaItem, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, modTime time.Time) (*MediaItem, error) {
+	if !c.officialUploadEnabled() {
+		return c.UploadFileToFolder(fileName, reader, size, folderID, mimeType, existing.ID, modTime)
+	}
+	var created time.Time
+	if existing.CreationDate != "" {
+		created = existing.CreationDate.Time()
+	}
+	return c.uploadOfficial(officialUpload{
+		name: fileName, reader: reader, size: size, folderID: folderID,
+		mime: mimeType, existing: existing.ID, created: created, modTime: modTime,
+	})
 }
 
 // UploadFileContinue continúa una subida cuyo contenido quedó a medias sobre el ID
@@ -210,7 +228,12 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 		"size":             p.size,
 	}
 	if p.existing != "" {
+		// Como la app (captura del 18/11/2026): id, tamaño y fecha de modificación
+		// nuevos, y la fecha de creación original del archivo.
 		data["id"] = p.existing
+		if !p.created.IsZero() {
+			data["creationdate"] = officialDate(p.created)
+		}
 		logger.Log("[SAPI] 📝 Sobrescritura in-place para ID existente: %s (%s)", p.existing, p.name)
 	} else {
 		data["creationdate"] = officialDate(now)
