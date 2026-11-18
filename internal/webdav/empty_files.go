@@ -2,6 +2,8 @@ package webdav
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"path"
@@ -68,6 +70,18 @@ func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
 // igualmente y podía resucitar .cinfo viejos de Hyper Backup sobre los nuevos
 // («cloud-seq-id [1], local-seq-id [24]»).
 const emptyFilesDirtyKey = "empty_files_manifest_dirty"
+
+// emptyFilesCloudKey guarda «ID:sha256» del manifiesto que hay en la nube (el último
+// subido o el cargado al arrancar). Si el que se va a subir es idéntico, no se sube:
+// cada subida, renombrado o borrado programa un guardado, pero solo cambia el
+// manifiesto cuando cambian los archivos vacíos emulados. La app oficial no sube nada
+// que no haya cambiado.
+const emptyFilesCloudKey = "empty_files_manifest_cloud"
+
+func manifestFingerprint(id string, data []byte) string {
+	sum := sha256.Sum256(data)
+	return id + ":" + hex.EncodeToString(sum[:])
+}
 
 func (efm *EmptyFileManager) ScheduleSave() {
 	if efm == nil || efm.mfs == nil {
@@ -176,7 +190,20 @@ func (efm *EmptyFileManager) SaveManifest() {
 		existingID = existingMedia.ID
 	}
 
-	// 4. Upload manifest to SAPI
+	// 4. Si en la nube ya está este mismo manifiesto, no hay nada que subir.
+	if existingID != "" {
+		if prev, _ := ms.GetSyncState(emptyFilesCloudKey); prev == manifestFingerprint(existingID, data) {
+			efm.mu.Lock()
+			clean := !efm.pending
+			efm.mu.Unlock()
+			if clean {
+				_ = ms.SetSyncState(emptyFilesDirtyKey, "0")
+			}
+			return
+		}
+	}
+
+	// 5. Upload manifest to SAPI
 	now := time.Now()
 	uploaded, err := efm.mfs.client.UploadFileToFolder(
 		ManifestFileName,
@@ -194,6 +221,7 @@ func (efm *EmptyFileManager) SaveManifest() {
 	}
 	if uploaded != nil {
 		_ = ms.UpsertMedia(*uploaded)
+		_ = ms.SetSyncState(emptyFilesCloudKey, manifestFingerprint(uploaded.ID, data))
 	}
 	efm.mu.Lock()
 	clean := !efm.pending
@@ -259,6 +287,7 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 		logger.Log("[EmptyFiles] ⚠️ Manifiesto JSON inválido: %v", err)
 		return
 	}
+	_ = ms.SetSyncState(emptyFilesCloudKey, manifestFingerprint(media.ID, body))
 
 	loadedCount := 0
 	skippedEphemeral := false

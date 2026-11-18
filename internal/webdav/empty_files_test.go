@@ -644,3 +644,96 @@ func TestEmptyFiles_BootstrapKeepsUnsyncedLocalState(t *testing.T) {
 		t.Fatal("se perdió el .cinfo local")
 	}
 }
+
+// El manifiesto solo se sube si cambia (la app no sube lo que no ha cambiado): cada
+// subida, renombrado o borrado programa un guardado, pero si los archivos vacíos
+// emulados siguen igual, el que hay en la nube vale. Al cambiar, se sube.
+func TestEmptyFiles_ManifestNotReuploadedWhenUnchanged(t *testing.T) {
+	var uploads atomic.Int32
+	mockSAPI := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/sapi/upload") {
+			uploads.Add(1)
+			_, _ = w.Write([]byte(`{"success":"ok","id":"manifest-1","status":"U","data":{"id":"manifest-1"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer mockSAPI.Close()
+	client, err := sapi.NewClient(config.AccountConfig{Provider: "movistar", AccessToken: "a", RefreshToken: "r", ValidationKey: "vk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetBaseURLs(mockSAPI.URL+"/sapi", mockSAPI.URL)
+	ms, err := cache.NewMetadataStore(filepath.Join(t.TempDir(), "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+	_ = ms.SetInitialSync("cursor-1")
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 100, Name: "/", Magic: true})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 150, Name: ProxyInternalDir, ParentID: 100})
+	_ = ms.UpsertMedia(sapi.MediaItem{ID: "manifest-1", Name: ManifestFileName, FolderID: 150})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 302, Name: "@writer", ParentID: 100})
+	_ = ms.UpsertVirtualEmptyFile(302, "v1.1.-1.0.0.none.none.cinfo", "20261118T090000Z")
+
+	srv := NewServerWithAuth(client, config.AuthConfig{AuthDisabled: true})
+	srv.SetMetadataStore(ms)
+	efm := srv.FS().emptyFileManager
+
+	efm.SaveManifest()
+	first := uploads.Load()
+	if first == 0 {
+		t.Fatal("el primer guardado debía subir el manifiesto")
+	}
+	efm.SaveManifest()
+	efm.SaveManifest()
+	if n := uploads.Load(); n != first {
+		t.Fatalf("manifiesto sin cambios resubido: %d peticiones de subida (antes %d)", n, first)
+	}
+	if d, _ := ms.GetSyncState(emptyFilesDirtyKey); d == "1" {
+		t.Error("sin cambios pendientes, la marca de sucio debía quedar limpia")
+	}
+	_ = ms.UpsertVirtualEmptyFile(302, "v1.2.-1.0.0.none.none.cinfo", "20261118T100000Z")
+	efm.SaveManifest()
+	if n := uploads.Load(); n == first {
+		t.Fatal("el manifiesto cambió y no se subió")
+	}
+}
+
+// La relectura tras subir (como la app) deja la URL firmada en la base de metadatos
+// y en la caché de subidas recientes, para que la primera descarga la use.
+func TestMediaRefresh_StoresSignedURL(t *testing.T) {
+	srv, ms, _, cleanup := setupTestWebDAVServerWithDB(t)
+	defer cleanup()
+	fs := srv.FS()
+	_ = ms.UpsertMedia(sapi.MediaItem{ID: "777", Name: "a.bin", FolderID: 200, Size: 3, ETag: "e1"})
+	fs.cacheMu.Lock()
+	fs.uploadCache[cacheKey("/Backups/a.bin")] = &MemoryFile{ID: "777", Name: "a.bin", FolderID: 200, Size: 3}
+	fs.cacheMu.Unlock()
+
+	fs.applyMediaRefresh(sapi.MediaRefresh{ID: "777", URL: "https://cloud/firmada", ETag: "e2", UploadETag: "e1"})
+
+	if m, _ := ms.GetMediaByID("777"); m == nil || m.URL != "https://cloud/firmada" || m.ETag != "e2" {
+		t.Fatalf("base de metadatos = %+v", m)
+	}
+	fs.cacheMu.RLock()
+	mem := fs.uploadCache[cacheKey("/Backups/a.bin")]
+	fs.cacheMu.RUnlock()
+	if mem.URL != "https://cloud/firmada" || !mem.URLConfirmed {
+		t.Fatalf("caché de subidas = %+v", mem)
+	}
+
+	// una relectura de una subida anterior no pisa un archivo que ya cambió
+	_ = ms.UpsertMedia(sapi.MediaItem{ID: "777", Name: "a.bin", FolderID: 200, Size: 5, ETag: "e3", URL: "https://cloud/nueva"})
+	fs.applyMediaRefresh(sapi.MediaRefresh{ID: "777", URL: "https://cloud/vieja", UploadETag: "e1"})
+	if m, _ := ms.GetMediaByID("777"); m == nil || m.URL != "https://cloud/nueva" {
+		t.Fatalf("se pisó un archivo que había cambiado: %+v", m)
+	}
+	fs.cacheMu.RLock()
+	mem = fs.uploadCache[cacheKey("/Backups/a.bin")]
+	fs.cacheMu.RUnlock()
+	if mem.URL == "https://cloud/vieja" {
+		t.Fatal("la caché de subidas tomó la URL de una relectura antigua")
+	}
+}
