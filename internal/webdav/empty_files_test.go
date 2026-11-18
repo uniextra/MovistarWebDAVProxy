@@ -596,3 +596,51 @@ func TestAutoHealHyperBackupWriter_WithoutSeqMapping(t *testing.T) {
 		t.Fatalf("expected v1.1.-1.0.0.none.none.cinfo in healed files, got %+v", healed)
 	}
 }
+
+// Si hay cambios locales sin subir (marca persistente en SQLite), al arrancar no se
+// carga el manifiesto de la nube, más antiguo: resucitaría .cinfo viejos de Hyper
+// Backup sobre los nuevos (cloud-seq-id [1] frente a local-seq-id [24]).
+func TestEmptyFiles_BootstrapKeepsUnsyncedLocalState(t *testing.T) {
+	manifestJSON := `{"version":1,"files":[{"path":"/Backups/Control/@writer/v1.1.-1.0.0.none.none.cinfo","mod_time":"20261116T200000Z"}]}`
+	var mockSAPI *httptest.Server
+	mockSAPI = newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/download/manifest"):
+			_, _ = w.Write([]byte(manifestJSON))
+		default:
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	}))
+	defer mockSAPI.Close()
+	client, err := sapi.NewClient(config.AccountConfig{Provider: "movistar", AccessToken: "a", RefreshToken: "r", ValidationKey: "vk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetBaseURLs(mockSAPI.URL+"/sapi", mockSAPI.URL)
+	ms, err := cache.NewMetadataStore(filepath.Join(t.TempDir(), "dirty.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+	_ = ms.SetInitialSync("cursor-1")
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 100, Name: "/", Magic: true})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 150, Name: ProxyInternalDir, ParentID: 100})
+	_ = ms.UpsertMedia(sapi.MediaItem{ID: "manifest-1", Name: ManifestFileName, FolderID: 150, Size: int64(len(manifestJSON)), URL: mockSAPI.URL + "/download/manifest"})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 200, Name: "Backups", ParentID: 100})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 300, Name: "Control", ParentID: 200})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 302, Name: "@writer", ParentID: 300})
+	_ = ms.UpsertVirtualEmptyFile(302, "v1.24.-1.0.0.none.none.cinfo", "20261118T090000Z")
+	_ = ms.SetSyncState(emptyFilesDirtyKey, "1") // el manifiesto con el .cinfo 24 nunca llegó a subirse
+
+	srv := NewServerWithAuth(client, config.AuthConfig{AuthDisabled: true})
+	srv.SetMetadataStore(ms)
+	srv.FS().BootstrapEmptyFiles()
+
+	if vf, _ := ms.GetVirtualEmptyFile(302, "v1.1.-1.0.0.none.none.cinfo"); vf != nil {
+		t.Fatal("se resucitó el .cinfo viejo del manifiesto sobre el estado local más nuevo")
+	}
+	if vf, _ := ms.GetVirtualEmptyFile(302, "v1.24.-1.0.0.none.none.cinfo"); vf == nil {
+		t.Fatal("se perdió el .cinfo local")
+	}
+}

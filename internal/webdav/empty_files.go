@@ -61,9 +61,20 @@ func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
 }
 
 // ScheduleSave triggers a debounced save of the virtual empty files manifest to SAPI.
+// emptyFilesDirtyKey marca en SQLite que hay cambios en los archivos vacíos emulados
+// que aún no están en el manifiesto de la nube. Sobrevive a reinicios y
+// actualizaciones del contenedor: al arrancar, si está puesta, se sube el estado
+// local en lugar de cargar el manifiesto (que es más antiguo). Antes se cargaba
+// igualmente y podía resucitar .cinfo viejos de Hyper Backup sobre los nuevos
+// («cloud-seq-id [1], local-seq-id [24]»).
+const emptyFilesDirtyKey = "empty_files_manifest_dirty"
+
 func (efm *EmptyFileManager) ScheduleSave() {
 	if efm == nil || efm.mfs == nil {
 		return
+	}
+	if ms := efm.mfs.MetadataStore(); ms != nil {
+		_ = ms.SetSyncState(emptyFilesDirtyKey, "1")
 	}
 	efm.mu.Lock()
 	defer efm.mu.Unlock()
@@ -184,6 +195,12 @@ func (efm *EmptyFileManager) SaveManifest() {
 	if uploaded != nil {
 		_ = ms.UpsertMedia(*uploaded)
 	}
+	efm.mu.Lock()
+	clean := !efm.pending
+	efm.mu.Unlock()
+	if clean {
+		_ = ms.SetSyncState(emptyFilesDirtyKey, "0")
+	}
 	logger.Log("[EmptyFiles] ☁️ Manifiesto persistido en la nube (%d archivos vacíos emulados)", len(manifest.Files))
 }
 
@@ -201,6 +218,11 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 	}
 	efm.purgeLocalEphemeralFiles()
 	if efm.mfs.client.IsSessionExpired() {
+		return
+	}
+	if dirty, _ := ms.GetSyncState(emptyFilesDirtyKey); dirty == "1" {
+		logger.Log("[EmptyFiles] ⬆️ Hay cambios locales de archivos vacíos sin subir: se sube el estado local en lugar de cargar el manifiesto de la nube (más antiguo).")
+		efm.ScheduleSave()
 		return
 	}
 
