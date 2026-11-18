@@ -12,7 +12,38 @@ import (
 	"golang.org/x/net/webdav"
 
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/sapi"
 )
+
+var (
+	copyPollInterval = 10 * time.Second
+	copyWaitBase     = 2 * time.Minute
+	copyWaitRate     = int64(10 << 20) // bytes por segundo que se suponen a la copia en O2
+	copyWaitMax      = 10 * time.Minute
+)
+
+// waitForCloudCopy busca en la carpeta destino un archivo con ese nombre y tamaño
+// hasta que pasa el tiempo razonable para la copia. Devuelve su ID o "".
+func waitForCloudCopy(mfs *MovistarFS, folderID int64, name string, size int64) string {
+	wait := copyWaitBase + time.Duration(size/copyWaitRate)*time.Second
+	if wait > copyWaitMax {
+		wait = copyWaitMax
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if items, err := mfs.client.ListAllMediaInFolder(folderID); err == nil {
+			for _, it := range items {
+				if it.Name == name && (it.Size == size || size == 0) {
+					return it.ID
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return ""
+		}
+		time.Sleep(copyPollInterval)
+	}
+}
 
 // tryServerCopy atiende un COPY de un archivo con la copia de la web
 // (/media/file?action=copy), sin descargarlo ni volver a subirlo. Devuelve false
@@ -59,6 +90,21 @@ func (s *Server) tryServerCopy(w http.ResponseWriter, r *http.Request) bool {
 
 	name := path.Base(dst)
 	newID, err := mfs.client.CopyFile(media.ID, parent.ID, name)
+	if errors.Is(err, sapi.ErrCopyOutcomeUnknown) {
+		// La copia pudo hacerse aunque no llegara la respuesta: descargar y volver a
+		// subir dejaría dos archivos con el mismo nombre (visto el 18/11/2026 con 3 GB).
+		// Se espera a que aparezca en la carpeta; si no aparece, 503 para que el
+		// cliente reintente (y entonces ya encontrará el destino si llegó a crearse).
+		logger.Log("[WebDAV] ⏳ Copia en la nube de '%s' sin respuesta (%v); esperando a que aparezca en el destino...", src, err)
+		if found := waitForCloudCopy(mfs, parent.ID, name, media.Size); found != "" {
+			newID, err = found, nil
+		} else {
+			logger.Log("[WebDAV] ⏳ La copia de '%s' no apareció a tiempo; se pide al cliente que reintente.", src)
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "Cloud copy still in progress; retry later", http.StatusServiceUnavailable)
+			return true
+		}
+	}
 	if err != nil {
 		logger.Log("[WebDAV] ↪ Copia en la nube de '%s' rechazada (%v); se copia descargando y subiendo.", src, err)
 		return false

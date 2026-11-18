@@ -64,6 +64,11 @@ type uploadGuard struct {
 	expected int64 // Content-Length anunciado (-1 si no se sabe)
 	broken   atomic.Bool
 	tooLarge atomic.Bool
+	// retryLater: el cuerpo llegó entero pero O2 no aceptó la subida (sesión,
+	// validación MED-1017, corte de red, cortafuegos…). x/net/webdav lo convierte en
+	// 405, que Hyper Backup muestra como «No permission»; se responde 503 +
+	// Retry-After para que el cliente lo reintente (issues #60 y MED-1017).
+	retryLater atomic.Bool
 }
 
 type guardedBody struct {
@@ -2634,6 +2639,9 @@ func (w *WebDAVFileWriter) Close() error {
 				return ErrUploadTooLarge
 			}
 			logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
+			if w.guard != nil {
+				w.guard.retryLater.Store(true)
+			}
 			return err
 		}
 	}

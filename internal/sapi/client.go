@@ -270,7 +270,11 @@ type Client struct {
 	rootFolderID     int64
 	sessionExpired   bool
 	refreshTransient bool
-	OnSessionExpired func(err error)
+	// Fallos de login/oauth en el perfil desktop (ver desktopLoginFailed).
+	loginFailures     int
+	loginFailingSince time.Time
+	loginRetryAt      time.Time
+	OnSessionExpired  func(err error)
 
 	// web, si no es nil, sustituye la autenticación del cliente de escritorio por
 	// la sesión de la web (ver EnableWebSession).
@@ -679,6 +683,21 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		return false, false
 	}
 
+	// Tras un login fallido no se vuelve a intentar hasta que pasa la espera: cada
+	// 401 de las peticiones en curso pediría otro login y O2 (CloudFront/WAF)
+	// bloquea las ráfagas de logins.
+	if !forceOAuth && auth.IsDesktopProfile() {
+		c.mu.RLock()
+		retryAt := c.loginRetryAt
+		c.mu.RUnlock()
+		if time.Now().Before(retryAt) {
+			c.mu.Lock()
+			c.refreshTransient = true
+			c.mu.Unlock()
+			return false, true
+		}
+	}
+
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
 	c.mu.Lock()
 	c.refreshTransient = false
@@ -692,6 +711,7 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		sapiBase = auth.GetSAPIBaseURL(cfg.Provider)
 	}
 
+	var step1 *auth.SAPILoginResult
 	if !forceOAuth && cfg.AccessToken != "" {
 		wasStaleLRD := cfg.LastRefreshDate > 1750000000000 && time.Since(time.UnixMilli(cfg.LastRefreshDate)) > 45*time.Minute
 		loginLRD := cfg.LastRefreshDate
@@ -700,6 +720,7 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		}
 		loginClient, primedJSess := c.newSAPILoginClient(sapiBase, cfg.Provider)
 		res := auth.SAPILoginOAuth(loginClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, loginLRD, cfg.ExpiresIn)
+		step1 = &res
 		// Un 200 con cookies NO garantiza que el access_token siga siendo válido:
 		// SAPI puede devolver cookies de sesión y un cuerpo de error. Exigimos además
 		// evidencia de una sesión OAuth real (credenciales rotadas o validationkey sin error),
@@ -709,6 +730,7 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		if res.StatusCode == http.StatusOK && res.Error == nil && hasSession {
 			c.mu.Lock()
 			c.sessionExpired = false
+			c.loginFailures, c.loginFailingSince, c.loginRetryAt = 0, time.Time{}, time.Time{}
 			if res.ValidationKey != "" {
 				c.cfg.ValidationKey = res.ValidationKey
 			}
@@ -757,6 +779,9 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 	// "invalid_request / Invalid Token". En el perfil "desktop" solo se hace si se
 	// pide expresamente con OAUTH_REFRESH_FALLBACK=true.
 	if !apisegRefreshAllowed() {
+		if c.desktopLoginFailed(step1) {
+			return false, true
+		}
 		c.mu.Lock()
 		wasExpired := c.sessionExpired
 		c.sessionExpired = true

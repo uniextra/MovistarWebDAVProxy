@@ -682,6 +682,9 @@ type putStatusInterceptor struct {
 func (p *putStatusInterceptor) WriteHeader(statusCode int) {
 	if ((p.exceededFlag != nil && p.exceededFlag.Load()) || (p.guard != nil && p.guard.tooLarge.Load())) && statusCode >= 400 {
 		statusCode = http.StatusRequestEntityTooLarge
+	} else if p.guard != nil && p.guard.retryLater.Load() && statusCode == http.StatusMethodNotAllowed {
+		p.ResponseWriter.Header().Set("Retry-After", "30")
+		statusCode = http.StatusServiceUnavailable
 	}
 	p.wroteHeader = true
 	p.ResponseWriter.WriteHeader(statusCode)

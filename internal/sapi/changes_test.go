@@ -2,6 +2,7 @@ package sapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -157,8 +158,9 @@ func TestGetProfileChanges_Errors(t *testing.T) {
 		})
 		client.cfg.RefreshToken = ""
 		_, err := client.GetProfileChanges("0")
-		if err == nil || !strings.Contains(err.Error(), "401") {
-			t.Errorf("expected 401 error, got %v", err)
+		// Perfil desktop: un login fallido es transitorio (se reintentará más tarde).
+		if err == nil || (!strings.Contains(err.Error(), "401") && !errors.Is(err, ErrSessionRefreshTransient)) {
+			t.Errorf("expected 401 or transient refresh error, got %v", err)
 		}
 	})
 
