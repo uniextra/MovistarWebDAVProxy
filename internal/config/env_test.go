@@ -250,7 +250,16 @@ func TestTokensEncryptionKey_AESGCM(t *testing.T) {
 	}
 }
 
+func TestGetSyncInterval_DesktopDefaultIsOfficialCadence(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	t.Setenv("SYNC_INTERVAL_SEC", "")
+	if got := GetSyncInterval(); got != 300*time.Second {
+		t.Errorf("perfil desktop: por defecto %v, la app oficial pide cambios cada 5 min", got)
+	}
+}
+
 func TestGetSyncInterval(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	t.Setenv("SYNC_INTERVAL_SEC", "")
 	if got := GetSyncInterval(); got != 60*time.Second {
 		t.Errorf("expected default 60s, got %v", got)

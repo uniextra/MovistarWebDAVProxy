@@ -82,7 +82,8 @@ func TransferLimits(webMode bool) (downloads, uploads int) {
 }
 
 // GetSyncInterval returns the metadata delta sync interval configured via SYNC_INTERVAL_SEC.
-// Default: 60s, minimum: 15s.
+// Default: 300s in the desktop profile (the official Windows client asks for
+// profile/changes every 5 minutes), 60s otherwise; minimum: 15s.
 func GetSyncInterval() time.Duration {
 	if env := strings.TrimSpace(os.Getenv("SYNC_INTERVAL_SEC")); env != "" {
 		if sec, err := strconv.Atoi(env); err == nil {
@@ -92,7 +93,21 @@ func GetSyncInterval() time.Duration {
 			return time.Duration(sec) * time.Second
 		}
 	}
+	if desktopProfileForDefaults() {
+		return 300 * time.Second
+	}
 	return 60 * time.Second
+}
+
+// desktopProfileForDefaults replica auth.IsDesktopProfile (config no puede importar auth).
+func desktopProfileForDefaults() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SAPI_CLIENT_PROFILE"))) {
+	case "browser", "web", "chrome":
+		return false
+	case "desktop", "windows":
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("WEB_SESSION")), "true")
 }
 
 func SanitizePhone(phone string) string {

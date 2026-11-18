@@ -32,8 +32,24 @@ func (c *Client) officialClient() bool {
 	return c.officialUploadEnabled()
 }
 
+// officialContentTypes: los content-type que la app manda (capturados) y que el
+// sistema puede resolver de otra forma (audio/mp4, image/heif…).
+var officialContentTypes = map[string]string{
+	".m4a":  "audio/m4a",
+	".heic": "image/heic",
+	".mp4":  "video/mp4",
+	".txt":  "text/plain",
+}
+
 func contentTypeForName(name string) string {
-	if ct := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); ct != "" {
+	ext := strings.ToLower(filepath.Ext(name))
+	if ct, ok := officialContentTypes[ext]; ok {
+		return ct
+	}
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		if i := strings.Index(ct, ";"); i > 0 {
+			ct = strings.TrimSpace(ct[:i])
+		}
 		return ct
 	}
 	return "application/octet-stream"

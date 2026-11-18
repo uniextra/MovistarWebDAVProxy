@@ -487,6 +487,10 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	if err != nil {
 		return rawURL
 	}
+	// La app oficial pide system/information sin validationkey.
+	if strings.HasSuffix(parsed.Path, "/system/information") && auth.IsDesktopProfile() {
+		return rawURL
+	}
 
 	q := parsed.Query()
 	q.Set("validationkey", vk)

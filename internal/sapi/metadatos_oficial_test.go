@@ -71,7 +71,7 @@ func TestOfficialRenameMoveFile_SingleCallLikeTheApp(t *testing.T) {
 	if c.Body["modificationdate"] != "20261118T071500Z" {
 		t.Errorf("renombrar no cambia la fecha del archivo: %v", c.Body["modificationdate"])
 	}
-	if ct, _ := c.Body["contenttype"].(string); !strings.HasPrefix(ct, "image/") && ct != "application/octet-stream" {
+	if ct, _ := c.Body["contenttype"].(string); ct != "image/heic" {
 		t.Errorf("contenttype = %v", c.Body["contenttype"])
 	}
 }

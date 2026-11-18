@@ -127,10 +127,8 @@ func (c *Client) DiscardInterruptedUpload(err error, name string) {
 
 func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 	kind := mediaKindForName(p.name)
-	contentType := p.mime
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
+	// El tipo como lo manda la app (sin "; charset=…" y con sus valores para m4a, heic…).
+	contentType := contentTypeForName(p.name)
 	now := time.Now()
 	modTime := now
 	if !p.modTime.IsZero() {
