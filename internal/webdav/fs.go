@@ -2277,6 +2277,7 @@ type WebDAVFileWriter struct {
 	size           int64
 	closed         bool
 	semAcquired    bool
+	spoolOnly      bool // el hueco de RAM estaba ocupado: este cuerpo va directo al spool en disco
 	failed         bool
 	modTime        time.Time // fecha pedida por el cliente (X-OC-Mtime); cero = ahora
 	guard          *uploadGuard
@@ -2324,8 +2325,54 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 	return w.existingID
 }
 
+// streamUploadsEnabled indica si se permite la subida en flujo directo
+// (WEBDAV_STREAM_UPLOAD=1). Desactivada por defecto: mientras el cuerpo sigue
+// llegando, la subida en flujo retiene el turno de subida y el hueco de SAPI
+// (sapiSem) esperando datos del cliente. Si el cliente necesita antes la
+// respuesta a otra petición (PROPFIND, MKCOL... que también usan sapiSem) para
+// seguir enviando —p. ej. restic -> rclone, que multiplexa en una conexión—,
+// queda un interbloqueo hasta que el cliente corta por timeout. Sin flujo, el
+// cuerpo se recibe entero (RAM o spool) y la subida no depende del cliente.
+func streamUploadsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WEBDAV_STREAM_UPLOAD"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// tryAcquireUploadTurn intenta coger, sin esperar, el turno de subida a SAPI
+// (uploadSem + globalTransferSem). Devuelve false si alguno está ocupado.
+func tryAcquireUploadTurn() bool {
+	select {
+	case uploadSem <- struct{}{}:
+	default:
+		return false
+	}
+	select {
+	case globalTransferSem <- struct{}{}:
+		return true
+	default:
+		<-uploadSem
+		return false
+	}
+}
+
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
+	if !streamUploadsEnabled() {
+		return
+	}
 	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 {
+		return
+	}
+	// Solo se sube en flujo si el turno de subida está libre AHORA. Si otro fichero
+	// lo tiene, esperar aquí bloquearía la lectura de este cuerpo (el io.Pipe no
+	// avanza) y, con clientes que multiplexan varias subidas en una conexión
+	// (restic -> rclone por HTTP/2), el que tiene el turno puede estar esperando
+	// precisamente datos que van detrás de este cuerpo: interbloqueo hasta que el
+	// cliente corta por timeout. En ese caso el cuerpo se guarda entero en el
+	// spool y se sube en Close() cuando llegue el turno.
+	if !tryAcquireUploadTurn() {
 		return
 	}
 	w.ensurePathLock()
@@ -2338,8 +2385,7 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
 
 	go func() {
-		uploadSem <- struct{}{}
-		globalTransferSem <- struct{}{}
+		// el turno ya se cogió en tryAcquireUploadTurn
 		defer func() {
 			<-globalTransferSem
 			<-uploadSem
@@ -2396,9 +2442,20 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	if w.failed {
 		return 0, ErrUploadTooLarge
 	}
-	if !w.semAcquired {
-		uploadBufferSem <- struct{}{}
-		w.semAcquired = true
+	if !w.semAcquired && !w.spoolOnly {
+		// No esperar nunca aquí: mientras se espera no se lee el cuerpo del cliente,
+		// y quien tiene el hueco puede depender de que este cuerpo avance (ver
+		// startStreamUpload). Si el hueco de RAM está ocupado, este cuerpo va al
+		// spool en disco. Los ficheros de control se emulan en memoria y son
+		// pequeños: siguen en RAM aunque no haya hueco.
+		select {
+		case uploadBufferSem <- struct{}{}:
+			w.semAcquired = true
+		default:
+			if !(w.parentFolderID < 0 || isControlOrLockFile(w.path)) {
+				w.spoolOnly = true
+			}
+		}
 	}
 
 	maxBytes := GetMaxUploadBytes()
@@ -2412,7 +2469,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	}
 
 	rambufMax := GetUploadRAMBufferMaxBytes()
-	if w.tmpFile == nil && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
+	if w.tmpFile == nil && (w.spoolOnly || w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
 		tmpDir := getUploadTempDir()
 		tmp, err := os.CreateTemp(tmpDir, "webdav_upload_*")
 		if err != nil {

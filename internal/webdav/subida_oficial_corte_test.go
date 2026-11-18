@@ -21,6 +21,7 @@ import (
 // (308 + Range) y mandando solo el resto, como la app oficial. Nada de crear un
 // segundo elemento ni de dejar uno a medias.
 func TestPut_StreamCutContinuesFromDiskOnSameID(t *testing.T) {
+	t.Setenv("WEBDAV_STREAM_UPLOAD", "1") // el flujo directo es opcional (interbloqueo)
 	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
 	t.Setenv("WEBDAV_BUFFER_MB", "1")
 	t.Setenv("WEBDAV_TMPDIR", t.TempDir())
