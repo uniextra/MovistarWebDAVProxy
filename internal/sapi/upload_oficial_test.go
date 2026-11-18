@@ -2,6 +2,7 @@ package sapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -479,5 +480,31 @@ func TestOfficialUpload_ReplacingSendsOriginalCreationDate(t *testing.T) {
 	}
 	if meta["creationdate"] != "20261118T193902Z" || fmt.Sprint(meta["id"]) != "1598146690" {
 		t.Errorf("save-metadata = %v", meta)
+	}
+}
+
+// Si el cliente se va (rclone corta la espera a los 5 min), la subida a O2 se
+// aborta enseguida y el elemento nuevo a medias se retira. En la prueba real el
+// proxy siguió subiendo 6 minutos para nadie y se cruzó con el DELETE del cliente.
+func TestOfficialUpload_ClientGoneAbortsAndDiscards(t *testing.T) {
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	officialUploadBackoff = func(int) time.Duration { return 5 * time.Second }
+	f.cutAfter[1] = 1000
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	start := time.Now()
+	_, err := c.UploadFileToFolderCtx(ctx, "abandonado.bin", bytes.NewReader(randomPayload(t, 100000)), 100000, 1, "", "", time.Time{})
+	if err == nil {
+		t.Fatal("debía fallar al irse el cliente")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("tardó %v en abortar; debía cortar la espera al irse el cliente", d)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.deleted) != 1 {
+		t.Fatalf("el elemento a medias debe retirarse: %v", f.deleted)
 	}
 }

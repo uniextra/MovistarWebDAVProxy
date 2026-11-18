@@ -1571,6 +1571,7 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}
 
 		fw := NewWebDAVFileWriter(mfs, cleanPath, fileName, parentFolder.ID, existingID)
+		fw.ctx = ctx
 		if existingID != "" {
 			fw.existingItem = mediaInfo
 		}
@@ -2399,6 +2400,7 @@ type WebDAVFileWriter struct {
 	parentFolderID int64
 	existingID     string
 	existingItem   *sapi.MediaItem // el archivo que se sobrescribe (para reenviar su fecha de creación)
+	ctx            context.Context // petición del cliente: si se va, la subida a O2 se aborta
 	buf            *bytes.Buffer
 	tmpFile        *os.File
 	size           int64
@@ -2445,10 +2447,14 @@ func (w *WebDAVFileWriter) releasePathLock() {
 // upload sube el contenido: sobrescribe el archivo existente (con su fecha de
 // creación, como la app) o crea uno nuevo.
 func (w *WebDAVFileWriter) upload(body io.Reader, size int64, mimeType string) (*sapi.MediaItem, error) {
-	if id := w.sapiExistingID(); id != "" && w.existingItem != nil && w.existingItem.ID == id {
-		return w.mfs.client.UploadFileReplacing(*w.existingItem, w.name, body, size, w.parentFolderID, mimeType, w.modTime)
+	ctx := w.ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return w.mfs.client.UploadFileToFolder(w.name, body, size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+	if id := w.sapiExistingID(); id != "" && w.existingItem != nil && w.existingItem.ID == id {
+		return w.mfs.client.UploadFileReplacingCtx(ctx, *w.existingItem, w.name, body, size, w.parentFolderID, mimeType, w.modTime)
+	}
+	return w.mfs.client.UploadFileToFolderCtx(ctx, w.name, body, size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
 }
 
 // sapiExistingID devuelve el ID real de SAPI que se puede sobrescribir. Los IDs
@@ -2812,7 +2818,11 @@ func (w *WebDAVFileWriter) Close() error {
 		mimeType := mime.TypeByExtension(filepath.Ext(w.name))
 		body, tr := trackUpload(w.path, w.size, reader)
 		if w.pending != nil && w.tmpFile != nil {
-			media, err = w.mfs.client.UploadFileContinue(w.pending.MediaID, w.pending.New, w.name, body, w.size, w.parentFolderID, mimeType, w.modTime)
+			ctx := w.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			media, err = w.mfs.client.UploadFileContinueCtx(ctx, w.pending.MediaID, w.pending.New, w.name, body, w.size, w.parentFolderID, mimeType, w.modTime)
 		} else {
 			if w.pending != nil {
 				w.mfs.client.DiscardInterruptedUpload(w.pending, w.name)

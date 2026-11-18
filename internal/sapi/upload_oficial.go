@@ -2,6 +2,7 @@ package sapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,11 +114,71 @@ type officialUpload struct {
 	size       int64
 	folderID   int64
 	mime       string
-	existing   string    // archivo que se sobrescribe (su ID se conserva)
-	created    time.Time // fecha de creación del archivo que se sobrescribe (la app la reenvía)
-	pendingID  string    // ID de un intento anterior cuyo contenido quedó a medias
-	pendingNew bool      // pendingID lo creó ese intento (no es un archivo que ya existía)
+	existing   string          // archivo que se sobrescribe (su ID se conserva)
+	created    time.Time       // fecha de creación del archivo que se sobrescribe (la app la reenvía)
+	pendingID  string          // ID de un intento anterior cuyo contenido quedó a medias
+	pendingNew bool            // pendingID lo creó ese intento (no es un archivo que ya existía)
+	ctx        context.Context // la petición del cliente: si se va, la subida se aborta
 	modTime    time.Time
+}
+
+func (p officialUpload) context() context.Context {
+	if p.ctx != nil {
+		return p.ctx
+	}
+	return context.Background()
+}
+
+// sleepCtx espera d o hasta que ctx se cancele (devuelve false en ese caso).
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// UploadFileToFolderCtx es UploadFileToFolder ligada a la petición del cliente: en
+// el perfil desktop, si el cliente se va (p. ej. rclone corta la espera), la subida
+// a O2 se aborta y el elemento nuevo a medias se retira, en lugar de seguir subiendo
+// para nadie y cruzarse con el reintento o el DELETE del cliente.
+func (c *Client) UploadFileToFolderCtx(ctx context.Context, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
+	if !c.officialUploadEnabled() {
+		return c.UploadFileToFolder(fileName, reader, size, folderID, mimeType, existingMediaID, modTime)
+	}
+	return c.uploadOfficial(officialUpload{
+		name: fileName, reader: reader, size: size, folderID: folderID,
+		mime: mimeType, existing: existingMediaID, modTime: modTime, ctx: ctx,
+	})
+}
+
+// UploadFileReplacingCtx es UploadFileReplacing ligada a la petición del cliente.
+func (c *Client) UploadFileReplacingCtx(ctx context.Context, existing MediaItem, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, modTime time.Time) (*MediaItem, error) {
+	if !c.officialUploadEnabled() {
+		return c.UploadFileToFolder(fileName, reader, size, folderID, mimeType, existing.ID, modTime)
+	}
+	var created time.Time
+	if existing.CreationDate != "" {
+		created = existing.CreationDate.Time()
+	}
+	return c.uploadOfficial(officialUpload{
+		name: fileName, reader: reader, size: size, folderID: folderID,
+		mime: mimeType, existing: existing.ID, created: created, modTime: modTime, ctx: ctx,
+	})
+}
+
+// UploadFileContinueCtx es UploadFileContinue ligada a la petición del cliente.
+func (c *Client) UploadFileContinueCtx(ctx context.Context, pendingID string, pendingIsNew bool, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, modTime time.Time) (*MediaItem, error) {
+	return c.uploadOfficial(officialUpload{
+		name: fileName, reader: reader, size: size, folderID: folderID,
+		mime: mimeType, pendingID: pendingID, pendingNew: pendingIsNew, modTime: modTime, ctx: ctx,
+	})
 }
 
 // UploadFileReplacing sobrescribe el archivo existing (mismo ID), reenviando su
@@ -252,7 +313,7 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 	u := fmt.Sprintf("%s/upload/%s?action=save-metadata&responsetime=true&lastupdate=true", c.baseURL, kind)
 
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequest("POST", u, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(p.context(), "POST", u, bytes.NewReader(body))
 		if err != nil {
 			return "", err
 		}
@@ -326,10 +387,10 @@ func (c *Client) officialSendContent(kind, id string, p officialUpload, contentT
 	for attempt := 0; attempt < officialUploadAttempts; attempt++ {
 		offset := int64(0)
 		if attempt > 0 || p.pendingID != "" {
-			if attempt > 0 {
-				time.Sleep(officialUploadBackoff(attempt - 1))
+			if attempt > 0 && !sleepCtx(p.context(), officialUploadBackoff(attempt-1)) {
+				return nil, &UploadInterruptedError{MediaID: id, Err: fmt.Errorf("el cliente abandonó la subida: %w", p.context().Err())}
 			}
-			got, done, err := c.officialQueryOffset(kind, id, p.size)
+			got, done, err := c.officialQueryOffset(p.context(), kind, id, p.size)
 			switch {
 			case err != nil:
 				logger.Log("[SAPI] ⚠️ No se pudo consultar cuánto tiene O2 de '%s' (ID %s): %v", p.name, id, err)
@@ -357,6 +418,11 @@ func (c *Client) officialSendContent(kind, id string, p officialUpload, contentT
 			return res, nil
 		}
 		lastErr = err
+		if p.context().Err() != nil {
+			// El cliente se fue: no se sigue subiendo para nadie.
+			logger.Log("[SAPI] ✋ El cliente abandonó la subida de '%s'; se aborta.", p.name)
+			return nil, &UploadInterruptedError{MediaID: id, Err: fmt.Errorf("el cliente abandonó la subida: %w", p.context().Err())}
+		}
 		if !retry {
 			return nil, &UploadInterruptedError{MediaID: id, Err: err}
 		}
@@ -376,7 +442,7 @@ func (c *Client) officialPostContent(kind, id string, p officialUpload, contentT
 	c.mu.RUnlock()
 
 	remaining := p.size - offset
-	req, err := http.NewRequest("POST", u, io.LimitReader(p.reader, remaining))
+	req, err := http.NewRequestWithContext(p.context(), "POST", u, io.LimitReader(p.reader, remaining))
 	if err != nil {
 		return nil, false, err
 	}
@@ -444,9 +510,9 @@ func (c *Client) officialPostContent(kind, id string, p officialUpload, contentT
 
 // officialQueryOffset pregunta cuántos bytes tiene ya O2 de una subida (308 + Range).
 // Si el servidor responde que ya está completa, done no es nil.
-func (c *Client) officialQueryOffset(kind, id string, size int64) (int64, *officialSaveResult, error) {
+func (c *Client) officialQueryOffset(ctx context.Context, kind, id string, size int64) (int64, *officialSaveResult, error) {
 	u := fmt.Sprintf("%s/upload/%s?action=save&lastupdate=true&acceptasynchronous=true", c.baseURL, kind)
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return 0, nil, err
 	}
