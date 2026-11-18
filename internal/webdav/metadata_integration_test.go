@@ -808,10 +808,10 @@ func TestMovistarFS_RemoveAll_And_Rename_WithSQLite(t *testing.T) {
 
 	// Verify tombstone is set with lowercase key
 	fs.cacheMu.RLock()
-	_, isTomb := fs.deletedTombstones[strings.ToLower("/subfolder/test.txt")]
+	_, _, isTomb := foldLookup(fs.deletedTombstones, "/subfolder/test.txt")
 	fs.cacheMu.RUnlock()
 	if !isTomb {
-		t.Errorf("expected tombstone in lowercase for /subfolder/test.txt")
+		t.Errorf("expected tombstone for /subfolder/test.txt")
 	}
 
 	// 2. Test RemoveAll on folder
@@ -828,9 +828,9 @@ func TestMovistarFS_RemoveAll_And_Rename_WithSQLite(t *testing.T) {
 
 	// Verify folder tombstone in lowercase
 	fs.cacheMu.RLock()
-	_, isFolTomb := fs.deletedTombstones[strings.ToLower("/subfolder")]
+	_, _, isFolTomb := foldLookup(fs.deletedTombstones, "/subfolder")
 	fs.cacheMu.RUnlock()
 	if !isFolTomb {
-		t.Errorf("expected tombstone in lowercase for /subfolder")
+		t.Errorf("expected tombstone for /subfolder")
 	}
 }

@@ -521,6 +521,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// MOVE que solo cambia mayúsculas ("Informe.txt" -> "informe.txt").
+	if method == "MOVE" && s.tryCaseOnlyRename(lw, r) {
+		return
+	}
+
 	// 4. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
 	if method == "GET" || method == "HEAD" {
 		ext := filepath.Ext(urlPath)

@@ -121,3 +121,52 @@ func (s *Server) tryServerCopy(w http.ResponseWriter, r *http.Request) bool {
 	w.WriteHeader(http.StatusCreated)
 	return true
 }
+
+// tryCaseOnlyRename atiende un MOVE que solo cambia las mayúsculas del nombre.
+// x/net/webdav comprueba antes si el destino existe, y la búsqueda sin distinguir
+// mayúsculas encuentra el propio origen: sin Overwrite respondía 412 y con
+// "Overwrite: T" borraba el origen antes de moverlo. Si hay de verdad otro
+// elemento con ese nombre exacto, se deja al manejador normal.
+func (s *Server) tryCaseOnlyRename(w http.ResponseWriter, r *http.Request) bool {
+	mfs := s.fs
+	if mfs == nil {
+		return false
+	}
+	u, err := url.Parse(r.Header.Get("Destination"))
+	if err != nil || u.Path == "" || (u.Host != "" && u.Host != r.Host) {
+		return false
+	}
+	src := path.Clean("/" + r.URL.Path)
+	dst := path.Clean("/" + u.Path)
+	if src == dst || !strings.EqualFold(src, dst) || r.Header.Get("If") != "" {
+		return false
+	}
+	srcFolder, srcMedia, srcIsFolder, err := mfs.resolvePath(src)
+	if err != nil {
+		return false
+	}
+	dstFolder, dstMedia, _, dstErr := mfs.resolvePath(dst)
+	if dstErr == nil {
+		sameFile := !srcIsFolder && srcMedia != nil && dstMedia != nil && dstMedia.ID == srcMedia.ID
+		sameFolder := srcIsFolder && srcFolder != nil && dstFolder != nil && dstFolder.ID == srcFolder.ID
+		if !sameFile && !sameFolder {
+			return false // otro elemento con ese nombre exacto: manejador normal
+		}
+	} else if !errors.Is(dstErr, os.ErrNotExist) {
+		return false
+	}
+	if s.lockSys != nil {
+		token, err := s.lockSys.Create(time.Now(), webdav.LockDetails{Root: dst, Duration: -1, ZeroDepth: true})
+		if err != nil {
+			return false
+		}
+		defer func() { _ = s.lockSys.Unlock(time.Now(), token) }()
+	}
+	if err := mfs.Rename(r.Context(), src, dst); err != nil {
+		logger.Log("[WebDAV] ❌ Cambio de mayúsculas '%s' -> '%s' fallido: %v", src, dst, err)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return true
+	}
+	w.WriteHeader(http.StatusCreated)
+	return true
+}
