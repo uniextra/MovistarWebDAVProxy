@@ -191,7 +191,7 @@ func (f *reuploadO2) handler(t *testing.T) http.Handler {
 
 func newReuploadServer(t *testing.T, f *reuploadO2) *Server {
 	t.Helper()
-	mock := httptest.NewServer(f.handler(t))
+	mock := newShimServer(f.handler(t))
 	t.Cleanup(mock.Close)
 	client, err := sapi.NewClient(config.AccountConfig{
 		Provider: "movistar", Phone: "612345678",

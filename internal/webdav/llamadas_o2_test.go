@@ -49,7 +49,7 @@ func TestPropfindTrasSubida_NoLlamaAO2(t *testing.T) {
 // responder 503 + Retry-After sin enviar nada a O2, en vez de 409/500 que rclone reintenta.
 func TestEscriturasDuranteBloqueoWAF_503SinLlamarAO2(t *testing.T) {
 	var hits int32
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.Header().Set("Server", "CloudFront")
 		w.Header().Set("Content-Type", "text/html")
@@ -113,7 +113,7 @@ func TestEscriturasDuranteBloqueoWAF_503SinLlamarAO2(t *testing.T) {
 // servidor de subidas) sin hacer ninguna llamada a la API.
 func TestSubidaDuranteBloqueoDeLaAPI(t *testing.T) {
 	var apiHits, uploadHits int32
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/sapi/upload") {
 			atomic.AddInt32(&uploadHits, 1)
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -186,7 +186,7 @@ func TestSubidaDuranteBloqueoDeLaAPI(t *testing.T) {
 // archivo: ListAllSubfolders + ListAllMediaInFolder, lo que disparaba el WAF).
 func TestSubidaNuevaSinConsultarALaAPI(t *testing.T) {
 	var apiHits, uploadHits int32
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/sapi/upload") {
 			atomic.AddInt32(&uploadHits, 1)
 			_, _ = io.Copy(io.Discard, r.Body)

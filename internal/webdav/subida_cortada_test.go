@@ -30,7 +30,7 @@ func servidorQueCuentaSubidas(t *testing.T) (*Server, *atomic.Int32, func()) {
 	t.Helper()
 	base := newMockSAPIServer(t)
 	var subidas atomic.Int32
-	contador := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	contador := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/sapi/upload" {
 			subidas.Add(1)
 		}

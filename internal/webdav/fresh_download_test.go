@@ -103,7 +103,7 @@ func (f *fakeO2) queryCount() int {
 // uploadThenServer sube 300 KB (más del límite de 256 KB que se sirve desde memoria).
 func uploadThenServer(t *testing.T, f *fakeO2) (*Server, []byte) {
 	t.Helper()
-	mock := httptest.NewServer(f.handler(t))
+	mock := newShimServer(f.handler(t))
 	t.Cleanup(mock.Close)
 
 	client, err := sapi.NewClient(config.AccountConfig{

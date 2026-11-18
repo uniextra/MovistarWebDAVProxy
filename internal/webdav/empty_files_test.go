@@ -28,7 +28,7 @@ func setupTestWebDAVServerWithDB(t *testing.T) (*Server, *cache.MetadataStore, s
 	var uploadsCount atomic.Int32
 	var manifestData []byte
 
-	mockSAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockSAPI := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		p := r.URL.Path
 		action := r.URL.Query().Get("action")
@@ -494,7 +494,7 @@ func TestVirtualEmptyFiles_BootstrapAfterDelayedSync(t *testing.T) {
 	manifestJSON := `{"version":1,"files":[{"path":"/Backups/Control/@writer/v1.cformat","mod_time":"20261116T200000Z"}]}`
 
 	var mockSAPI *httptest.Server
-	mockSAPI = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockSAPI = newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(r.URL.Path, "/media/folder/root"):
 			w.Header().Set("Content-Type", "application/json")

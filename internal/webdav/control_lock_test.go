@@ -22,7 +22,7 @@ func TestControlLockVirtualEmulation(t *testing.T) {
 	var sapiFolderDeleteCount atomic.Int32
 	var sapiUploadCount atomic.Int32
 
-	mockSAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockSAPI := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		p := r.URL.Path
 		action := r.URL.Query().Get("action")
@@ -242,7 +242,7 @@ func TestAutoHealHyperBackupWriterCinfo(t *testing.T) {
 		t.Fatalf("failed to read seq_mapping bytes: %v", err)
 	}
 
-	mockSAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockSAPI := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		action := r.URL.Query().Get("action")
 

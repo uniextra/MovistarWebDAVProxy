@@ -1813,10 +1813,10 @@ func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
 // Comprobado con O2 Cloud subiendo y moviendo archivos reales de cada formato:
 //   - audio:   mp3, m4a (AAC y ALAC), wav
 //   - vídeo:   mp4
-//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff
+//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff, y heic/heif (la app oficial
+//     de Windows los sube con upload/picture; capturado el 18/11/2026)
 //   - genérico (la app no los trata como multimedia): aac, ogg, opus, wma, aiff, flac,
-//     mkv, mov, m4v, 3gp, avi, webm, wmv, mpg, ts, flv, heic, heif, avif, svg y
-//     cualquier otro.
+//     mkv, mov, m4v, 3gp, avi, webm, wmv, mpg, ts, flv, avif, svg y cualquier otro.
 //
 // Si una extensión clasificada como multimedia resultara genérica para SAPI,
 // UpdateMedia recurre a la operación genérica.
@@ -1836,7 +1836,7 @@ func mediaKindForName(name string) string {
 		return "audio"
 	case "mp4":
 		return "video"
-	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff":
+	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif":
 		return "picture"
 	}
 	return "file"
@@ -1872,8 +1872,22 @@ var (
 // (POST /media?action=get-validation-status, el que consulta la web tras subir).
 // "V" y "A" indican que aún se está validando.
 func (c *Client) MediaValidationStatus(mediaID string) (string, error) {
+	return c.mediaValidationStatus(mediaID, 0)
+}
+
+// mediaValidationStatus consulta el estado; con folderID, el cuerpo es el de la app
+// de escritorio: {"data":{"ids":[{"folder_id":…,"id":…}]}}.
+func (c *Client) mediaValidationStatus(mediaID string, folderID int64) (string, error) {
 	u := fmt.Sprintf("%s/media?action=get-validation-status", c.baseURL)
-	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"ids": []map[string]string{{"id": mediaID}}}})
+	entry := map[string]interface{}{"id": mediaID}
+	if folderID > 0 {
+		if n, err := strconv.ParseInt(mediaID, 10, 64); err == nil {
+			entry = map[string]interface{}{"folder_id": folderID, "id": n}
+		} else {
+			entry["folder_id"] = folderID
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"ids": []map[string]interface{}{entry}}})
 	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -1910,9 +1924,13 @@ func (c *Client) MediaValidationStatus(mediaID string) (string, error) {
 // waitMediaValidated espera a que el archivo deje de estar en validación. Devuelve
 // false si no se pudo saber o se agotó la espera.
 func (c *Client) waitMediaValidated(mediaID string) bool {
+	return c.waitMediaValidatedIn(mediaID, 0)
+}
+
+func (c *Client) waitMediaValidatedIn(mediaID string, folderID int64) bool {
 	deadline := time.Now().Add(mediaValidationMaxWait)
 	for {
-		st, err := c.MediaValidationStatus(mediaID)
+		st, err := c.mediaValidationStatus(mediaID, folderID)
 		if err != nil {
 			return false
 		}
@@ -2197,6 +2215,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 // modificación del archivo en la nube (p. ej. la original, recibida vía X-OC-Mtime);
 // si es cero, se usa la hora actual.
 func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
+	if c.officialUploadEnabled() {
+		return c.uploadOfficial(officialUpload{
+			name: fileName, reader: reader, size: size, folderID: folderID,
+			mime: mimeType, existing: existingMediaID, modTime: modTime,
+		})
+	}
 	c.mu.RLock()
 	uploadEndpoint := fmt.Sprintf("%s/sapi/upload?action=save", c.uploadURL)
 	c.mu.RUnlock()

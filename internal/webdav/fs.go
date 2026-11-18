@@ -2279,6 +2279,9 @@ type WebDAVFileWriter struct {
 	streamPW       *io.PipeWriter
 	streamDone     chan streamUploadResult
 	streamFailed   bool
+	// pending: subida en flujo cortada a medias; el reintento desde disco continúa
+	// sobre ese ID (perfil desktop, como la app oficial) en lugar de crear otro.
+	pending *sapi.UploadInterruptedError
 }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
@@ -2357,8 +2360,13 @@ func (w *WebDAVFileWriter) abortStream(err error) {
 		w.streamPW = nil
 	}
 	if w.streamDone != nil {
-		<-w.streamDone
+		res := <-w.streamDone
 		w.streamDone = nil
+		w.mfs.client.DiscardInterruptedUpload(res.err, w.name)
+	}
+	if w.pending != nil {
+		w.mfs.client.DiscardInterruptedUpload(w.pending, w.name)
+		w.pending = nil
 	}
 	w.releasePathLock()
 }
@@ -2576,6 +2584,10 @@ func (w *WebDAVFileWriter) Close() error {
 			logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
 			return ErrUploadTooLarge
 		} else {
+			var ie *sapi.UploadInterruptedError
+			if errors.As(res.err, &ie) && ie.MediaID != "" {
+				w.pending = ie
+			}
 			logger.Log("[WebDAV] ⚠️ Subida en flujo requirió reintento desde disco para '%s': %v", w.name, res.err)
 		}
 	}
@@ -2601,7 +2613,15 @@ func (w *WebDAVFileWriter) Close() error {
 
 		mimeType := mime.TypeByExtension(filepath.Ext(w.name))
 		body, tr := trackUpload(w.path, w.size, reader)
-		media, err = w.mfs.client.UploadFileToFolder(w.name, body, w.size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		if w.pending != nil && w.tmpFile != nil {
+			media, err = w.mfs.client.UploadFileContinue(w.pending.MediaID, w.pending.New, w.name, body, w.size, w.parentFolderID, mimeType, w.modTime)
+		} else {
+			if w.pending != nil {
+				w.mfs.client.DiscardInterruptedUpload(w.pending, w.name)
+			}
+			media, err = w.mfs.client.UploadFileToFolder(w.name, body, w.size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		}
+		w.pending = nil
 		tr.Done()
 		<-globalTransferSem
 		<-uploadSem

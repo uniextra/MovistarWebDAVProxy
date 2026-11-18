@@ -30,7 +30,7 @@ func copyCloud(t *testing.T, copyReply string) (*Server, *[]string) {
 		return map[string]interface{}{"id": id, "name": name, "size": 10, "folderid": folder,
 			"url": "/sapi/download/" + id, "creationdate": "20260101T000000Z", "modificationdate": "20260101T000000Z"}
 	}
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		action := r.URL.Query().Get("action")
 		mu.Lock()

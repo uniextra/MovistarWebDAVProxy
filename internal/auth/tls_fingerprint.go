@@ -315,6 +315,10 @@ func NewFingerprintedTransport() http.RoundTripper {
 	ft := &fingerprintedTransport{h1: h1, h2: h2}
 	if IsDesktopProfile() {
 		ft.sapiH1 = newSAPIHTTP1Transport()
+		// El cliente oficial usa la misma huella (sin ALPN) también con el servidor de
+		// subidas: capturado el 18/11/2026, JA3 57fbe0ae… hacia upload.cloud.o2online.es.
+		// Antes el proxy subía con el TLS estándar de Go, una huella que la app nunca envía.
+		h1.DialTLSContext = dialTLSContextHTTP1Only
 	}
 	return ft
 }

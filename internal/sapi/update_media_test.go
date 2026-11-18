@@ -24,7 +24,7 @@ func TestMediaKindForName(t *testing.T) {
 		"pista.wma": "file", "pista.aiff": "file", "cap.mkv": "file", "cap.mov": "file",
 		"cap.m4v": "file", "cap.3gp": "file", "cap.avi": "file", "cap.webm": "file",
 		"cap.wmv": "file", "cap.mpg": "file", "cap.ts": "file", "cap.flv": "file",
-		"foto.heic": "file", "foto.heif": "file", "foto.avif": "file", "logo.svg": "file",
+		"foto.heic": "picture", "foto.heif": "picture", "foto.avif": "file", "logo.svg": "file",
 		"letra.lrc": "file", "notas.txt": "file", "pack": "file",
 	}
 	for name, want := range cases {
