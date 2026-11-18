@@ -64,6 +64,9 @@ func (f *fakeOfficialSAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.saveContent(w, r)
 	case r.URL.Path == "/sapi/media" && action == "get-validation-status":
 		f.validationStatus(w, r)
+	case r.URL.Path == "/sapi/media" && action == "get":
+		// relectura tras subir, como la app (sin URL: el proxy conserva lo que tenía)
+		_, _ = w.Write([]byte(`{"data":{"media":[]}}`))
 	case strings.HasPrefix(r.URL.Path, "/sapi/media") && (action == "delete" || action == "softdelete"):
 		f.mu.Lock()
 		id := r.URL.Query().Get("id")
@@ -421,45 +424,78 @@ func TestParseReceivedRange(t *testing.T) {
 	}
 }
 
-// Releer tras subir es opcional (SAPI_REFRESH_AFTER_UPLOAD): por defecto, ninguna
-// llamada extra; activado, una media?action=get como la app y la URL firmada.
-func TestOfficialUpload_RefreshAfterUploadIsOptional(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		var gets int
+// Releer tras subir, como la app (captura del 18/11/2026): con el archivo en
+// validación (V), primero get-validation-status hasta que termina y después
+// media?action=get sin «origin», con los campos de la app y el ID como número; la
+// URL firmada llega por el hook. Con SAPI_REFRESH_AFTER_UPLOAD=false, sin relectura.
+func TestOfficialUpload_RefreshAfterValidationLikeTheApp(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		f, _ := newFakeOfficialSAPI(t)
 		var mu sync.Mutex
-		f, srv := newFakeOfficialSAPI(t)
-		_ = f
+		var order []string
+		var getBody, getQuery, getCT string
 		wrapped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/sapi/media" && r.URL.Query().Get("action") == "get" {
+			action := r.URL.Query().Get("action")
+			if r.URL.Path == "/sapi/media" && (action == "get" || action == "get-validation-status") {
 				mu.Lock()
-				gets++
+				order = append(order, action)
 				mu.Unlock()
-				_, _ = w.Write([]byte(`{"data":{"media":[{"id":"1597720466","name":"x.bin","url":"https://cloud/firmada"}]}}`))
+			}
+			if r.URL.Path == "/sapi/media" && action == "get" {
+				b, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				getBody, getQuery, getCT = string(b), r.URL.RawQuery, r.Header.Get("Content-Type")
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{"data":{"media":[{"id":"1597720466","name":"x.bin","url":"https://cloud/firmada","etag":"e2"}]}}`))
 				return
 			}
 			f.serve(w, r)
 		}))
 		t.Cleanup(wrapped.Close)
-		_ = srv
 		c := newOfficialTestClient(t, wrapped)
 		if on {
-			t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "true")
-		} else {
 			t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "")
+		} else {
+			t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 		}
-		item, err := c.UploadFileToFolder("x.bin", bytes.NewReader([]byte("abc")), 3, 1, "", "", time.Time{})
-		if err != nil {
+		f.validating["1597720466"] = 2
+		got := make(chan MediaRefresh, 1)
+		c.SetMediaRefreshHook(func(r MediaRefresh) { got <- r })
+
+		if _, err := c.UploadFileToFolder("x.bin", bytes.NewReader([]byte("abc")), 3, 1, "", "", time.Time{}); err != nil {
 			t.Fatal(err)
 		}
+		if !on {
+			time.Sleep(200 * time.Millisecond)
+			mu.Lock()
+			for _, o := range order {
+				if o == "get" {
+					t.Errorf("desactivado: hubo relectura (%v)", order)
+				}
+			}
+			mu.Unlock()
+			continue
+		}
+		select {
+		case r := <-got:
+			if r.URL != "https://cloud/firmada" || r.ID != "1597720466" || r.ETag != "e2" {
+				t.Errorf("relectura = %+v", r)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("no llegó la relectura")
+		}
 		mu.Lock()
-		n := gets
+		want := []string{"get-validation-status", "get-validation-status", "get-validation-status", "get"}
+		if fmt.Sprint(order) != fmt.Sprint(want) {
+			t.Errorf("orden = %v; la app relee cuando termina la validación: %v", order, want)
+		}
+		if getBody != `{"data":{"fields":["name","url","creationdate","modificationdate","size","etag","folderid"],"ids":[1597720466]}}` {
+			t.Errorf("cuerpo de la relectura = %s", getBody)
+		}
+		if strings.Contains(getQuery, "origin") || getCT != "application/json" {
+			t.Errorf("relectura: query=%q content-type=%q", getQuery, getCT)
+		}
 		mu.Unlock()
-		if on && (n != 1 || item.URL != "https://cloud/firmada") {
-			t.Errorf("activado: relecturas=%d url=%q", n, item.URL)
-		}
-		if !on && n != 0 {
-			t.Errorf("desactivado: %d relecturas, se esperaba ninguna", n)
-		}
 	}
 }
 

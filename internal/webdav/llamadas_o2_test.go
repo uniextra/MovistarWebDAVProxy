@@ -19,6 +19,8 @@ import (
 // el archivo para leer sus propiedades. Eso no debe provocar ninguna llamada a O2: la
 // URL de descarga solo se consulta si alguien lee el contenido.
 func TestPropfindTrasSubida_NoLlamaAO2(t *testing.T) {
+	// cuenta las llamadas a O2 aparte de la relectura tras subir (SAPI_REFRESH_AFTER_UPLOAD)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 	f := &fakeO2{}
 	f.set(true, false)
 	srv, payload := uploadThenServer(t, f)
@@ -185,6 +187,8 @@ func TestSubidaDuranteBloqueoDeLaAPI(t *testing.T) {
 // local: subir un archivo nuevo no debe hacer ninguna llamada a la API (antes, 2 por
 // archivo: ListAllSubfolders + ListAllMediaInFolder, lo que disparaba el WAF).
 func TestSubidaNuevaSinConsultarALaAPI(t *testing.T) {
+	// cuenta las llamadas a O2 aparte de la relectura tras subir (SAPI_REFRESH_AFTER_UPLOAD)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 	var apiHits, uploadHits int32
 	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/sapi/upload") {

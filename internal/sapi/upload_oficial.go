@@ -78,17 +78,17 @@ var (
 		}
 		return steps[len(steps)-1]
 	}
-	officialValidationProbe = 10 * time.Second // la app consulta la validación ~10 s después de subir
-	// La app relee el elemento (media?action=get) tras cada subida. Por defecto el
-	// proxy no, para no sumar una llamada a la API por cada archivo (Hyper Backup
-	// sube miles de archivos pequeños); con SAPI_REFRESH_AFTER_UPLOAD=true lo hace
-	// como la app (y de paso obtiene la URL de descarga firmada).
+	officialValidationProbe = 10 * time.Second // la app consulta la validación unos 10–15 s después de subir
+	// La app relee el elemento (media?action=get) tras cada subida y el proxy
+	// también: así guarda la URL de descarga firmada y la primera descarga no pasa
+	// por la URL por defecto, que O2 rechaza con COM-1005. Con
+	// SAPI_REFRESH_AFTER_UPLOAD=false se omite esa llamada.
 	officialRefreshAfterSave = func() bool {
 		switch strings.ToLower(strings.TrimSpace(os.Getenv("SAPI_REFRESH_AFTER_UPLOAD"))) {
-		case "1", "true", "yes", "on":
-			return true
+		case "0", "false", "no", "off":
+			return false
 		}
-		return false
+		return true
 	}
 )
 
@@ -263,9 +263,6 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 	if res.ID != "" {
 		id = res.ID
 	}
-	if res.Status == "V" || res.Status == "A" {
-		c.probeValidationLater(id, p.folderID)
-	}
 
 	item := &MediaItem{
 		ID:               id,
@@ -276,16 +273,7 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 		ModificationDate: FlexDate(modTime.UTC().Format("20060102T150405Z")),
 		ETag:             res.Etag,
 	}
-	if officialRefreshAfterSave() {
-		if fresh, ferr := c.GetMediaByID(id); ferr == nil && fresh != nil {
-			if fresh.URL != "" {
-				item.URL = fresh.URL
-			}
-			if fresh.ETag != "" {
-				item.ETag = fresh.ETag
-			}
-		}
-	}
+	c.afterOfficialSave(id, p.folderID, res.Status, res.Etag)
 	return item, nil
 }
 
@@ -568,16 +556,122 @@ func parseReceivedRange(v string, size int64) int64 {
 	return got
 }
 
-// probeValidationLater imita a la app: unos segundos después de subir un genérico
-// (estado "V") consulta una vez su estado de validación.
-func (c *Client) probeValidationLater(id string, folderID int64) {
-	if officialValidationProbe <= 0 {
+// MediaRefresh es lo que devuelve la relectura de un archivo tras subirlo.
+type MediaRefresh struct {
+	ID         string
+	URL        string // URL de descarga firmada
+	ETag       string
+	UploadETag string // etag de la subida que provocó la relectura
+}
+
+// SetMediaRefreshHook registra quién guarda el resultado de la relectura tras subir
+// (la capa WebDAV: caché y base de metadatos).
+func (c *Client) SetMediaRefreshHook(fn func(MediaRefresh)) {
+	c.hookMu.Lock()
+	c.onMediaRefreshed = fn
+	c.hookMu.Unlock()
+}
+
+func (c *Client) mediaRefreshHook() func(MediaRefresh) {
+	c.hookMu.Lock()
+	defer c.hookMu.Unlock()
+	return c.onMediaRefreshed
+}
+
+// afterOfficialSave hace lo mismo que la app tras subir (captura del 18/11/2026): si
+// el archivo queda en validación (estado V o A), consulta su estado unos segundos
+// después (get-validation-status) hasta que termina, y entonces relee el elemento
+// (media?action=get) para quedarse con su URL de descarga firmada. Si no queda en
+// validación, lo relee enseguida. Va en segundo plano: el cliente ya tiene su
+// respuesta. Con SAPI_REFRESH_AFTER_UPLOAD=false solo se consulta la validación.
+func (c *Client) afterOfficialSave(id string, folderID int64, status, uploadETag string) {
+	refresh := officialRefreshAfterSave()
+	validating := status == "V" || status == "A"
+	if !refresh && !validating {
 		return
 	}
+	wait := officialValidationProbe
+	if wait <= 0 {
+		wait = mediaValidationPoll
+	}
+	maxWait := mediaValidationMaxWait
 	go func() {
-		time.Sleep(officialValidationProbe)
-		if st, err := c.mediaValidationStatus(id, folderID); err == nil && st != "" && st != "V" && st != "A" {
-			logger.Log("[SAPI] ✔ Validación de %s terminada (estado %s)", id, st)
+		if validating {
+			deadline := time.Now().Add(maxWait)
+			for {
+				time.Sleep(wait)
+				st, err := c.mediaValidationStatus(id, folderID)
+				if err != nil {
+					return
+				}
+				if st != "V" && st != "A" {
+					if st != "" {
+						logger.Log("[SAPI] ✔ Validación de %s terminada (estado %s)", id, st)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					return
+				}
+			}
+		}
+		if !refresh {
+			return
+		}
+		fresh, err := c.officialGetMedia(id)
+		if err != nil || fresh == nil {
+			return
+		}
+		if h := c.mediaRefreshHook(); h != nil {
+			h(MediaRefresh{ID: id, URL: fresh.URL, ETag: fresh.ETag, UploadETag: uploadETag})
 		}
 	}()
+}
+
+// officialGetMedia relee un archivo como la app: media?action=get sin «origin», con
+// sus mismos campos y el ID como número.
+func (c *Client) officialGetMedia(id string) (*MediaItem, error) {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return c.GetMediaByID(id)
+	}
+	c.mu.RLock()
+	u := fmt.Sprintf("%s/media?action=get", c.baseURL)
+	c.mu.RUnlock()
+	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{
+		"fields": []string{"name", "url", "creationdate", "modificationdate", "size", "etag", "folderid"},
+		"ids":    []int64{n},
+	}})
+	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.DoRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("relectura de %s (HTTP %d): %s", id, resp.StatusCode, summarizeHTTPErrorBody(b))
+	}
+	var res struct {
+		Data struct {
+			Media []MediaItem `json:"media"`
+		} `json:"data"`
+		Error interface{} `json:"error"`
+	}
+	if err := json.Unmarshal(b, &res); err != nil {
+		return nil, fmt.Errorf("relectura de %s: %w", id, err)
+	}
+	if res.Error != nil {
+		return nil, fmt.Errorf("relectura de %s: %v", id, res.Error)
+	}
+	for i := range res.Data.Media {
+		if res.Data.Media[i].ID == id {
+			return &res.Data.Media[i], nil
+		}
+	}
+	return nil, nil
 }

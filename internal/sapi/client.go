@@ -291,6 +291,9 @@ type Client struct {
 
 	waf       wafBreaker // pausa las llamadas a la API de O2 tras un 403 del cortafuegos (waf_breaker.go)
 	wafUpload wafBreaker // pausa las subidas (servidor de subidas) tras un 403 del cortafuegos en ese servidor
+
+	hookMu           sync.Mutex
+	onMediaRefreshed func(MediaRefresh) // relectura tras subir (upload_oficial.go)
 }
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).

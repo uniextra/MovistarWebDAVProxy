@@ -470,6 +470,9 @@ func NewMovistarFS(client *sapi.Client, metaStores ...*cache.MetadataStore) *Mov
 		syncInterval:      config.GetSyncInterval(),
 	}
 	fs.emptyFileManager = NewEmptyFileManager(fs)
+	if client != nil {
+		client.SetMediaRefreshHook(fs.applyMediaRefresh)
+	}
 	if ms != nil {
 		ms.SetTombstoneCleaner(fs.ClearTombstone)
 		ms.SetTombstoneFilter(fs.HasTombstones)
@@ -479,6 +482,43 @@ func NewMovistarFS(client *sapi.Client, metaStores ...*cache.MetadataStore) *Mov
 		}()
 	}
 	return fs
+}
+
+// applyMediaRefresh guarda lo que devuelve la relectura tras subir (como la app): la
+// URL de descarga firmada, en la caché de subidas recientes y en la base de
+// metadatos. Así la primera descarga no pasa por la URL por defecto, que O2 rechaza
+// con COM-1005. Si el archivo cambió o se borró entretanto, no se toca.
+func (mfs *MovistarFS) applyMediaRefresh(r sapi.MediaRefresh) {
+	if mfs == nil || r.ID == "" || r.URL == "" {
+		return
+	}
+	folderID := int64(-1)
+	if ms := mfs.MetadataStore(); ms != nil {
+		if m, err := ms.GetMediaByID(r.ID); err == nil && m != nil {
+			if r.UploadETag != "" && m.ETag != "" && m.ETag != r.UploadETag {
+				return // el archivo cambió después de esa subida
+			}
+			m.URL = r.URL
+			if r.ETag != "" {
+				m.ETag = r.ETag
+			}
+			logMetaErr("UpsertMedia", ms.UpsertMedia(*m))
+			folderID = m.FolderID
+		}
+	}
+	mfs.cacheMu.Lock()
+	for _, mem := range mfs.uploadCache {
+		if mem.ID == r.ID {
+			mem.URL = r.URL
+			mem.URLConfirmed = true
+			mem.URLLookupFailedAt = time.Time{}
+			folderID = mem.FolderID
+		}
+	}
+	mfs.cacheMu.Unlock()
+	if folderID >= 0 {
+		mfs.InvalidateCache(folderID)
+	}
 }
 
 func logMetaErr(op string, err error) {
