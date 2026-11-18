@@ -1574,29 +1574,40 @@ func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
 }
 
 func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) {
-	u := fmt.Sprintf("%s/media/folder?action=save", c.baseURL)
-	payload := map[string]interface{}{
-		"data": map[string]interface{}{
-			"name":     name,
-			"parentid": parentID,
-			"magic":    false,
-			"offline":  false,
-		},
-	}
-	bodyBytes, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	var respBody []byte
+	var status int
+	if c.officialClient() {
+		var err error
+		respBody, status, err = c.officialFolderSave(officialFolderCreateData(name, parentID, time.Now()))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		u := fmt.Sprintf("%s/media/folder?action=save", c.baseURL)
+		payload := map[string]interface{}{
+			"data": map[string]interface{}{
+				"name":     name,
+				"parentid": parentID,
+				"magic":    false,
+				"offline":  false,
+			},
+		}
+		bodyBytes, _ := json.Marshal(payload)
+		req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 
-	resp, err := c.DoRequest(req)
-	if err != nil {
-		return nil, err
+		resp, err := c.DoRequest(req)
+		if err != nil {
+			return nil, err
+		}
+		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		status = resp.StatusCode
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp := &http.Response{StatusCode: status}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		return nil, fmt.Errorf("create folder failed (%d): %s", resp.StatusCode, string(respBody))
@@ -1705,6 +1716,15 @@ func (c *Client) UpdateFolder(folderID int64, name string, parentID int64) error
 var ErrFolderUpdatesLimit = errors.New("la carpeta supera el límite de elementos por operación de Movistar Cloud (FOL-1036)")
 
 func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
+	if c.officialClient() && !permanent {
+		// Como la app: media/folder?action=softdelete&id=<id>, cuerpo vacío.
+		err := c.deleteFolderLegacy(folderID, false)
+		if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
+			return err
+		}
+		logOfficialFallback("Borrado de la carpeta", folderID, err)
+		return c.deleteFolderModern(folderID, false)
+	}
 	err := c.deleteFolderModern(folderID, permanent)
 	if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
 		return err
@@ -1961,6 +1981,14 @@ func mediaMoveDelay(attempt int) time.Duration {
 // archivo guardado) y, si falla, del nuevo y de la genérica. Si SAPI aún está validando
 // el archivo (MED-1017) se reintenta. Devuelve error si ninguna operación lo confirma.
 func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int64) error {
+	return c.updateMediaKinds(mediaID, currentName, newName, func(kind string) error {
+		return c.saveMediaMetadata(kind, mediaID, newName, folderID)
+	})
+}
+
+// updateMediaKinds prueba save con el tipo deducido del nombre actual, del nuevo y
+// el genérico, esperando a la validación si SAPI responde MED-1017.
+func (c *Client) updateMediaKinds(mediaID, currentName, newName string, save func(kind string) error) error {
 	var kinds []string
 	for _, k := range []string{mediaKindForName(currentName), mediaKindForName(newName), "file"} {
 		dup := false
@@ -1978,7 +2006,7 @@ func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int6
 	for i, kind := range kinds {
 		var err error
 		for attempt := 0; ; attempt++ {
-			err = c.saveMediaMetadata(kind, mediaID, newName, folderID)
+			err = save(kind)
 			if err == nil || !strings.Contains(err.Error(), "MED-1017") || attempt >= mediaMoveRetries {
 				break
 			}
@@ -2102,6 +2130,13 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 	if len(nameOrKind) > 0 {
 		targetKind = mediaKindForName(nameOrKind[0])
 	}
+	// Perfil desktop: primero la llamada de la app (media?action=softdelete&id=, sin
+	// cuerpo); si la rechazara, la operación por tipo.
+	officialFirst := c.officialClient()
+	fallbackKind := ""
+	if officialFirst {
+		fallbackKind, targetKind = targetKind, ""
+	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -2186,9 +2221,15 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 				return nil
 			}
 			lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
-			if targetKind != "" {
+			if targetKind != "" && !officialFirst {
 				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%s); se usa la llamada genérica.", mediaID, targetKind, res.Error.Code)
 				targetKind = ""
+				attempt--
+				continue
+			}
+			if targetKind == "" && fallbackKind != "" {
+				logOfficialFallback("Borrado del archivo", mediaID, lastErr)
+				targetKind, fallbackKind = fallbackKind, ""
 				attempt--
 				continue
 			}
@@ -2197,9 +2238,15 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
-			if targetKind != "" {
+			if targetKind != "" && !officialFirst {
 				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%d); se usa la llamada genérica.", mediaID, targetKind, resp.StatusCode)
 				targetKind = ""
+				attempt--
+				continue
+			}
+			if targetKind == "" && fallbackKind != "" {
+				logOfficialFallback("Borrado del archivo", mediaID, lastErr)
+				targetKind, fallbackKind = fallbackKind, ""
 				attempt--
 				continue
 			}

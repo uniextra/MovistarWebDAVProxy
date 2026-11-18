@@ -73,10 +73,12 @@ var (
 )
 
 // officialDatesLocal: la app manda las fechas en hora local y sin zona
-// ("20261118T173627"). El proxy las manda en UTC con "Z", que O2 acepta desde
-// siempre. Hasta comprobar cómo guarda O2 la hora local sin zona (si la tomara
-// como UTC, todas las fechas se desplazarían y rclone volvería a subirlo todo),
-// se mantiene UTC.
+// ("20261118T173627"), pero O2 las guarda como si fueran UTC: un archivo que la app
+// subió con fecha local 17:36:28 aparece en la nube a las 18:36:28 (comprobado el
+// 18/11/2026 con corte-subida-har.bin). Imitarlo desplazaría una hora (dos en
+// verano) todas las fechas y rclone volvería a subirlo todo, así que el proxy
+// sigue mandando UTC con "Z", que O2 guarda tal cual. Es la única diferencia
+// deliberada con la app en los datos de las peticiones.
 var officialDatesLocal = false
 
 func officialDate(t time.Time) string {

@@ -1790,7 +1790,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 	logger.Log("[WebDAV] 🔄 Renombrando: '%s' -> '%s'...", oldClean, newClean)
 
 	if isF && oldFolder != nil {
-		err := mfs.client.UpdateFolder(oldFolder.ID, newBaseName, parentFolder.ID)
+		err := mfs.client.UpdateFolderItem(*oldFolder, newBaseName, parentFolder.ID)
 		if err != nil {
 			return err
 		}
@@ -1917,7 +1917,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 					}))
 				}
 			} else {
-				if err := mfs.client.UpdateMedia(oldMedia.ID, oldMedia.Name, newBaseName, parentFolder.ID); err != nil {
+				if err := mfs.client.UpdateMediaItem(*oldMedia, newBaseName, parentFolder.ID); err != nil {
 					return err
 				}
 				// Borrar destino previo sólo tras completar UpdateMedia con éxito
