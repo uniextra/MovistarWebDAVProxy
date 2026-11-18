@@ -1,0 +1,80 @@
+name: Auto Release on Merged PR
+
+on:
+  pull_request_target:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-release:
+    # Solo se ejecuta después de aprobar y fusionar la PR en main (salvo etiqueta skip-release)
+    if: github.event.pull_request.merged == true && !contains(github.event.pull_request.labels.*.name, 'skip-release')
+    runs-on: ubuntu-24.04
+    outputs:
+      new_ver: ${{ steps.bump.outputs.new_ver }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compute next version and update files
+        id: bump
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG=$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' internal/config/env.go | head -n1)
+          fi
+
+          VER_NO_V="${LATEST_TAG#v}"
+          MAJOR=$(echo "$VER_NO_V" | cut -d. -f1)
+          MINOR=$(echo "$VER_NO_V" | cut -d. -f2)
+          PATCH=$(echo "$VER_NO_V" | cut -d. -f3)
+
+          if echo ",$LABELS," | grep -q ",release:major,"; then
+            NEW_VER="v$((MAJOR + 1)).0.0"
+          elif echo ",$LABELS," | grep -q ",release:minor,"; then
+            NEW_VER="v${MAJOR}.$((MINOR + 1)).0"
+          else
+            NEW_VER="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          echo "Actualizando versión: $LATEST_TAG -> $NEW_VER"
+          sed -i -E "s/Version([[:space:]]*=[[:space:]]*)\"v[0-9]+\.[0-9]+\.[0-9]+\"/Version\1\"${NEW_VER}\"/" internal/config/env.go
+          sed -i -E "s/ARG APP_VERSION=v[0-9]+\.[0-9]+\.[0-9]+/ARG APP_VERSION=${NEW_VER}/" Dockerfile
+
+          echo "new_ver=${NEW_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push version bump to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/config/env.go Dockerfile
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): ${{ steps.bump.outputs.new_ver }} (PR #${{ github.event.pull_request.number }})"
+            git push origin main
+          fi
+
+      - name: Create GitHub Release and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.bump.outputs.new_ver }}" \
+            --target main \
+            --title "${{ steps.bump.outputs.new_ver }}" \
+            --generate-notes
+
+  publish-docker:
+    needs: bump-and-release
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      version: ${{ needs.bump-and-release.outputs.new_ver }}
+    secrets: inherit

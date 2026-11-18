@@ -4,6 +4,12 @@ on:
   push:
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version tag to build and publish (e.g. v2.6.9)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,7 +26,9 @@ jobs:
       - name: Resolve app version
         id: app_version
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
             VERSION="${{ github.ref_name }}"
           else
             VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo 'dev')"
@@ -66,10 +74,10 @@ jobs:
         with:
           images: uniextra/movistar-webdav-proxy
           tags: |
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_call' && inputs.version != '') }}
+            type=semver,pattern={{version}},value=${{ steps.app_version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.app_version.outputs.version }}
+            type=semver,pattern={{major}},value=${{ steps.app_version.outputs.version }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
