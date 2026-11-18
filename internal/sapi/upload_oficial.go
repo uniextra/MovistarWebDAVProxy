@@ -65,8 +65,18 @@ func (c *Client) officialUploadEnabled() bool {
 }
 
 var (
-	officialUploadAttempts  = 5
-	officialUploadBackoff   = func(attempt int) time.Duration { return time.Duration(1+attempt*2) * time.Second }
+	// Reintentos del envío tras un corte: unos 3 minutos en total, para aguantar un
+	// corte de red real (la app reintenta en cada pasada, cada 60–70 s, sin límite).
+	// Con 5 intentos y esperas de 1–7 s se agotaban en ~16 s y un corte de 30 s
+	// tumbaba la subida.
+	officialUploadAttempts = 8
+	officialUploadBackoff  = func(attempt int) time.Duration {
+		steps := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 45 * time.Second, 60 * time.Second}
+		if attempt < len(steps) {
+			return steps[attempt]
+		}
+		return steps[len(steps)-1]
+	}
 	officialValidationProbe = 10 * time.Second // la app consulta la validación ~10 s después de subir
 	// La app relee el elemento (media?action=get) tras cada subida. Por defecto el
 	// proxy no, para no sumar una llamada a la API por cada archivo (Hyper Backup
