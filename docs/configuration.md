@@ -51,7 +51,9 @@ Esta guía reúne toda la referencia técnica del proxy: variables de entorno co
 | `WEBDAV_MAX_DOWNLOADS` | `4` | Descargas simultáneas hacia la nube. |
 | `WEBDAV_MAX_UPLOADS` | `2` | Subidas simultáneas hacia la nube. |
 | `UPLOAD_RESPONSE_TIMEOUT_SEC` | `300` | Tiempo máximo de espera (segundos) tras enviar el archivo hasta que el servidor de subida responde. |
-| `SYNC_INTERVAL_SEC` | `60` | Intervalo de sincronización incremental de metadatos (mínimo `15` segundos). |
+| `SYNC_INTERVAL_SEC` | `300` en `desktop`, `60` en `browser` | Intervalo de sincronización incremental de metadatos (mínimo `15` segundos). En el perfil `desktop` es la cadencia del cliente oficial (consulta los cambios cada 5 minutos). |
+| `WEBDAV_STREAM_UPLOAD` | `false` | Sube a la nube mientras el archivo aún llega del cliente. Desactivado por defecto: con clientes que multiplexan varias subidas en una conexión (restic → rclone) podía provocar un interbloqueo. Sin flujo, el archivo se recibe entero (RAM o disco) y luego se sube. |
+| `SAPI_REFRESH_AFTER_UPLOAD` | `false` | Perfil `desktop`: tras cada subida, relee el archivo (`media?action=get`) como hace el cliente oficial y guarda su URL de descarga firmada. Desactivado por defecto porque suma una llamada a O2 por archivo subido. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado de subidas en curso. |
 | `SAPI_MAX_CONCURRENT` | `1` *(ver nota)* | Llamadas concurrentes máximas a SAPI. En [Modo Web](web-mode.md) toma por defecto `WEBDAV_MAX_DOWNLOADS + WEBDAV_MAX_UPLOADS + 2`. |
 | `SAPI_PACING_MS` | `100` | Pausa mínima en milisegundos entre peticiones secuenciales a SAPI. |

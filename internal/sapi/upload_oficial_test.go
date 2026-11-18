@@ -419,3 +419,45 @@ func TestParseReceivedRange(t *testing.T) {
 		}
 	}
 }
+
+// Releer tras subir es opcional (SAPI_REFRESH_AFTER_UPLOAD): por defecto, ninguna
+// llamada extra; activado, una media?action=get como la app y la URL firmada.
+func TestOfficialUpload_RefreshAfterUploadIsOptional(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		var gets int
+		var mu sync.Mutex
+		f, srv := newFakeOfficialSAPI(t)
+		_ = f
+		wrapped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/sapi/media" && r.URL.Query().Get("action") == "get" {
+				mu.Lock()
+				gets++
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{"data":{"media":[{"id":"1597720466","name":"x.bin","url":"https://cloud/firmada"}]}}`))
+				return
+			}
+			f.serve(w, r)
+		}))
+		t.Cleanup(wrapped.Close)
+		_ = srv
+		c := newOfficialTestClient(t, wrapped)
+		if on {
+			t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "true")
+		} else {
+			t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "")
+		}
+		item, err := c.UploadFileToFolder("x.bin", bytes.NewReader([]byte("abc")), 3, 1, "", "", time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		n := gets
+		mu.Unlock()
+		if on && (n != 1 || item.URL != "https://cloud/firmada") {
+			t.Errorf("activado: relecturas=%d url=%q", n, item.URL)
+		}
+		if !on && n != 0 {
+			t.Errorf("desactivado: %d relecturas, se esperaba ninguna", n)
+		}
+	}
+}

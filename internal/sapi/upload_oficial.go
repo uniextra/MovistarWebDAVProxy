@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -67,9 +68,17 @@ var (
 	officialUploadAttempts  = 5
 	officialUploadBackoff   = func(attempt int) time.Duration { return time.Duration(1+attempt*2) * time.Second }
 	officialValidationProbe = 10 * time.Second // la app consulta la validación ~10 s después de subir
-	// La app relee el elemento tras cada operación; el proxy no, para no sumar una
-	// llamada a la API por cada subida (Hyper Backup sube miles de archivos pequeños).
-	officialRefreshAfterSave = false
+	// La app relee el elemento (media?action=get) tras cada subida. Por defecto el
+	// proxy no, para no sumar una llamada a la API por cada archivo (Hyper Backup
+	// sube miles de archivos pequeños); con SAPI_REFRESH_AFTER_UPLOAD=true lo hace
+	// como la app (y de paso obtiene la URL de descarga firmada).
+	officialRefreshAfterSave = func() bool {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("SAPI_REFRESH_AFTER_UPLOAD"))) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+		return false
+	}
 )
 
 // officialDatesLocal: la app manda las fechas en hora local y sin zona
@@ -178,7 +187,7 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 		ModificationDate: FlexDate(modTime.UTC().Format("20060102T150405Z")),
 		ETag:             res.Etag,
 	}
-	if officialRefreshAfterSave {
+	if officialRefreshAfterSave() {
 		if fresh, ferr := c.GetMediaByID(id); ferr == nil && fresh != nil {
 			if fresh.URL != "" {
 				item.URL = fresh.URL
