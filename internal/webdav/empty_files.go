@@ -5,14 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/sapi"
 )
 
 const (
@@ -49,6 +53,11 @@ type EmptyFileManager struct {
 	timer       *time.Timer
 	saving      bool
 	pending     bool
+	// bootstrapped: en este arranque ya se decidió entre el manifiesto de la nube y el
+	// estado local (BootstrapLoad terminó). Hasta entonces, una base que nunca ha
+	// cargado ni subido un manifiesto no puede subir el suyo: lo pisaría con un estado
+	// casi vacío (contenedor nuevo, base local borrada…).
+	bootstrapped atomic.Bool
 }
 
 func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
@@ -59,10 +68,11 @@ func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
 
 // emptyFilesDirtyKey marca en SQLite que hay cambios en los archivos vacíos emulados
 // que aún no están en el manifiesto de la nube. Sobrevive a reinicios y
-// actualizaciones del contenedor: al arrancar, si está puesta, se sube el estado
-// local en lugar de cargar el manifiesto (que es más antiguo). Antes se cargaba
-// igualmente y podía resucitar .cinfo viejos de Hyper Backup sobre los nuevos
-// («cloud-seq-id [1], local-seq-id [24]»).
+// actualizaciones del contenedor: al arrancar, si está puesta y esta base ya conocía
+// el manifiesto de la nube (emptyFilesCloudKey), se sube el estado local en lugar de
+// cargar el manifiesto, que es más antiguo. Antes se cargaba igualmente y podía
+// resucitar .cinfo viejos de Hyper Backup sobre los nuevos («cloud-seq-id [1],
+// local-seq-id [24]»). Una base que nunca lo ha conocido (nueva) siempre lo carga.
 const emptyFilesDirtyKey = "empty_files_manifest_dirty"
 
 // emptyFilesCloudKey guarda «ID:sha256» del manifiesto que hay en la nube (el último
@@ -126,6 +136,14 @@ func (efm *EmptyFileManager) SaveManifest() {
 
 	ms := efm.mfs.MetadataStore()
 	if ms == nil || efm.mfs.client == nil {
+		return
+	}
+	if !efm.mayUpload(ms) {
+		// Base que aún no ha cargado el manifiesto de la nube: subir ahora lo pisaría.
+		// BootstrapLoad programa el guardado en cuanto lo haya combinado.
+		efm.mu.Lock()
+		efm.pending = false
+		efm.mu.Unlock()
 		return
 	}
 
@@ -229,6 +247,24 @@ func (efm *EmptyFileManager) SaveManifest() {
 	logger.Log("[EmptyFiles] ☁️ Manifiesto persistido en la nube (%d archivos vacíos emulados)", len(manifest.Files))
 }
 
+// retryBootstrap: no se pudo leer el manifiesto de la nube. Hasta leerlo, una base nueva
+// no sube el suyo, así que se vuelve a intentar en lugar de esperar a otro arranque.
+func (efm *EmptyFileManager) retryBootstrap(motivo string) {
+	retry := config.EmptyManifestRetryWait()
+	logger.Log("[EmptyFiles] ⚠️ %s (se reintenta en %s)", motivo, retry)
+	time.AfterFunc(retry, efm.BootstrapLoad)
+}
+
+// mayUpload: se puede subir el manifiesto si en este arranque ya se resolvió el de la
+// nube, o si esta base lo conocía de antes (lo cargó o lo subió alguna vez).
+func (efm *EmptyFileManager) mayUpload(ms *cache.MetadataStore) bool {
+	if efm.bootstrapped.Load() {
+		return true
+	}
+	known, _ := ms.GetSyncState(emptyFilesCloudKey)
+	return known != ""
+}
+
 // BootstrapLoad loads the empty-files manifest from SAPI/cloud into the local SQLite store if missing.
 func (efm *EmptyFileManager) BootstrapLoad() {
 	if efm == nil || efm.mfs == nil {
@@ -245,43 +281,53 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 	if efm.mfs.client.IsSessionExpired() {
 		return
 	}
-	if dirty, _ := ms.GetSyncState(emptyFilesDirtyKey); dirty == "1" {
+	dirty, _ := ms.GetSyncState(emptyFilesDirtyKey)
+	known, _ := ms.GetSyncState(emptyFilesCloudKey)
+	if dirty == "1" && known != "" {
 		logger.Log("[EmptyFiles] ⬆️ Hay cambios locales de archivos vacíos sin subir: se sube el estado local en lugar de cargar el manifiesto de la nube (más antiguo).")
+		efm.bootstrapped.Store(true)
 		efm.ScheduleSave()
 		return
 	}
 
 	root, err := ms.GetRootFolder()
 	if err != nil || root == nil {
-		return
+		return // metadatos aún sin sincronizar: se reintenta al terminar la sincronización
 	}
 
 	folder, _ := ms.GetFolderByParentAndName(root.ID, ProxyInternalDir)
-	if folder == nil {
-		return
+	var media *sapi.MediaItem
+	if folder != nil {
+		media, _ = ms.GetMediaByFolderAndName(folder.ID, ManifestFileName)
 	}
-
-	media, _ := ms.GetMediaByFolderAndName(folder.ID, ManifestFileName)
 	if media == nil || media.ID == "" {
+		// No hay manifiesto en la nube: no hay nada que proteger.
+		efm.bootstrapped.Store(true)
+		if d, _ := ms.GetSyncState(emptyFilesDirtyKey); d == "1" {
+			efm.ScheduleSave() // cambios hechos mientras se esperaba (guardados aplazados)
+		}
 		return
 	}
 
 	// Download content
 	rc, err := efm.mfs.client.DownloadFileStream(*media)
 	if err != nil {
-		logger.Log("[EmptyFiles] ⚠️ Error descargando manifiesto: %v", err)
+		efm.retryBootstrap(fmt.Sprintf("Error descargando manifiesto: %v", err))
 		return
 	}
 	defer rc.Close()
 
 	body, err := io.ReadAll(io.LimitReader(rc, 10<<20)) // 10 MB limit
 	if err != nil {
+		efm.retryBootstrap(fmt.Sprintf("Error leyendo manifiesto: %v", err))
 		return
 	}
 
 	var manifest EmptyFilesManifest
 	if err := json.Unmarshal(body, &manifest); err != nil {
+		// Ilegible: no hay nada que proteger; el próximo guardado lo reescribe.
 		logger.Log("[EmptyFiles] ⚠️ Manifiesto JSON inválido: %v", err)
+		efm.bootstrapped.Store(true)
 		return
 	}
 	_ = ms.SetSyncState(emptyFilesCloudKey, manifestFingerprint(media.ID, body))
@@ -311,7 +357,16 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 		}
 	}
 	logger.Log("[EmptyFiles] 📥 Cargados %d archivos vacíos emulados desde el manifiesto en la nube", loadedCount)
-	if skippedEphemeral {
+	efm.bootstrapped.Store(true)
+	// Se relee: algún guardado pudo aplazarse mientras se cargaba.
+	dirty, _ = ms.GetSyncState(emptyFilesDirtyKey)
+	switch {
+	case dirty == "1":
+		// Base nueva con cambios hechos antes de cargar el manifiesto (un cliente subió
+		// algo nada más arrancar): ya está combinado con el de la nube y se sube todo.
+		logger.Log("[EmptyFiles] ⬆️ Manifiesto de la nube combinado con los cambios locales de este arranque; se sube.")
+		efm.ScheduleSave()
+	case skippedEphemeral:
 		logger.Log("[EmptyFiles] 🧹 Descartados archivos efímeros (locks/estados transitorios) del manifiesto; reescribiendo limpio...")
 		efm.ScheduleSave()
 	}
