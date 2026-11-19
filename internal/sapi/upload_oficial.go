@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 )
 
@@ -58,31 +58,19 @@ func (e *UploadInterruptedError) Error() string {
 
 func (e *UploadInterruptedError) Unwrap() error { return e.Err }
 
-var (
-	// Reintentos del envío tras un corte: unos 3 minutos en total, para aguantar un
-	// corte de red real (la app reintenta en cada pasada, cada 60–70 s, sin límite).
-	// Con 5 intentos y esperas de 1–7 s se agotaban en ~16 s y un corte de 30 s
-	// tumbaba la subida.
-	officialUploadAttempts = 8
-	officialUploadBackoff  = func(attempt int) time.Duration {
-		steps := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 45 * time.Second, 60 * time.Second}
-		if attempt < len(steps) {
-			return steps[attempt]
-		}
-		return steps[len(steps)-1]
+// officialUploadBackoff: espera antes de reintentar el envío del contenido tras un
+// corte (attempt = intentos ya fallidos - 1): 2, 5, 10, 20, 30, 45 y 60 s, con
+// SAPI_UPLOAD_RETRY_MAX_SEC como tope. Con SAPI_UPLOAD_ATTEMPTS intentos (8 por
+// defecto) son unos 3 minutos, para aguantar un corte de red real; la app reintenta
+// en cada pasada, cada 60–70 s, sin límite.
+var officialUploadBackoff = func(attempt int) time.Duration {
+	steps := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 45 * time.Second, 60 * time.Second}
+	max := config.UploadRetryMaxWait()
+	if attempt < len(steps) && steps[attempt] < max {
+		return steps[attempt]
 	}
-	// La app relee el elemento (media?action=get) tras cada subida y el proxy
-	// también: así guarda la URL de descarga firmada y la primera descarga no pasa
-	// por la URL por defecto, que O2 rechaza con COM-1005. Con
-	// SAPI_REFRESH_AFTER_UPLOAD=false se omite esa llamada.
-	officialRefreshAfterSave = func() bool {
-		switch strings.ToLower(strings.TrimSpace(os.Getenv("SAPI_REFRESH_AFTER_UPLOAD"))) {
-		case "0", "false", "no", "off":
-			return false
-		}
-		return true
-	}
-)
+	return max
+}
 
 // officialDate da formato a una fecha para O2. La app manda la hora local y sin zona
 // ("20261118T173627"), pero O2 la guarda como si fuera UTC: un archivo que la app
@@ -345,7 +333,8 @@ type officialSaveResult struct {
 func (c *Client) officialSendContent(kind, id string, p officialUpload, contentType string) (*officialSaveResult, error) {
 	seeker, canSeek := p.reader.(io.ReadSeeker)
 	var lastErr error
-	for attempt := 0; attempt < officialUploadAttempts; attempt++ {
+	attempts := config.UploadAttempts()
+	for attempt := 0; attempt < attempts; attempt++ {
 		offset := int64(0)
 		if attempt > 0 || p.pendingID != "" {
 			if attempt > 0 && !sleepCtx(p.context(), officialUploadBackoff(attempt-1)) {
@@ -390,7 +379,7 @@ func (c *Client) officialSendContent(kind, id string, p officialUpload, contentT
 		if !canSeek {
 			return nil, &UploadInterruptedError{MediaID: id, Err: err}
 		}
-		logger.Log("[SAPI] ⚠️ Envío de '%s' cortado (%v); intento %d/%d", p.name, err, attempt+1, officialUploadAttempts)
+		logger.Log("[SAPI] ⚠️ Envío de '%s' cortado (%v); intento %d/%d", p.name, err, attempt+1, attempts)
 	}
 	return nil, &UploadInterruptedError{MediaID: id, Err: lastErr}
 }
@@ -546,14 +535,6 @@ func (c *Client) mediaRefreshHook() func(MediaRefresh) {
 	return c.onMediaRefreshed
 }
 
-// La app consulta la validación unos 10–15 s después de subir. Si el archivo sigue
-// en validación, las consultas se espacian hasta una por minuto (un archivo grande
-// puede tardar varios minutos). Se cambian con WithValidationPolling.
-const (
-	defaultValidationFirst = 10 * time.Second
-	defaultValidationMax   = time.Minute
-)
-
 // afterOfficialSave hace lo mismo que la app tras subir (captura del 18/11/2026): si
 // el archivo queda en validación (estado V o A), consulta su estado unos segundos
 // después (get-validation-status) hasta que termina, y entonces relee el elemento
@@ -586,7 +567,7 @@ func (c *Client) FollowCopiedMedia(id string, folderID int64) {
 // followNewMedia: seguimiento de un archivo nuevo (ver afterOfficialSave). firstWait
 // es la espera antes de la primera consulta de validación.
 func (c *Client) followNewMedia(id string, folderID int64, validating bool, firstWait time.Duration, uploadETag string) {
-	refresh := officialRefreshAfterSave()
+	refresh := config.RefreshAfterUpload()
 	if !refresh && !validating {
 		return
 	}
@@ -599,7 +580,7 @@ func (c *Client) followNewMedia(id string, folderID int64, validating bool, firs
 		defer c.unmarkSettling(id, done)
 		if validating {
 			logged := false
-			failures := 0
+			failures, maxFailures := 0, config.ValidationMaxFailures()
 			for {
 				time.Sleep(wait)
 				if !c.followsSettling(id, done) {
@@ -610,9 +591,10 @@ func (c *Client) followNewMedia(id string, folderID int64, validating bool, firs
 					return
 				}
 				if err != nil {
-					// Un fallo pasajero no corta el seguimiento; uno que no se arregla en
-					// una hora (sesión perdida, archivo que O2 ya no reconoce) sí.
-					if failures++; failures >= followMaxFailures {
+					// Un fallo pasajero no corta el seguimiento; uno que no se arregla
+					// (sesión perdida, archivo que O2 ya no reconoce) sí, tras
+					// SAPI_VALIDATION_MAX_FAILURES consultas seguidas (~1 h por defecto).
+					if failures++; failures >= maxFailures {
 						logger.Log("[SAPI] ⚠️ Se deja de seguir la validación de %s: %d consultas seguidas fallidas (%v)", id, failures, err)
 						return
 					}
@@ -651,10 +633,6 @@ func (c *Client) followNewMedia(id string, folderID int64, validating bool, firs
 		}
 	}()
 }
-
-// followMaxFailures: consultas de validación seguidas que pueden fallar antes de
-// dejar de seguir un archivo (unas 60, ~1 h a una por minuto).
-const followMaxFailures = 60
 
 // followsSettling indica si done sigue siendo el seguimiento vigente de id (una
 // sobrescritura posterior del mismo archivo lo sustituye).

@@ -54,7 +54,6 @@ Esta guía reúne toda la referencia técnica del proxy: variables de entorno co
 | `SYNC_INTERVAL_SEC` | `300` en `desktop`, `60` en `browser` | Intervalo de sincronización incremental de metadatos (mínimo `15` segundos). En el perfil `desktop` es la cadencia del cliente oficial (consulta los cambios cada 5 minutos). |
 | `WEBDAV_STREAM_UPLOAD` | `true` | Sube a la nube mientras el archivo aún llega del cliente, como el cliente oficial: la respuesta llega al cliente justo después del último byte, sin esperas largas que agoten su tiempo de espera (rclone corta a los 5 min). La subida al host de subidas no ocupa el hueco de `SAPI_MAX_CONCURRENT`, así que varias subidas simultáneas (restic → rclone) no se bloquean entre sí. Con `false`, el archivo se recibe entero (RAM o disco) y luego se sube. |
 | `WEBDAV_CASE_INSENSITIVE` | `false` | Los nombres son exactos, como en O2 Cloud («Foto.jpg» y «foto.jpg» son dos archivos). Con `true`, un nombre con otras mayúsculas encuentra el archivo si no hay otro con el nombre exacto (comportamiento anterior, para el Explorador de Windows). No lo actives con rclone, restic o Hyper Backup: un cliente que distingue mayúsculas puede dar por subido un archivo que no lo está o, en un cambio solo de mayúsculas, borrar el origen. |
-| `SAPI_REFRESH_AFTER_UPLOAD` | `true` | Perfil `desktop`: tras cada subida, y como el cliente oficial, el proxy espera a que O2 termine de validar el archivo (`get-validation-status`) y lo relee (`media?action=get`) para guardar su URL de descarga firmada. Va en segundo plano: no retrasa la respuesta al cliente. Sin ella, la primera descarga de cada archivo subido pasa por la URL por defecto, que O2 rechaza (`COM-1005`), y necesita una consulta más. Con `false` se omite la relectura. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado de subidas en curso. |
 | `SAPI_MAX_CONCURRENT` | `1` *(ver nota)* | Llamadas concurrentes máximas a SAPI. En [Modo Web](web-mode.md) toma por defecto `WEBDAV_MAX_DOWNLOADS + WEBDAV_MAX_UPLOADS + 2`. |
 | `SAPI_PACING_MS` | `100` | Pausa mínima en milisegundos entre peticiones secuenciales a SAPI. |
@@ -105,7 +104,7 @@ Esto facilita comprobar de inmediato qué cabeceras se están enviando si necesi
 El perfil por defecto fuera del Modo Web (`SAPI_CLIENT_PROFILE=desktop`) reproduce el tráfico del cliente oficial de Windows de O2 (`O2 Cloud.exe` 32.1.3, instalador publicado en `/sapi/system/information` → `clientspathinfo.windowspath`), capturado con Fiddler:
 
 * **Transporte:** HTTP/1.1 hacia SAPI (el cliente es Qt 5).
-* **Huella TLS:** el `ClientHello` del cliente oficial (Qt 5 + OpenSSL 1.1.1), capturado sin intermediario con `tcpdump` (la captura con Fiddler muestra el HTTP, pero el `ClientHello` que ve CloudFront es el de Fiddler): JA3 `57fbe0aefee44901190849b0e877a5e1`, 512 bytes, TLS 1.3 a 1.0, grupos x25519, P-256, x448, P-521 y P-384, y **sin ALPN** (el servidor responde en HTTP/1.1). El proxy lo reproduce con uTLS (`UTLS_CLIENT_HELLO=o2`, valor por defecto en este perfil). Las subidas a `upload.*` usan la pila TLS estándar de Go.
+* **Huella TLS:** el `ClientHello` del cliente oficial (Qt 5 + OpenSSL 1.1.1), capturado sin intermediario con `tcpdump` (la captura con Fiddler muestra el HTTP, pero el `ClientHello` que ve CloudFront es el de Fiddler): JA3 `57fbe0aefee44901190849b0e877a5e1`, 512 bytes, TLS 1.3 a 1.0, grupos x25519, P-256, x448, P-521 y P-384, y **sin ALPN** (el servidor responde en HTTP/1.1). El proxy lo reproduce con uTLS (`UTLS_CLIENT_HELLO=o2`, valor por defecto en este perfil). Con O2, las subidas y descargas por HTTP/1.1 (`upload.*` y URLs firmadas) usan la misma huella, como la app; con Movistar, la pila TLS estándar de Go (ver más abajo).
 * **Cabeceras:** `User-Agent: omh windows client 4.0.1`, `x-deviceid: fol-<base64>`, `Accept: */*`, `Accept-Language: es-ES,en,*`, `x-request-id` (UUID por petición), `Authorization: oauth …` con `"platform":"windows"`, cookie `JSESSIONID` y `validationkey` en la URL. Sin `Referer`, `X-Requested-With` ni `X-devicename`.
 * **Renovación:** el cliente envía sus tokens aunque `lastrefreshdate + expiresin` haya vencido; SAPI responde `200` con una cabecera `Authorization: oauth …` (en la captura, con los mismos tokens y sin `lastrefreshdate`) y el cliente pone `lastrefreshdate` a la hora de esa respuesta. No contacta nunca con `apiseg.telefonica.es` para renovar.
 
@@ -113,6 +112,38 @@ CloudFront exige esa coherencia: un `X-deviceid` `fol-…` llega a SAPI con `Use
 
 La huella TLS también cuenta: con la de Chrome (`chrome_auto`) y el `User-Agent` del cliente de Windows, CloudFront acabó devolviendo esos `401` vacíos a todas las peticiones tras unas 11 horas de funcionamiento normal, mientras que con las mismas credenciales y la huella `golang` la sesión se renovó sin problemas. Con `o2` el proxy presenta la misma huella que la aplicación oficial.
 
+
+### Hablar como el cliente oficial (solo O2 por defecto)
+
+Además de presentarse como la app, en el perfil `desktop` el proxy **hace las cosas como la app**: sube en dos pasos (`save-metadata` y el contenido en bruto), reanuda las subidas cortadas, renombra, mueve, crea y borra con las mismas peticiones, late con la misma cadencia, relee cada archivo subido y sigue su validación.
+
+> [!WARNING]
+> Todo esto se ha comprobado **solo contra O2 Cloud**. No se sabe cómo responde **Movistar Cloud**, así que con `movistar` está desactivado por defecto y el proxy funciona como antes. Para probarlo con Movistar, `SAPI_OFFICIAL_CLIENT=true`; si algo falla, vuelve a dejarlo vacío.
+
+Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con *(app)* imitan los tiempos del cliente oficial: cambiarlas aleja al proxy de su comportamiento.
+
+| Variable | Por defecto | Descripción |
+| :--- | :--- | :--- |
+| `SAPI_OFFICIAL_CLIENT` | `auto` | `auto`: hablar como la app solo con O2. `true`: también con Movistar (sin probar). `false`: nunca (subida multipart y operaciones de antes). |
+| `SAPI_REFRESH_AFTER_UPLOAD` | `true` | Tras cada subida, esperar a que O2 valide el archivo y releerlo (`media?action=get`) para guardar su URL de descarga firmada, como la app. En segundo plano. Sin ella, la primera descarga de cada archivo subido pasa por la URL por defecto, que O2 rechaza (`COM-1005`), y necesita una consulta más. |
+| `SAPI_VALIDATION_FIRST_SEC` | `10` *(app)* | Segundos hasta la primera consulta de validación tras subir. |
+| `SAPI_VALIDATION_MAX_SEC` | `60` *(app)* | Espera máxima entre consultas de validación (crecen desde la primera hasta aquí). No hay límite de tiempo total: se sigue hasta que O2 termina. |
+| `SAPI_VALIDATION_MAX_FAILURES` | `60` | Consultas de validación seguidas que pueden fallar antes de dejar de seguir un archivo (~1 h). |
+| `SAPI_UPLOAD_ATTEMPTS` | `8` | Intentos de envío del contenido tras un corte (cada uno reanuda donde se quedó). |
+| `SAPI_UPLOAD_RETRY_MAX_SEC` | `60` | Espera máxima entre intentos de envío (2, 5, 10, 20, 30, 45, 60 s…). Con los valores por defecto aguanta unos 3 minutos sin red. |
+| `SAPI_HEARTBEAT_SEC` | `60` *(app)* | Cada cuánto se consulta `system/information`. |
+| `SAPI_HEARTBEAT_FULL_SEC` | `300` *(app)* | Cada cuánto se hace la ronda completa (plan, suscripción, rol, versión, espacio). |
+| `SAPI_LOGIN_RETRY_FIRST_SEC` | `30` | Tras un login fallido, espera hasta el siguiente; se dobla en cada fallo. |
+| `SAPI_LOGIN_RETRY_MAX_SEC` | `600` | Tope de esa espera. |
+| `SAPI_LOGIN_GIVEUP_REJECTIONS` | `4` | Rechazos de credenciales necesarios para dar la sesión por caducada (pedir revincular)… |
+| `SAPI_LOGIN_GIVEUP_SEC` | `1800` | …durante al menos estos segundos. Los cortes, 5xx, 403 del WAF y 401 vacíos de CloudFront nunca cuentan. |
+| `WEBDAV_EMPTY_MANIFEST_RETRY_SEC` | `120` | Si no se pudo subir el manifiesto de archivos vacíos, se reintenta tras estos segundos. |
+| `WEBDAV_COPY_POLL_SEC` | `10` | Copia en la nube (`COPY`) sin respuesta: cada cuánto se busca si apareció. |
+| `WEBDAV_COPY_WAIT_BASE_SEC` | `120` | Espera mínima por esa copia… |
+| `WEBDAV_COPY_WAIT_MBPS` | `10` | …más un segundo por cada estos MB del archivo… |
+| `WEBDAV_COPY_WAIT_MAX_SEC` | `600` | …hasta este máximo. Si no aparece, `503` para que el cliente reintente. |
+
+Los valores en segundos admiten decimales (`0.5`). Un valor vacío o no válido usa el de por defecto.
 ---
 
 ## 🔒 5. Seguridad y Autenticación Detallada

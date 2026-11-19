@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"movistar-webdav-proxy/internal/auth"
+	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 )
 
@@ -30,9 +30,13 @@ import (
 //     que ya tenía el proxy: DeleteFile y deleteFolderLegacy).
 
 // officialClient indica si se habla como el cliente oficial de Windows: perfil
-// desktop con sesión OAuth propia. El perfil browser y el modo web hablan como la web.
+// desktop, con sesión OAuth propia y, por defecto, solo con O2 (ver
+// config.OfficialClientFor). El perfil browser y el modo web hablan como la web.
 func (c *Client) officialClient() bool {
-	return auth.IsDesktopProfile() && !c.WebMode()
+	c.mu.RLock()
+	provider := c.cfg.Provider
+	c.mu.RUnlock()
+	return config.OfficialClientFor(provider) && !c.WebMode()
 }
 
 // officialContentTypes: los content-type que la app manda (capturados) y que el

@@ -34,6 +34,10 @@ func captureCalls(t *testing.T, reply func(c capturedCall) string) (*Client, fun
 		mu.Unlock()
 		_, _ = w.Write([]byte(reply(c)))
 	})
+	// lo que se compara es lo que hace la app de O2 (con Movistar no se usa por defecto)
+	client.mu.Lock()
+	client.cfg.Provider = "o2"
+	client.mu.Unlock()
 	return client, func() []capturedCall {
 		mu.Lock()
 		defer mu.Unlock()

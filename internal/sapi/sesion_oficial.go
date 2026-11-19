@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"movistar-webdav-proxy/internal/auth"
+	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 )
 
@@ -17,14 +18,22 @@ import (
 //
 // Ahora, en el perfil desktop, un login fallido se trata como transitorio y se
 // reintenta con espera creciente; solo se da la sesión por caducada si sigue
-// fallando durante desktopLoginGiveUpAfter y al menos desktopLoginGiveUpTries veces.
+// fallando durante SAPI_LOGIN_GIVEUP_SEC (30 min) y al menos
+// SAPI_LOGIN_GIVEUP_REJECTIONS veces (4).
 // Los fallos que no dicen nada de las credenciales (sin respuesta, 5xx, 429, el 403
 // del cortafuegos o el 401 vacío del borde de CloudFront) nunca la dan por caducada.
-var (
-	desktopLoginBackoff     = []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}
-	desktopLoginGiveUpTries = 4
-	desktopLoginGiveUpAfter = 30 * time.Minute
-)
+// desktopLoginWait: espera antes del siguiente login tras n fallos seguidos:
+// SAPI_LOGIN_RETRY_FIRST_SEC (30 s), doblándose hasta SAPI_LOGIN_RETRY_MAX_SEC (10 min).
+func desktopLoginWait(n int) time.Duration {
+	wait, max := config.LoginRetryFirstWait(), config.LoginRetryMaxWait()
+	for i := 1; i < n && wait < max; i++ {
+		wait *= 2
+	}
+	if wait > max {
+		wait = max
+	}
+	return wait
+}
 
 // desktopLoginFailed registra un login/oauth fallido. Devuelve true si se trata como
 // transitorio (la sesión se conserva y se reintentará); false si hay que darla por
@@ -40,11 +49,8 @@ func (c *Client) desktopLoginFailed(res *auth.SAPILoginResult) bool {
 	c.loginFailures++
 	n := c.loginFailures
 	since := c.loginFailingSince
-	wait := desktopLoginBackoff[len(desktopLoginBackoff)-1]
-	if n-1 < len(desktopLoginBackoff) {
-		wait = desktopLoginBackoff[n-1]
-	}
-	giveUp := definitive && n >= desktopLoginGiveUpTries && now.Sub(since) >= desktopLoginGiveUpAfter
+	wait := desktopLoginWait(n)
+	giveUp := definitive && n >= config.LoginGiveUpRejections() && now.Sub(since) >= config.LoginGiveUpAfter()
 	if !giveUp {
 		c.loginRetryAt = now.Add(wait)
 		c.refreshTransient = true

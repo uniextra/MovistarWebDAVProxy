@@ -2624,13 +2624,7 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 // (5 min). El envío en flujo no retiene el hueco de la API (ver sapi.DoRequest), y
 // nunca se espera turno ni hueco de RAM antes de leer un cuerpo (tryAcquireUploadTurn,
 // Write), así que varias subidas a la vez no se bloquean entre sí.
-func streamUploadsEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("WEBDAV_STREAM_UPLOAD"))) {
-	case "0", "false", "no", "off":
-		return false
-	}
-	return true
-}
+func streamUploadsEnabled() bool { return config.StreamUploads() }
 
 // tryAcquireUploadTurn intenta coger, sin esperar, el turno de subida a SAPI
 // (uploadSem + globalTransferSem). Devuelve false si alguno está ocupado.

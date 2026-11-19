@@ -310,10 +310,10 @@ var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily fa
 // Option ajusta un Client al crearlo (NewClient).
 type Option func(*Client)
 
-// WithValidationPolling cambia cuándo se consulta la validación de un archivo
-// recién subido: la primera consulta a los first y, después, cada vez más
-// espaciadas hasta un máximo de max entre consultas. Por defecto, como el cliente
-// oficial: 10 s y 1 min.
+// WithValidationPolling cambia, para este cliente, cuándo se consulta la validación
+// de un archivo recién subido: la primera consulta a los first y, después, cada vez
+// más espaciadas hasta un máximo de max entre consultas. Por defecto,
+// SAPI_VALIDATION_FIRST_SEC y SAPI_VALIDATION_MAX_SEC (10 s y 1 min, como la app).
 func WithValidationPolling(first, max time.Duration) Option {
 	return func(c *Client) {
 		if first > 0 {
@@ -365,8 +365,8 @@ func NewClient(cfg config.AccountConfig, opts ...Option) (*Client, error) {
 		sapiSem:        make(chan struct{}, maxConcurrent),
 		pacingInterval: pacing,
 
-		validationFirst: defaultValidationFirst,
-		validationMax:   defaultValidationMax,
+		validationFirst: config.ValidationFirstWait(),
+		validationMax:   config.ValidationMaxWait(),
 	}
 	for _, opt := range opts {
 		opt(c)

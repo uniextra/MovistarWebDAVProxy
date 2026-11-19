@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/sapi"
@@ -137,9 +136,9 @@ func TestCopy_FallsBackWhenRejectedOrExisting(t *testing.T) {
 }
 
 func fastCopyWait(t *testing.T) {
-	pi, wb, wm := copyPollInterval, copyWaitBase, copyWaitMax
-	copyPollInterval, copyWaitBase, copyWaitMax = 10*time.Millisecond, 100*time.Millisecond, 200*time.Millisecond
-	t.Cleanup(func() { copyPollInterval, copyWaitBase, copyWaitMax = pi, wb, wm })
+	t.Setenv("WEBDAV_COPY_POLL_SEC", "0.01")
+	t.Setenv("WEBDAV_COPY_WAIT_BASE_SEC", "0.1")
+	t.Setenv("WEBDAV_COPY_WAIT_MAX_SEC", "0.2")
 }
 
 // La copia de 3 GB tardó más que el tiempo de espera y O2 la terminó igualmente:

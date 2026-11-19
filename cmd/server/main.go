@@ -353,9 +353,9 @@ func computeKeepAliveInterval(expiresInStr string, consecutiveFailures int) time
 // cada minuto y, cada cinco, subscription/plan, subscription, profile/role,
 // get-update-info y get-storage-space. Sustituye a runKeepAlive en el perfil desktop.
 func runOfficialHeartbeat(ctx context.Context, client *sapi.Client, isRunning func() bool) {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(config.HeartbeatInterval())
 	defer ticker.Stop()
-	tick := 0
+	lastFull := time.Now()
 	expiredLogged := false
 	for {
 		select {
@@ -374,11 +374,11 @@ func runOfficialHeartbeat(ctx context.Context, client *sapi.Client, isRunning fu
 			continue
 		}
 		expiredLogged = false
-		tick++
 		if err := client.OfficialMinuteBeat(); err != nil {
 			logger.Log("[KeepAlive] ⚠️ system/information: %v", err)
 		}
-		if tick%5 == 0 {
+		if time.Since(lastFull) >= config.HeartbeatFullInterval()-time.Second {
+			lastFull = time.Now()
 			if err := client.OfficialFiveMinuteBeat(); err != nil {
 				logger.Log("[KeepAlive] ⚠️ Ronda de 5 minutos con error (la sesión sigue activa salvo aviso): %v", err)
 			} else {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -383,7 +384,7 @@ func TestOfficialUpload_StreamCutThenContinueFromDisk(t *testing.T) {
 func TestOfficialUpload_DiscardsNewItemWhenItFinallyFails(t *testing.T) {
 	f, srv := newFakeOfficialSAPI(t)
 	c := newOfficialTestClient(t, srv)
-	for i := 1; i <= officialUploadAttempts; i++ {
+	for i := 1; i <= config.UploadAttempts(); i++ {
 		f.cutAfter[i] = 10
 	}
 	_, err := c.UploadFileToFolder("nunca.bin", bytes.NewReader(randomPayload(t, 100000)), 100000, 1, "", "", time.Time{})
@@ -398,7 +399,7 @@ func TestOfficialUpload_DiscardsNewItemWhenItFinallyFails(t *testing.T) {
 func TestOfficialUpload_FailedOverwriteNeverDeletesExistingFile(t *testing.T) {
 	f, srv := newFakeOfficialSAPI(t)
 	c := newOfficialTestClient(t, srv)
-	for i := 1; i <= officialUploadAttempts; i++ {
+	for i := 1; i <= config.UploadAttempts(); i++ {
 		f.cutAfter[i] = 10
 	}
 	f.meta["1597568679"] = map[string]interface{}{}
@@ -626,5 +627,41 @@ func TestOfficialUpload_FollowUpStopsAfterPersistentFailures(t *testing.T) {
 	defer cancel()
 	if !c.WaitUploadSettled(ctx, "42") {
 		t.Fatal("con la consulta fallando siempre, el seguimiento debía terminar")
+	}
+}
+
+// Con Movistar, por defecto, se sigue subiendo como antes (multipart, una petición):
+// lo que hace la app solo está comprobado con O2. SAPI_OFFICIAL_CLIENT=true lo activa.
+func TestOfficialUpload_OnlyO2ByDefault(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		f, _ := newFakeOfficialSAPI(t)
+		var legacy atomic.Int32
+		wrapped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/sapi/upload" { // la subida multipart de siempre
+				legacy.Add(1)
+				_, _ = w.Write([]byte(`{"success":"ok","id":"1597720466","status":"U"}`))
+				return
+			}
+			f.serve(w, r)
+		}))
+		t.Cleanup(wrapped.Close)
+		c := newOfficialTestClient(t, wrapped)
+		c.mu.Lock()
+		c.cfg.Provider = "movistar"
+		c.mu.Unlock()
+		if forced {
+			t.Setenv("SAPI_OFFICIAL_CLIENT", "true")
+		} else {
+			t.Setenv("SAPI_OFFICIAL_CLIENT", "")
+		}
+		if _, err := c.UploadFileToFolder("m.bin", bytes.NewReader([]byte("abc")), 3, 1, "", "", time.Time{}); err != nil {
+			t.Fatalf("forzado=%v: %v", forced, err)
+		}
+		f.mu.Lock()
+		official := len(f.meta) > 0
+		f.mu.Unlock()
+		if official != forced || (legacy.Load() > 0) == forced {
+			t.Errorf("Movistar, SAPI_OFFICIAL_CLIENT forzado=%v: como la app=%v, multipart=%d", forced, official, legacy.Load())
+		}
 	}
 }

@@ -12,23 +12,17 @@ import (
 
 	"golang.org/x/net/webdav"
 
+	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/sapi"
-)
-
-var (
-	copyPollInterval = 10 * time.Second
-	copyWaitBase     = 2 * time.Minute
-	copyWaitRate     = int64(10 << 20) // bytes por segundo que se suponen a la copia en O2
-	copyWaitMax      = 10 * time.Minute
 )
 
 // waitForCloudCopy busca en la carpeta destino un archivo con ese nombre y tamaño
 // hasta que pasa el tiempo razonable para la copia. Devuelve su ID o "".
 func waitForCloudCopy(ctx context.Context, mfs *MovistarFS, folderID int64, name string, size int64) string {
-	wait := copyWaitBase + time.Duration(size/copyWaitRate)*time.Second
-	if wait > copyWaitMax {
-		wait = copyWaitMax
+	wait := config.CopyWaitBase() + time.Duration(size/config.CopyWaitBytesPerSec())*time.Second
+	if max := config.CopyWaitMax(); wait > max {
+		wait = max
 	}
 	deadline := time.Now().Add(wait)
 	for {
@@ -43,7 +37,7 @@ func waitForCloudCopy(ctx context.Context, mfs *MovistarFS, folderID int64, name
 			return ""
 		}
 		select {
-		case <-time.After(copyPollInterval):
+		case <-time.After(config.CopyPollInterval()):
 		case <-ctx.Done():
 			return "" // el cliente se fue: no se sigue esperando para nadie
 		}

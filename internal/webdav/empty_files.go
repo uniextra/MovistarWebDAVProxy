@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 )
 
@@ -21,12 +22,6 @@ const (
 
 var (
 	manifestDebounceDur = 30 * time.Second
-	// manifestRetryDelay: si el manifiesto no se puede subir (sesión caída, 401,
-	// cortafuegos…), se reintenta solo. Antes se esperaba al siguiente cambio, y los
-	// .cinfo de Control/@writer (el estado de Hyper Backup, archivos vacíos que O2 no
-	// guarda) quedaban sin persistir: tras revincular, el destino «retrocedía» y
-	// Hyper Backup fallaba con «cloud-seq-id [1], local-seq-id [24]».
-	manifestRetryDelay = 2 * time.Minute
 )
 
 // EmptyFilesManifest represents the cloud-persisted manifest of 0-byte files.
@@ -215,8 +210,10 @@ func (efm *EmptyFileManager) SaveManifest() {
 		now,
 	)
 	if err != nil {
-		logger.Log("[EmptyFiles] ⚠️ Error subiendo manifiesto a SAPI: %v (se reintenta en %s)", err, manifestRetryDelay)
-		time.AfterFunc(manifestRetryDelay, efm.ScheduleSave)
+		// sesión caída, 401, WAF…: la próxima subida del cliente podría tardar horas
+		retry := config.EmptyManifestRetryWait()
+		logger.Log("[EmptyFiles] ⚠️ Error subiendo manifiesto a SAPI: %v (se reintenta en %s)", err, retry)
+		time.AfterFunc(retry, efm.ScheduleSave)
 		return
 	}
 	if uploaded != nil {

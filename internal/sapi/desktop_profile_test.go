@@ -215,9 +215,8 @@ func TestDesktopProfile_NoApisegRefreshOn401(t *testing.T) {
 	}
 
 	// Si O2 sigue rechazándolo durante el tiempo y los intentos fijados, se da por caducada.
-	prevTries, prevAfter := desktopLoginGiveUpTries, desktopLoginGiveUpAfter
-	desktopLoginGiveUpTries, desktopLoginGiveUpAfter = 2, 0
-	defer func() { desktopLoginGiveUpTries, desktopLoginGiveUpAfter = prevTries, prevAfter }()
+	t.Setenv("SAPI_LOGIN_GIVEUP_REJECTIONS", "2")
+	t.Setenv("SAPI_LOGIN_GIVEUP_SEC", "0.000001")
 	client.mu.Lock()
 	client.loginRetryAt = time.Time{}
 	client.mu.Unlock()
@@ -235,9 +234,8 @@ func TestDesktopProfile_CloudFrontEmpty401NeverExpires(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
-	prevTries, prevAfter := desktopLoginGiveUpTries, desktopLoginGiveUpAfter
-	desktopLoginGiveUpTries, desktopLoginGiveUpAfter = 1, 0
-	defer func() { desktopLoginGiveUpTries, desktopLoginGiveUpAfter = prevTries, prevAfter }()
+	t.Setenv("SAPI_LOGIN_GIVEUP_REJECTIONS", "1")
+	t.Setenv("SAPI_LOGIN_GIVEUP_SEC", "0.000001")
 
 	client := newDesktopTestClient(t, srv.URL, time.Now().Add(-5*time.Minute).UnixMilli())
 	for i := 0; i < 5; i++ {
