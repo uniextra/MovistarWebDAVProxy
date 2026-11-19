@@ -60,6 +60,14 @@ func TestPut_O2RejectsUpload_Returns503NotMethodNotAllowed(t *testing.T) {
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("falta Retry-After")
 	}
+	// el cuerpo dice qué pasó (rclone lo muestra), no «Method Not Allowed» del 405 original
+	body := rec.Body.String()
+	if strings.Contains(body, "Method Not Allowed") || !strings.Contains(body, "MED-1099") || !strings.Contains(body, "reinténtalo") {
+		t.Errorf("cuerpo del 503 = %q", body)
+	}
+	if strings.Contains(body, "vk") {
+		t.Errorf("el cuerpo no debe llevar datos de sesión: %q", body)
+	}
 	if discarded.Load() != 1 {
 		t.Errorf("el elemento a medias debe retirarse (retirados: %d)", discarded.Load())
 	}

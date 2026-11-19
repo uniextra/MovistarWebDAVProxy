@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,7 +70,26 @@ type uploadGuard struct {
 	// 405, que Hyper Backup muestra como «No permission»; se responde 503 +
 	// Retry-After para que el cliente lo reintente (issues #60 y MED-1017).
 	retryLater atomic.Bool
+	reason     atomic.Value // string: por qué O2 no aceptó la subida (va en el cuerpo del 503)
 }
+
+// setRetryLater marca la subida para responder 503 y guarda el motivo, sin datos de
+// sesión, para que el cliente vea qué pasó en vez de «Method Not Allowed».
+func (g *uploadGuard) setRetryLater(err error) {
+	if g == nil {
+		return
+	}
+	if err != nil {
+		msg := validationKeyRe.ReplaceAllString(err.Error(), "${1}X")
+		if len(msg) > 300 {
+			msg = msg[:300] + "…"
+		}
+		g.reason.Store(msg)
+	}
+	g.retryLater.Store(true)
+}
+
+var validationKeyRe = regexp.MustCompile(`((?:validationkey|JSESSIONID|access_token|token)=)[^&\s;]+`)
 
 type guardedBody struct {
 	rc    io.ReadCloser
@@ -2918,9 +2938,7 @@ func (w *WebDAVFileWriter) Close() error {
 				return ErrUploadTooLarge
 			}
 			logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
-			if w.guard != nil {
-				w.guard.retryLater.Store(true)
-			}
+			w.guard.setRetryLater(err)
 			return err
 		}
 	}

@@ -182,7 +182,6 @@ func (s *Server) shouldOfferNTLM(r *http.Request) bool {
 	return isWindowsClient(r) || config.IsNTLMHeader(r.Header.Get("Authorization"))
 }
 
-
 func (s *Server) InvalidateCache() {
 	if s.fs != nil {
 		s.fs.InvalidateCache(0)
@@ -682,17 +681,39 @@ type putStatusInterceptor struct {
 	exceededFlag *atomic.Bool
 	guard        *uploadGuard
 	wroteHeader  bool
+	retryBody    bool // se respondió 503: el cuerpo es el motivo, no el texto del 405
 }
 
 func (p *putStatusInterceptor) WriteHeader(statusCode int) {
 	if ((p.exceededFlag != nil && p.exceededFlag.Load()) || (p.guard != nil && p.guard.tooLarge.Load())) && statusCode >= 400 {
 		statusCode = http.StatusRequestEntityTooLarge
 	} else if p.guard != nil && p.guard.retryLater.Load() && statusCode == http.StatusMethodNotAllowed {
-		p.ResponseWriter.Header().Set("Retry-After", "30")
+		h := p.ResponseWriter.Header()
+		h.Set("Retry-After", "30")
+		h.Del("Content-Length")
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+		h.Set("X-Content-Type-Options", "nosniff")
 		statusCode = http.StatusServiceUnavailable
+		p.retryBody = true
 	}
 	p.wroteHeader = true
 	p.ResponseWriter.WriteHeader(statusCode)
+	if p.retryBody {
+		msg := "O2 Cloud no aceptó la subida; reinténtalo en 30 s"
+		if r, ok := p.guard.reason.Load().(string); ok && r != "" {
+			msg += ": " + r
+		}
+		_, _ = p.ResponseWriter.Write([]byte(msg + "\n"))
+	}
+}
+
+// Write descarta el cuerpo del 405 original («Method Not Allowed») cuando se ha
+// respondido 503: ya se escribió el motivo.
+func (p *putStatusInterceptor) Write(b []byte) (int, error) {
+	if p.retryBody {
+		return len(b), nil
+	}
+	return p.ResponseWriter.Write(b)
 }
 
 type responseInterceptor struct {
