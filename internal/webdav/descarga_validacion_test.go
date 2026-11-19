@@ -111,3 +111,107 @@ func TestGet_RecienSubidoEsperaALaValidacion(t *testing.T) {
 		t.Errorf("URL por defecto %d veces (COM-1005), firmada %d; debía esperar a la validación y usar la firmada", defaultHits, signedHits)
 	}
 }
+
+// Una copia en la nube (COPY) crea un archivo nuevo sin URL firmada: igual que tras
+// una subida, el proxy lo sigue (validación y relectura) y una descarga inmediata
+// espera y usa la URL firmada. Batería real del 19/11/2026: «copia.txt» bajaba
+// primero por la URL por defecto y daba COM-1005.
+func TestGet_CopiaRecienHechaUsaLaURLFirmada(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	oldWait, oldPoll := reuploadSourceWait, reuploadSourcePoll
+	reuploadSourceWait, reuploadSourcePoll = 300*time.Millisecond, 50*time.Millisecond
+	defer func() { reuploadSourceWait, reuploadSourcePoll = oldWait, oldPoll }()
+
+	contenido := []byte("contenido de la copia")
+	var mu sync.Mutex
+	pendientes := 3
+	copiado := false
+	var defaultHits, signedHits int
+	var mock *httptest.Server
+	mock = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		action := r.URL.Query().Get("action")
+		mu.Lock()
+		defer mu.Unlock()
+		item := func(id, name string, folder int, url string) map[string]interface{} {
+			m := map[string]interface{}{"id": id, "name": name, "size": len(contenido), "folderid": folder,
+				"creationdate": "20260101T000000Z", "modificationdate": "20260101T000000Z"}
+			if url != "" {
+				m["url"] = url
+			}
+			return m
+		}
+		switch {
+		case r.URL.Path == "/sapi/media/folder/root" && action == "get":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+				"folders": []map[string]interface{}{{"id": 100, "name": "Root", "parentid": 0, "magic": true}}}})
+		case r.URL.Path == "/sapi/media/folder" && action == "list":
+			folders := []interface{}{}
+			if r.URL.Query().Get("parentid") == "100" {
+				folders = append(folders, map[string]interface{}{"id": 200, "name": "dst", "parentid": 100})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"folders": folders}})
+		case r.URL.Path == "/sapi/media/file" && action == "copy":
+			copiado = true
+			_, _ = io.WriteString(w, `{"data":{"id":"999"}}`)
+		case r.URL.Path == "/sapi/media" && action == "get-validation-status":
+			st := "U"
+			if pendientes > 0 {
+				pendientes--
+				st = "V"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"ids": []map[string]interface{}{{"id": 999, "status": st}}}})
+		case r.URL.Path == "/sapi/media" && action == "get":
+			items := []interface{}{}
+			switch {
+			case r.URL.Query().Get("folderid") == "100":
+				items = append(items, item("555", "a.bin", 100, mock.URL+"/original"))
+			case r.URL.Query().Get("folderid") == "200":
+				if copiado {
+					items = append(items, item("999", "b.bin", 200, ""))
+				}
+			default: // relectura por ID (como la app)
+				url := ""
+				if pendientes == 0 {
+					url = mock.URL + "/firmada"
+				}
+				items = append(items, item("999", "b.bin", 200, url))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"media": items}})
+		case r.URL.Path == "/firmada":
+			signedHits++
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(contenido)
+		case strings.Contains(r.URL.Path, "/media/content") || strings.Contains(r.URL.Path, "/download/"):
+			defaultHits++
+			_, _ = io.WriteString(w, `{"error":{"code":"COM-1005","message":"Unsupported operation"}}`)
+		default:
+			_, _ = io.WriteString(w, `{"data":{}}`)
+		}
+	}))
+	defer mock.Close()
+
+	client, err := sapi.NewClient(config.AccountConfig{Provider: "o2", AccessToken: "a", RefreshToken: "r", ValidationKey: "vk"},
+		sapi.WithValidationPolling(50*time.Millisecond, 100*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetBaseURLs(mock.URL+"/sapi", mock.URL)
+	srv := NewServerWithAuth(client, config.AuthConfig{AuthDisabled: true})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, copyReq("/dst/b.bin"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("COPY = %d", rec.Code)
+	}
+	get := httptest.NewRecorder()
+	srv.ServeHTTP(get, httptest.NewRequest("GET", "/dst/b.bin", nil))
+	if get.Code != http.StatusOK || !bytes.Equal(get.Body.Bytes(), contenido) {
+		t.Fatalf("GET = %d, %q", get.Code, get.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if defaultHits != 0 || signedHits != 1 {
+		t.Errorf("URL por defecto %d veces (COM-1005), firmada %d; debía seguir la copia y usar la firmada", defaultHits, signedHits)
+	}
+}

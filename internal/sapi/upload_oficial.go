@@ -598,14 +598,32 @@ const (
 // corta el seguimiento. Mientras dura, WaitUploadSettled permite a una descarga
 // esperar a que el archivo se pueda leer.
 func (c *Client) afterOfficialSave(id string, folderID int64, status, uploadETag string) {
+	c.followNewMedia(id, folderID, status == "V" || status == "A", c.validationFirst, uploadETag)
+}
+
+// FollowCopiedMedia sigue un archivo que O2 acaba de crear al copiar en la nube, igual
+// que una subida: consulta su validación (enseguida: una copia no pasa por el envío
+// del contenido) y lo relee para guardar su URL de descarga firmada. Sin esto, su
+// primera descarga iba a la URL por defecto (COM-1005) y necesitaba otra consulta.
+// Mientras dura, WaitUploadSettled permite a una descarga esperar. Solo en el perfil
+// desktop, donde el proxy relee como el cliente oficial.
+func (c *Client) FollowCopiedMedia(id string, folderID int64) {
+	if id == "" || !c.officialUploadEnabled() {
+		return
+	}
+	c.followNewMedia(id, folderID, true, 0, "")
+}
+
+// followNewMedia: seguimiento de un archivo nuevo (ver afterOfficialSave). firstWait
+// es la espera antes de la primera consulta de validación.
+func (c *Client) followNewMedia(id string, folderID int64, validating bool, firstWait time.Duration, uploadETag string) {
 	refresh := officialRefreshAfterSave()
-	validating := status == "V" || status == "A"
 	if !refresh && !validating {
 		return
 	}
-	wait, maxWait := c.validationFirst, c.validationMax
-	if maxWait < wait {
-		maxWait = wait
+	wait, maxWait := firstWait, c.validationMax
+	if maxWait < c.validationFirst {
+		maxWait = c.validationFirst
 	}
 	done := c.markSettling(id)
 	go func() {
@@ -628,8 +646,13 @@ func (c *Client) afterOfficialSave(id string, folderID int64, status, uploadETag
 					logged = true
 					logger.Log("[SAPI] ⏳ %s sigue en validación en O2; se consulta cada %s", id, maxWait)
 				}
-				if wait = wait * 3 / 2; wait > maxWait {
+				switch {
+				case wait < c.validationFirst:
+					wait = c.validationFirst // tras una primera consulta inmediata, la cadencia normal
+				case wait*3/2 > maxWait:
 					wait = maxWait
+				default:
+					wait = wait * 3 / 2
 				}
 			}
 		}

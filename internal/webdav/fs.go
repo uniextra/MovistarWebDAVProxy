@@ -526,6 +526,7 @@ func (mfs *MovistarFS) applyMediaRefresh(r sapi.MediaRefresh) {
 			folderID = m.FolderID
 		}
 	}
+	stored := folderID >= 0
 	mfs.cacheMu.Lock()
 	for _, mem := range mfs.uploadCache {
 		if mem.ID == r.ID {
@@ -535,10 +536,50 @@ func (mfs *MovistarFS) applyMediaRefresh(r sapi.MediaRefresh) {
 			folderID = mem.FolderID
 		}
 	}
-	mfs.cacheMu.Unlock()
-	if folderID >= 0 {
-		mfs.InvalidateCache(folderID)
+	// los listados en memoria también: sin base de metadatos no hay de dónde recargarla
+	for _, cm := range mfs.mediaCache {
+		for i := range cm.media {
+			if cm.media[i].ID == r.ID {
+				cm.media[i].URL = r.URL
+			}
+		}
+		for k, m := range cm.byExact {
+			if m.ID == r.ID {
+				m.URL = r.URL
+				cm.byExact[k] = m
+			}
+		}
+		for k, m := range cm.byLower {
+			if m.ID == r.ID {
+				m.URL = r.URL
+				cm.byLower[k] = m
+			}
+		}
 	}
+	mfs.cacheMu.Unlock()
+	if stored {
+		mfs.InvalidateCache(folderID) // se recarga desde la base, ya con la URL
+	}
+}
+
+// cachedDownloadURL: la URL de descarga que el proxy conoce para un ID (base de
+// metadatos o listados en memoria).
+func (mfs *MovistarFS) cachedDownloadURL(id string) string {
+	if ms := mfs.MetadataStore(); ms != nil {
+		if m, err := ms.GetMediaByID(id); err == nil && m != nil {
+			return m.URL
+		}
+	}
+	mfs.cacheMu.RLock()
+	defer mfs.cacheMu.RUnlock()
+	for _, cm := range mfs.mediaCache {
+		for _, m := range cm.media {
+			if m.ID == id && m.URL != "" {
+				return m.URL
+			}
+		}
+	}
+	return ""
 }
 
 func logMetaErr(op string, err error) {
@@ -1720,11 +1761,7 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		id, name := mediaInfo.ID, mediaInfo.Name
 		r.resolveURL = func() string {
 			if mfs.waitUploadSettled(ctx, id, name) {
-				if ms := mfs.MetadataStore(); ms != nil {
-					if m, err := ms.GetMediaByID(id); err == nil && m != nil {
-						return m.URL
-					}
-				}
+				return mfs.cachedDownloadURL(id)
 			}
 			return ""
 		}

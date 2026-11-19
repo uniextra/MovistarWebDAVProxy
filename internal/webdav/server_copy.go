@@ -117,6 +117,8 @@ func (s *Server) tryServerCopy(w http.ResponseWriter, r *http.Request) bool {
 		logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(parent.ID, time.Now().UTC().Format("20060102T150405Z")))
 	}
 	mfs.InvalidateCache(parent.ID)
+	// como tras una subida: validación y relectura para tener la URL firmada
+	mfs.client.FollowCopiedMedia(newID, parent.ID)
 	logger.Log("[WebDAV] 📄 Copiado en la nube: '%s' -> '%s' (ID: %s)", src, dst, newID)
 	w.WriteHeader(http.StatusCreated)
 	return true
