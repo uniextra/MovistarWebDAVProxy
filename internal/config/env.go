@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"movistar-webdav-proxy/internal/auth"
 )
 
 const (
@@ -93,21 +95,23 @@ func GetSyncInterval() time.Duration {
 			return time.Duration(sec) * time.Second
 		}
 	}
-	if desktopProfileForDefaults() {
+	if auth.IsDesktopProfile() {
 		return 300 * time.Second
 	}
 	return 60 * time.Second
 }
 
-// desktopProfileForDefaults replica auth.IsDesktopProfile (config no puede importar auth).
-func desktopProfileForDefaults() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("SAPI_CLIENT_PROFILE"))) {
-	case "browser", "web", "chrome":
-		return false
-	case "desktop", "windows":
+// CaseInsensitiveNames indica si las búsquedas por nombre ignoran mayúsculas
+// (WEBDAV_CASE_INSENSITIVE=true). Por defecto no: O2 Cloud distingue mayúsculas
+// («A.txt» y «a.txt» son dos archivos), y responder a «a.txt» con «A.txt» hacía que
+// rclone diera por subido un archivo que no lo estaba o, en un cambio solo de
+// mayúsculas, borrara el origen creyendo que era el destino.
+func CaseInsensitiveNames() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WEBDAV_CASE_INSENSITIVE"))) {
+	case "1", "true", "yes", "on":
 		return true
 	}
-	return !strings.EqualFold(strings.TrimSpace(os.Getenv("WEB_SESSION")), "true")
+	return false
 }
 
 func SanitizePhone(phone string) string {

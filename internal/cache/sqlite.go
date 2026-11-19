@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/sapi"
 
@@ -399,21 +400,8 @@ func (s *MetadataStore) GetFolderPath(folderID int64) (string, error) {
 	return "/" + strings.Join(segments, "/"), nil
 }
 
-// CaseInsensitiveNames indica si las búsquedas por nombre ignoran mayúsculas
-// (WEBDAV_CASE_INSENSITIVE=true). Por defecto no: O2 Cloud distingue mayúsculas
-// («A.txt» y «a.txt» son dos archivos), y responder a «a.txt» con «A.txt» hacía que
-// rclone diera por subido un archivo que no lo estaba o, en un cambio solo de
-// mayúsculas, borrara el origen creyendo que era el destino.
-func CaseInsensitiveNames() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("WEBDAV_CASE_INSENSITIVE"))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
 func nameCollation() string {
-	if CaseInsensitiveNames() {
+	if config.CaseInsensitiveNames() {
 		return "NOCASE"
 	}
 	return "BINARY"
@@ -606,7 +594,7 @@ func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, err
 	defer rows.Close()
 
 	items := make([]sapi.MediaItem, 0)
-	var lastLower string
+	var lastName string
 	var currentGroup []sapi.MediaItem
 
 	flushGroup := func() {
@@ -632,9 +620,9 @@ func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, err
 		}
 		// Solo son duplicados los del mismo nombre exacto: "A.txt" y "a.txt" son
 		// dos archivos en O2 y se listan los dos.
-		if m.Name != lastLower {
+		if m.Name != lastName {
 			flushGroup()
-			lastLower = m.Name
+			lastName = m.Name
 		}
 		currentGroup = append(currentGroup, *m)
 	}

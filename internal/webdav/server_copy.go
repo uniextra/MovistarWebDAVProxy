@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -24,7 +25,7 @@ var (
 
 // waitForCloudCopy busca en la carpeta destino un archivo con ese nombre y tamaño
 // hasta que pasa el tiempo razonable para la copia. Devuelve su ID o "".
-func waitForCloudCopy(mfs *MovistarFS, folderID int64, name string, size int64) string {
+func waitForCloudCopy(ctx context.Context, mfs *MovistarFS, folderID int64, name string, size int64) string {
 	wait := copyWaitBase + time.Duration(size/copyWaitRate)*time.Second
 	if wait > copyWaitMax {
 		wait = copyWaitMax
@@ -41,7 +42,11 @@ func waitForCloudCopy(mfs *MovistarFS, folderID int64, name string, size int64) 
 		if time.Now().After(deadline) {
 			return ""
 		}
-		time.Sleep(copyPollInterval)
+		select {
+		case <-time.After(copyPollInterval):
+		case <-ctx.Done():
+			return "" // el cliente se fue: no se sigue esperando para nadie
+		}
 	}
 }
 
@@ -96,7 +101,7 @@ func (s *Server) tryServerCopy(w http.ResponseWriter, r *http.Request) bool {
 		// Se espera a que aparezca en la carpeta; si no aparece, 503 para que el
 		// cliente reintente (y entonces ya encontrará el destino si llegó a crearse).
 		logger.Log("[WebDAV] ⏳ Copia en la nube de '%s' sin respuesta (%v); esperando a que aparezca en el destino...", src, err)
-		if found := waitForCloudCopy(mfs, parent.ID, name, media.Size); found != "" {
+		if found := waitForCloudCopy(r.Context(), mfs, parent.ID, name, media.Size); found != "" {
 			newID, err = found, nil
 		} else {
 			logger.Log("[WebDAV] ⏳ La copia de '%s' no apareció a tiempo; se pide al cliente que reintente.", src)
@@ -166,7 +171,13 @@ func (s *Server) tryCaseOnlyRename(w http.ResponseWriter, r *http.Request) bool 
 	}
 	if err := mfs.Rename(r.Context(), src, dst); err != nil {
 		logger.Log("[WebDAV] ❌ Cambio de mayúsculas '%s' -> '%s' fallido: %v", src, dst, err)
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		if errors.Is(err, os.ErrPermission) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		} else {
+			// fallo de O2 (validación, red, sesión…): que el cliente lo reintente
+			w.Header().Set("Retry-After", "30")
+			http.Error(w, "Rename failed in O2 Cloud; retry later", http.StatusServiceUnavailable)
+		}
 		return true
 	}
 	w.WriteHeader(http.StatusCreated)

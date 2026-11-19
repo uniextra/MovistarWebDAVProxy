@@ -62,7 +62,6 @@ func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
 	}
 }
 
-// ScheduleSave triggers a debounced save of the virtual empty files manifest to SAPI.
 // emptyFilesDirtyKey marca en SQLite que hay cambios en los archivos vacíos emulados
 // que aún no están en el manifiesto de la nube. Sobrevive a reinicios y
 // actualizaciones del contenedor: al arrancar, si está puesta, se sube el estado
@@ -83,6 +82,7 @@ func manifestFingerprint(id string, data []byte) string {
 	return id + ":" + hex.EncodeToString(sum[:])
 }
 
+// ScheduleSave triggers a debounced save of the virtual empty files manifest to SAPI.
 func (efm *EmptyFileManager) ScheduleSave() {
 	if efm == nil || efm.mfs == nil {
 		return

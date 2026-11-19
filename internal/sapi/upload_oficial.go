@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"movistar-webdav-proxy/internal/auth"
 	"movistar-webdav-proxy/internal/logger"
 )
 
@@ -59,12 +58,6 @@ func (e *UploadInterruptedError) Error() string {
 
 func (e *UploadInterruptedError) Unwrap() error { return e.Err }
 
-// officialUploadEnabled indica si se sube como el cliente oficial (perfil desktop
-// con sesión OAuth propia). El perfil browser y el modo web siguen subiendo como la web.
-func (c *Client) officialUploadEnabled() bool {
-	return auth.IsDesktopProfile() && !c.WebMode()
-}
-
 var (
 	// Reintentos del envío tras un corte: unos 3 minutos en total, para aguantar un
 	// corte de red real (la app reintenta en cada pasada, cada 60–70 s, sin límite).
@@ -91,19 +84,14 @@ var (
 	}
 )
 
-// officialDatesLocal: la app manda las fechas en hora local y sin zona
-// ("20261118T173627"), pero O2 las guarda como si fueran UTC: un archivo que la app
+// officialDate da formato a una fecha para O2. La app manda la hora local y sin zona
+// ("20261118T173627"), pero O2 la guarda como si fuera UTC: un archivo que la app
 // subió con fecha local 17:36:28 aparece en la nube a las 18:36:28 (comprobado el
 // 18/11/2026 con corte-subida-har.bin). Imitarlo desplazaría una hora (dos en
-// verano) todas las fechas y rclone volvería a subirlo todo, así que el proxy
-// sigue mandando UTC con "Z", que O2 guarda tal cual. Es la única diferencia
-// deliberada con la app en los datos de las peticiones.
-var officialDatesLocal = false
-
+// verano) todas las fechas y rclone volvería a subirlo todo, así que el proxy manda
+// UTC con "Z", que O2 guarda tal cual. Es la única diferencia deliberada con la app
+// en los datos de las peticiones.
 func officialDate(t time.Time) string {
-	if officialDatesLocal {
-		return t.Local().Format("20060102T150405")
-	}
 	return t.UTC().Format("20060102T150405Z")
 }
 
@@ -148,7 +136,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // a O2 se aborta y el elemento nuevo a medias se retira, en lugar de seguir subiendo
 // para nadie y cruzarse con el reintento o el DELETE del cliente.
 func (c *Client) UploadFileToFolderCtx(ctx context.Context, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
-	if !c.officialUploadEnabled() {
+	if !c.officialClient() {
 		return c.UploadFileToFolder(fileName, reader, size, folderID, mimeType, existingMediaID, modTime)
 	}
 	return c.uploadOfficial(officialUpload{
@@ -159,7 +147,7 @@ func (c *Client) UploadFileToFolderCtx(ctx context.Context, fileName string, rea
 
 // UploadFileReplacingCtx es UploadFileReplacing ligada a la petición del cliente.
 func (c *Client) UploadFileReplacingCtx(ctx context.Context, existing MediaItem, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, modTime time.Time) (*MediaItem, error) {
-	if !c.officialUploadEnabled() {
+	if !c.officialClient() {
 		return c.UploadFileToFolder(fileName, reader, size, folderID, mimeType, existing.ID, modTime)
 	}
 	var created time.Time
@@ -184,27 +172,14 @@ func (c *Client) UploadFileContinueCtx(ctx context.Context, pendingID string, pe
 // fecha de creación original como hace la app. Fuera del perfil desktop equivale a
 // UploadFileToFolder con existing.ID.
 func (c *Client) UploadFileReplacing(existing MediaItem, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, modTime time.Time) (*MediaItem, error) {
-	if !c.officialUploadEnabled() {
-		return c.UploadFileToFolder(fileName, reader, size, folderID, mimeType, existing.ID, modTime)
-	}
-	var created time.Time
-	if existing.CreationDate != "" {
-		created = existing.CreationDate.Time()
-	}
-	return c.uploadOfficial(officialUpload{
-		name: fileName, reader: reader, size: size, folderID: folderID,
-		mime: mimeType, existing: existing.ID, created: created, modTime: modTime,
-	})
+	return c.UploadFileReplacingCtx(context.Background(), existing, fileName, reader, size, folderID, mimeType, modTime)
 }
 
 // UploadFileContinue continúa una subida cuyo contenido quedó a medias sobre el ID
 // que ya creó save-metadata (ver UploadInterruptedError). pendingIsNew indica si ese
 // ID lo creó la subida interrumpida (y por tanto se puede retirar si al final falla).
 func (c *Client) UploadFileContinue(pendingID string, pendingIsNew bool, fileName string, reader io.Reader, size int64, folderID int64, mimeType string, modTime time.Time) (*MediaItem, error) {
-	return c.uploadOfficial(officialUpload{
-		name: fileName, reader: reader, size: size, folderID: folderID,
-		mime: mimeType, pendingID: pendingID, pendingNew: pendingIsNew, modTime: modTime,
-	})
+	return c.UploadFileContinueCtx(context.Background(), pendingID, pendingIsNew, fileName, reader, size, folderID, mimeType, modTime)
 }
 
 // DiscardInterruptedUpload retira a la papelera el elemento que creó una subida que
@@ -263,12 +238,16 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 		id = res.ID
 	}
 
+	created := now
+	if !p.created.IsZero() {
+		created = p.created // en una sobrescritura, O2 conserva la fecha de creación
+	}
 	item := &MediaItem{
 		ID:               id,
 		Name:             p.name,
 		Size:             p.size,
 		FolderID:         p.folderID,
-		CreationDate:     FlexDate(now.UTC().Format("20060102T150405Z")),
+		CreationDate:     FlexDate(created.UTC().Format("20060102T150405Z")),
 		ModificationDate: FlexDate(modTime.UTC().Format("20060102T150405Z")),
 		ETag:             res.Etag,
 	}
@@ -313,17 +292,10 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 		_ = resp.Body.Close()
 
 		var res struct {
-			ID    interface{} `json:"id"`
-			Error *struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
+			ID interface{} `json:"id"`
 		}
 		_ = json.Unmarshal(b, &res)
-		code := ""
-		if res.Error != nil {
-			code = res.Error.Code
-		}
+		code, msg, isErr := apiError(b)
 		switch {
 		case resp.StatusCode == http.StatusRequestEntityTooLarge || code == "MED-1020":
 			return "", ErrFileTooLarge
@@ -335,13 +307,15 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 			} else {
 				delay := mediaMoveDelay(attempt)
 				logger.Log("[SAPI] ⏳ '%s' aún en validación (MED-1017) al sobrescribirlo. Reintentando en %s (%d/%d)...", p.name, delay, attempt+1, mediaMoveRetries)
-				time.Sleep(delay)
+				if !sleepCtx(p.context(), delay) {
+					return "", p.context().Err()
+				}
 			}
 			continue
 		case code == "MED-1017":
 			return "", fmt.Errorf("%w: %s", ErrMediaValidating, summarizeHTTPErrorBody(b))
-		case res.Error != nil:
-			return "", fmt.Errorf("save-metadata (%s) API error: %s (%s)", kind, res.Error.Message, code)
+		case isErr:
+			return "", fmt.Errorf("save-metadata (%s) API error: %s (%s)", kind, msg, code)
 		case resp.StatusCode < 200 || resp.StatusCode >= 300:
 			return "", fmt.Errorf("save-metadata (%s) failed (%d): %s", kind, resp.StatusCode, summarizeHTTPErrorBody(b))
 		}
@@ -458,16 +432,9 @@ func (c *Client) officialPostContent(kind, id string, p officialUpload, contentT
 		ID     interface{} `json:"id"`
 		Status string      `json:"status"`
 		Etag   string      `json:"etag"`
-		Error  *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
 	}
 	_ = json.Unmarshal(b, &res)
-	code := ""
-	if res.Error != nil {
-		code = res.Error.Code
-	}
+	code, msg, isErr := apiError(b)
 
 	switch {
 	case resp.StatusCode == http.StatusRequestEntityTooLarge || code == "MED-1020":
@@ -483,8 +450,8 @@ func (c *Client) officialPostContent(kind, id string, p officialUpload, contentT
 		resp.StatusCode >= 500,
 		code == "MED-1048", code == "PAPI-0000":
 		return nil, true, fmt.Errorf("upload content failed (%d): %s", resp.StatusCode, summarizeHTTPErrorBody(b))
-	case res.Error != nil:
-		return nil, false, fmt.Errorf("upload content API error: %s (%s)", res.Error.Message, code)
+	case isErr:
+		return nil, false, fmt.Errorf("upload content API error: %s (%s)", msg, code)
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return nil, false, fmt.Errorf("upload content failed (%d): %s", resp.StatusCode, summarizeHTTPErrorBody(b))
 	}
@@ -521,11 +488,8 @@ func (c *Client) officialQueryOffset(ctx context.Context, kind, id string, size 
 		var res struct {
 			Status string `json:"status"`
 			Etag   string `json:"etag"`
-			Error  *struct {
-				Code string `json:"code"`
-			} `json:"error"`
 		}
-		if json.Unmarshal(b, &res) == nil && res.Error == nil && (res.Etag != "" || res.Status != "") {
+		if _, _, isErr := apiError(b); !isErr && json.Unmarshal(b, &res) == nil && (res.Etag != "" || res.Status != "") {
 			return size, &officialSaveResult{Status: res.Status, Etag: res.Etag}, nil
 		}
 		return 0, nil, nil
@@ -551,6 +515,11 @@ func parseReceivedRange(v string, size int64) int64 {
 	got := last + 1
 	if got > size {
 		return 0
+	}
+	if got == size && size > 0 {
+		// O2 tiene todos los bytes pero no dio la subida por terminada: se vuelve a
+		// mandar el último, para que el rango del envío sea válido y la cierre.
+		return size - 1
 	}
 	return got
 }
@@ -608,7 +577,7 @@ func (c *Client) afterOfficialSave(id string, folderID int64, status, uploadETag
 // Mientras dura, WaitUploadSettled permite a una descarga esperar. Solo en el perfil
 // desktop, donde el proxy relee como el cliente oficial.
 func (c *Client) FollowCopiedMedia(id string, folderID int64) {
-	if id == "" || !c.officialUploadEnabled() {
+	if id == "" || !c.officialClient() {
 		return
 	}
 	c.followNewMedia(id, folderID, true, 0, "")
@@ -630,11 +599,25 @@ func (c *Client) followNewMedia(id string, folderID int64, validating bool, firs
 		defer c.unmarkSettling(id, done)
 		if validating {
 			logged := false
+			failures := 0
 			for {
 				time.Sleep(wait)
+				if !c.followsSettling(id, done) {
+					return // otra subida del mismo archivo lo sigue ahora
+				}
 				st, err := c.mediaValidationStatus(id, folderID)
 				if errors.Is(err, errValidationNoData) {
 					return
+				}
+				if err != nil {
+					// Un fallo pasajero no corta el seguimiento; uno que no se arregla en
+					// una hora (sesión perdida, archivo que O2 ya no reconoce) sí.
+					if failures++; failures >= followMaxFailures {
+						logger.Log("[SAPI] ⚠️ Se deja de seguir la validación de %s: %d consultas seguidas fallidas (%v)", id, failures, err)
+						return
+					}
+				} else {
+					failures = 0
 				}
 				if err == nil && st != "V" && st != "A" {
 					if st != "" {
@@ -667,6 +650,18 @@ func (c *Client) followNewMedia(id string, folderID int64, validating bool, firs
 			h(MediaRefresh{ID: id, URL: fresh.URL, ETag: fresh.ETag, UploadETag: uploadETag})
 		}
 	}()
+}
+
+// followMaxFailures: consultas de validación seguidas que pueden fallar antes de
+// dejar de seguir un archivo (unas 60, ~1 h a una por minuto).
+const followMaxFailures = 60
+
+// followsSettling indica si done sigue siendo el seguimiento vigente de id (una
+// sobrescritura posterior del mismo archivo lo sustituye).
+func (c *Client) followsSettling(id string, done chan struct{}) bool {
+	c.hookMu.Lock()
+	defer c.hookMu.Unlock()
+	return c.settling[id] == done
 }
 
 func (c *Client) markSettling(id string) chan struct{} {
@@ -702,17 +697,20 @@ func (c *Client) UploadSettling(id string) bool {
 // termine la validación y la relectura de un archivo recién subido. Devuelve true si
 // había algo que esperar y terminó; false si no había nada pendiente o ctx terminó.
 func (c *Client) WaitUploadSettled(ctx context.Context, id string) bool {
-	c.hookMu.Lock()
-	ch, ok := c.settling[id]
-	c.hookMu.Unlock()
-	if !ok {
-		return false
-	}
-	select {
-	case <-ch:
-		return true
-	case <-ctx.Done():
-		return false
+	waited := false
+	for {
+		c.hookMu.Lock()
+		ch, ok := c.settling[id]
+		c.hookMu.Unlock()
+		if !ok {
+			return waited // si lo sustituyó otra subida del mismo archivo, se espera a esa
+		}
+		select {
+		case <-ch:
+			waited = true
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 

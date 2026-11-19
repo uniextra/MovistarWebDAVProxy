@@ -412,14 +412,21 @@ func TestOfficialUpload_FailedOverwriteNeverDeletesExistingFile(t *testing.T) {
 }
 
 func TestParseReceivedRange(t *testing.T) {
-	cases := map[string]int64{"0-220391819": 220391820, "bytes=0-9": 10, "": 0, "basura": 0, "0-999": 0}
-	for in, want := range cases {
-		if got := parseReceivedRange(in, 500); in == "0-220391819" {
-			if got := parseReceivedRange(in, 419430400); got != want {
-				t.Errorf("%q → %d, esperado %d", in, got, want)
-			}
-		} else if got != want {
-			t.Errorf("%q → %d, esperado %d", in, got, want)
+	cases := []struct {
+		in   string
+		size int64
+		want int64
+	}{
+		{"0-220391819", 419430400, 220391820},
+		{"bytes=0-9", 500, 10},
+		{"", 500, 0},
+		{"basura", 500, 0},
+		{"0-999", 500, 0},   // más de lo que mide: no se fía
+		{"0-499", 500, 499}, // todo recibido sin cerrar: se reenvía el último byte (rango válido)
+	}
+	for _, c := range cases {
+		if got := parseReceivedRange(c.in, c.size); got != c.want {
+			t.Errorf("%q (tamaño %d) → %d, esperado %d", c.in, c.size, got, c.want)
 		}
 	}
 }
@@ -574,5 +581,50 @@ func TestOfficialUpload_ValidationFollowUpHasNoDeadline(t *testing.T) {
 	f.mu.Unlock()
 	if left != 0 || c.UploadSettling("1597720466") {
 		t.Fatalf("el seguimiento acabó antes de validar (quedaban %d)", left)
+	}
+}
+
+// Si el mismo archivo se vuelve a subir mientras se sigue su validación, el
+// seguimiento anterior se retira (no hay dos consultando el mismo ID) y quien
+// esperaba la descarga pasa a esperar al nuevo.
+func TestOfficialUpload_FollowUpSupersededByNewUpload(t *testing.T) {
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
+	f.validating["1597720466"] = 20
+
+	if _, err := c.UploadFileToFolder("x.bin", bytes.NewReader([]byte("abc")), 3, 1, "", "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	first := func() chan struct{} { c.hookMu.Lock(); defer c.hookMu.Unlock(); return c.settling["1597720466"] }()
+	c.followNewMedia("1597720466", 1, true, 5*time.Millisecond, "")
+	select {
+	case <-first:
+	case <-time.After(2 * time.Second):
+		t.Fatal("el seguimiento anterior no se retiró al empezar el nuevo")
+	}
+	if !c.UploadSettling("1597720466") {
+		t.Fatal("el seguimiento nuevo debía seguir en marcha")
+	}
+	if !c.WaitUploadSettled(context.Background(), "1597720466") {
+		t.Fatal("debía esperar al seguimiento nuevo")
+	}
+}
+
+// Un seguimiento cuya consulta falla siempre no sigue para siempre.
+func TestOfficialUpload_FollowUpStopsAfterPersistentFailures(t *testing.T) {
+	_, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(failing.Close)
+	c.SetBaseURLs(failing.URL+"/sapi", failing.URL)
+	c.followNewMedia("42", 1, true, time.Millisecond, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !c.WaitUploadSettled(ctx, "42") {
+		t.Fatal("con la consulta fallando siempre, el seguimiento debía terminar")
 	}
 }

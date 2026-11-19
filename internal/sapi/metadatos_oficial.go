@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"movistar-webdav-proxy/internal/auth"
 	"movistar-webdav-proxy/internal/logger"
 )
 
@@ -25,11 +26,13 @@ import (
 //     Renombrar o mover carpeta: la misma con "id".
 //   - Borrar archivo: media?action=softdelete&id=<id>; carpeta:
 //     media/folder?action=softdelete&id=<id>. Cuerpo vacío,
-//     application/x-www-form-urlencoded; charset=UTF-8.
+//     application/x-www-form-urlencoded; charset=UTF-8 (son las llamadas genéricas
+//     que ya tenía el proxy: DeleteFile y deleteFolderLegacy).
 
-// officialClient indica si se habla como el cliente oficial de escritorio.
+// officialClient indica si se habla como el cliente oficial de Windows: perfil
+// desktop con sesión OAuth propia. El perfil browser y el modo web hablan como la web.
 func (c *Client) officialClient() bool {
-	return c.officialUploadEnabled()
+	return auth.IsDesktopProfile() && !c.WebMode()
 }
 
 // officialContentTypes: los content-type que la app manda (capturados) y que el
@@ -95,14 +98,8 @@ func (c *Client) officialSaveMediaMetadata(kind string, data map[string]interfac
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("update media (%s) failed (%d): %s", kind, resp.StatusCode, summarizeHTTPErrorBody(b))
 	}
-	var res struct {
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
-		return fmt.Errorf("update media (%s) API error: %s (%s)", kind, res.Error.Message, res.Error.Code)
+	if code, msg, isErr := apiError(b); isErr {
+		return fmt.Errorf("update media (%s) API error: %s (%s)", kind, msg, code)
 	}
 	return nil
 }
@@ -162,34 +159,13 @@ func (c *Client) UpdateFolderItem(folder FolderItem, newName string, parentID in
 	if status < 200 || status >= 300 {
 		return fmt.Errorf("update folder failed (%d): %s", status, summarizeHTTPErrorBody(b))
 	}
-	var res struct {
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
-		if res.Error.Code == "FOL-1036" {
+	if code, msg, isErr := apiError(b); isErr {
+		if code == "FOL-1036" {
 			return ErrFolderUpdatesLimit
 		}
-		return fmt.Errorf("update folder API error: %s (%s)", res.Error.Message, res.Error.Code)
+		return fmt.Errorf("update folder API error: %s (%s)", msg, code)
 	}
 	return nil
-}
-
-// officialSoftDelete manda a la papelera como la app: id en la URL, cuerpo vacío.
-// Devuelve el cuerpo de la respuesta para que el llamante interprete los errores.
-func (c *Client) officialSoftDeleteRequest(folder bool, id string) (*http.Request, error) {
-	u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, id)
-	if folder {
-		u = fmt.Sprintf("%s/media/folder?action=softdelete&id=%s", c.baseURL, id)
-	}
-	req, err := http.NewRequest("POST", u, strings.NewReader(""))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-	return req, nil
 }
 
 func logOfficialFallback(op string, id interface{}, err error) {

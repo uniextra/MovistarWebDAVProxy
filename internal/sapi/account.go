@@ -70,15 +70,23 @@ func AccountSettings(info map[string]interface{}) map[string]interface{} {
 
 // apiErrorCode devuelve el código de error de SAPI del cuerpo ({"error":{"code":...}}), si lo hay.
 func apiErrorCode(b []byte) string {
+	code, _, _ := apiError(b)
+	return code
+}
+
+// apiError devuelve el error de SAPI del cuerpo ({"error":{"code","message"}}); ok
+// indica si lo hay.
+func apiError(b []byte) (code, message string, ok bool) {
 	var res struct {
 		Error *struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(b, &res) == nil && res.Error != nil {
-		return res.Error.Code
+	if json.Unmarshal(b, &res) != nil || res.Error == nil {
+		return "", "", false
 	}
-	return ""
+	return res.Error.Code, res.Error.Message, true
 }
 
 // ErrCopyOutcomeUnknown: la petición de copia no obtuvo respuesta, así que no se sabe

@@ -24,6 +24,8 @@ type nubeConMayusculas struct {
 	datos   map[string][]byte
 	metas   []map[string]interface{}
 	borrado []string
+
+	fallarRenombrado bool // O2 responde con un error a renombrar
 }
 
 func nuevaNubeConMayusculas(t *testing.T) (*Server, *nubeConMayusculas) {
@@ -45,6 +47,10 @@ func nuevaNubeConMayusculas(t *testing.T) (*Server, *nubeConMayusculas) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			n.metas = append(n.metas, body.Data)
+			if n.fallarRenombrado && body.Data["id"] != nil {
+				_, _ = w.Write([]byte(`{"error":{"code":"MED-1000","message":"Unknown exception in media handling"}}`))
+				return
+			}
 			id := fmt.Sprint(body.Data["id"])
 			if body.Data["id"] == nil {
 				n.next++
@@ -226,5 +232,25 @@ func TestMayusculas_RenombrarSoloMayusculasConOverwrite(t *testing.T) {
 	}
 	if got := get(t, srv, "/DATOS.bin"); got != "contenido" {
 		t.Errorf("GET tras renombrar = %q", got)
+	}
+}
+
+// Si O2 falla al cambiar solo las mayúsculas (un fallo suyo, no un permiso), el
+// cliente recibe 503 + Retry-After para reintentar, no un 403 que lo daría por
+// imposible.
+func TestMayusculas_RenombrarSoloMayusculasFalloDeO2PideReintentar(t *testing.T) {
+	srv, nube := nuevaNubeConMayusculas(t)
+	put(t, srv, "/Informe.txt", "datos")
+	nube.mu.Lock()
+	nube.fallarRenombrado = true
+	nube.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("MOVE", "/Informe.txt", nil)
+	req.Header.Set("Destination", "http://example.com/informe.txt")
+	req.Host = "example.com"
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("MOVE = %d (Retry-After %q), esperado 503 con Retry-After", rec.Code, rec.Header().Get("Retry-After"))
 	}
 }
