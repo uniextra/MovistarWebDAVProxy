@@ -7,6 +7,9 @@ Esta guía detalla paso a paso cómo montar tu almacenamiento de Movistar u O2 C
 
 ---
 
+> [!NOTE]
+> **Mayúsculas y minúsculas:** O2 Cloud distingue `Foto.jpg` de `foto.jpg`, y el proxy también: busca los nombres exactos. El Explorador de Windows, el Finder de macOS y otros clientes que no distinguen mayúsculas pueden pedir un archivo con otras mayúsculas y no encontrarlo. Si montas la nube con el cliente nativo de Windows o de macOS, puedes activar `WEBDAV_CASE_INSENSITIVE=true`: si no hay un archivo con el nombre exacto, se usa el que solo difiere en mayúsculas. No lo actives si usas también rclone, restic o Hyper Backup contra el mismo proxy (ver [configuración](configuration.md)).
+
 ## 🪟 1. Windows
 
 > [!CAUTION]

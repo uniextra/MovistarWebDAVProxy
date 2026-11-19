@@ -83,6 +83,9 @@ pass = TuContraseñaOfuscadaConRcloneObscure
 > [!NOTE]
 > Se recomienda limitar `--transfers 3` para alinearse con el semáforo interno del proxy y aprovechar el máximo ancho de banda sin saturar la API de Telefónica.
 
+> [!TIP]
+> **Archivos grandes y cortes de red (perfil `desktop`):** si la conexión con O2 se corta a mitad de una subida, el proxy la reanuda donde se quedó, como el cliente oficial. Pero O2 recibe las subidas reanudadas a solo 1–2 MB/s, y rclone da la subida por fallida si no recibe respuesta en 5 minutos (`--timeout`). En ese caso la reintenta entera, y el proxy retira lo que había subido a medias. Si subes archivos de varios GB con una conexión inestable, sube el límite, por ejemplo con `--timeout 30m`, para que la reanudación pueda terminar.
+
 ---
 
 ### 📦 Configuración avanzada: archivos de más de 4 GB (chunker) y cifrado (crypt)
