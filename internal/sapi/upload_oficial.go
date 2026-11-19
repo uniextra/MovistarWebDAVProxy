@@ -78,7 +78,6 @@ var (
 		}
 		return steps[len(steps)-1]
 	}
-	officialValidationProbe = 10 * time.Second // la app consulta la validación unos 10–15 s después de subir
 	// La app relee el elemento (media?action=get) tras cada subida y el proxy
 	// también: así guarda la URL de descarga firmada y la primera descarga no pasa
 	// por la URL por defecto, que O2 rechaza con COM-1005. Con
@@ -578,40 +577,59 @@ func (c *Client) mediaRefreshHook() func(MediaRefresh) {
 	return c.onMediaRefreshed
 }
 
+// La app consulta la validación unos 10–15 s después de subir. Si el archivo sigue
+// en validación, las consultas se espacian hasta una por minuto (un archivo grande
+// puede tardar varios minutos). Se cambian con WithValidationPolling.
+const (
+	defaultValidationFirst = 10 * time.Second
+	defaultValidationMax   = time.Minute
+)
+
 // afterOfficialSave hace lo mismo que la app tras subir (captura del 18/11/2026): si
 // el archivo queda en validación (estado V o A), consulta su estado unos segundos
 // después (get-validation-status) hasta que termina, y entonces relee el elemento
 // (media?action=get) para quedarse con su URL de descarga firmada. Si no queda en
 // validación, lo relee enseguida. Va en segundo plano: el cliente ya tiene su
 // respuesta. Con SAPI_REFRESH_AFTER_UPLOAD=false solo se consulta la validación.
+//
+// No hay límite de tiempo: se sigue consultando (cada 10 s al principio, luego cada
+// vez más espaciado, hasta una vez por minuto) hasta que O2 termina de validar o deja
+// de conocer el archivo (borrado o sustituido). Un fallo pasajero de la consulta no
+// corta el seguimiento. Mientras dura, WaitUploadSettled permite a una descarga
+// esperar a que el archivo se pueda leer.
 func (c *Client) afterOfficialSave(id string, folderID int64, status, uploadETag string) {
 	refresh := officialRefreshAfterSave()
 	validating := status == "V" || status == "A"
 	if !refresh && !validating {
 		return
 	}
-	wait := officialValidationProbe
-	if wait <= 0 {
-		wait = mediaValidationPoll
+	wait, maxWait := c.validationFirst, c.validationMax
+	if maxWait < wait {
+		maxWait = wait
 	}
-	maxWait := mediaValidationMaxWait
+	done := c.markSettling(id)
 	go func() {
+		defer c.unmarkSettling(id, done)
 		if validating {
-			deadline := time.Now().Add(maxWait)
+			logged := false
 			for {
 				time.Sleep(wait)
 				st, err := c.mediaValidationStatus(id, folderID)
-				if err != nil {
+				if errors.Is(err, errValidationNoData) {
 					return
 				}
-				if st != "V" && st != "A" {
+				if err == nil && st != "V" && st != "A" {
 					if st != "" {
 						logger.Log("[SAPI] ✔ Validación de %s terminada (estado %s)", id, st)
 					}
 					break
 				}
-				if time.Now().After(deadline) {
-					return
+				if err == nil && !logged && wait >= maxWait {
+					logged = true
+					logger.Log("[SAPI] ⏳ %s sigue en validación en O2; se consulta cada %s", id, maxWait)
+				}
+				if wait = wait * 3 / 2; wait > maxWait {
+					wait = maxWait
 				}
 			}
 		}
@@ -626,6 +644,53 @@ func (c *Client) afterOfficialSave(id string, folderID int64, status, uploadETag
 			h(MediaRefresh{ID: id, URL: fresh.URL, ETag: fresh.ETag, UploadETag: uploadETag})
 		}
 	}()
+}
+
+func (c *Client) markSettling(id string) chan struct{} {
+	ch := make(chan struct{})
+	c.hookMu.Lock()
+	if c.settling == nil {
+		c.settling = map[string]chan struct{}{}
+	}
+	c.settling[id] = ch
+	c.hookMu.Unlock()
+	return ch
+}
+
+func (c *Client) unmarkSettling(id string, ch chan struct{}) {
+	c.hookMu.Lock()
+	if c.settling[id] == ch {
+		delete(c.settling, id)
+	}
+	c.hookMu.Unlock()
+	close(ch)
+}
+
+// UploadSettling indica si el archivo se acaba de subir y O2 aún lo está validando
+// (o el proxy aún no lo ha releído).
+func (c *Client) UploadSettling(id string) bool {
+	c.hookMu.Lock()
+	defer c.hookMu.Unlock()
+	_, ok := c.settling[id]
+	return ok
+}
+
+// WaitUploadSettled espera, mientras ctx siga vivo (el cliente conectado), a que
+// termine la validación y la relectura de un archivo recién subido. Devuelve true si
+// había algo que esperar y terminó; false si no había nada pendiente o ctx terminó.
+func (c *Client) WaitUploadSettled(ctx context.Context, id string) bool {
+	c.hookMu.Lock()
+	ch, ok := c.settling[id]
+	c.hookMu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // officialGetMedia relee un archivo como la app: media?action=get sin «origin», con

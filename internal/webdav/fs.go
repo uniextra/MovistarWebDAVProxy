@@ -1675,7 +1675,10 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		// La subida no siempre devuelve URL de descarga y SAPI tarda unos segundos en
 		// indexar el archivo recién subido; esperamos brevemente en ambos modos a que
 		// GetMediaByID devuelva la URL firmada en lugar de caer en /media/content?id=.
-		r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		r.resolveURL = func() string {
+			mfs.waitUploadSettled(ctx, mem.ID, mem.Name)
+			return mfs.waitForDownloadURL(mem)
+		}
 		return r, nil
 	}
 	mfs.cacheMu.RUnlock()
@@ -1692,7 +1695,40 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}), nil
 	}
 
-	return NewWebDAVFileReader(mfs, cleanPath, *mediaInfo), nil
+	r := NewWebDAVFileReader(mfs, cleanPath, *mediaInfo)
+	if mfs.client != nil && mfs.client.UploadSettling(mediaInfo.ID) {
+		id, name := mediaInfo.ID, mediaInfo.Name
+		r.resolveURL = func() string {
+			if mfs.waitUploadSettled(ctx, id, name) {
+				if ms := mfs.MetadataStore(); ms != nil {
+					if m, err := ms.GetMediaByID(id); err == nil && m != nil {
+						return m.URL
+					}
+				}
+			}
+			return ""
+		}
+	}
+	return r, nil
+}
+
+// waitUploadSettled: un archivo recién subido no se puede descargar hasta que O2
+// termina de validarlo (antes, la URL por defecto da COM-1005 y la firmada aún no
+// existe). La descarga espera a que termine la validación y la relectura, sin límite
+// propio: mientras el cliente siga conectado.
+func (mfs *MovistarFS) waitUploadSettled(ctx context.Context, id, name string) bool {
+	if mfs.client == nil || id == "" || !mfs.client.UploadSettling(id) {
+		return false
+	}
+	logger.Log("[WebDAV] ⏳ '%s' aún se está validando en O2: la descarga espera a que termine...", name)
+	start := time.Now()
+	ok := mfs.client.WaitUploadSettled(ctx, id)
+	if ok {
+		logger.Log("[WebDAV] ✔ '%s' validado tras %s: se descarga", name, time.Since(start).Round(time.Second))
+	} else if ctx.Err() != nil {
+		logger.Log("[WebDAV] ⚠️ El cliente dejó de esperar a '%s' (%s en validación)", name, time.Since(start).Round(time.Second))
+	}
+	return ok
 }
 
 // urlLookupErrorBackoff es el tiempo durante el que no se vuelve a consultar la URL de

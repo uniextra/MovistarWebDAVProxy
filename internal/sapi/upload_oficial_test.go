@@ -198,14 +198,14 @@ func (f *fakeOfficialSAPI) validationStatus(w http.ResponseWriter, r *http.Reque
 func newOfficialTestClient(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
 	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
-	prevBackoff, prevProbe, prevPoll := officialUploadBackoff, officialValidationProbe, mediaValidationPoll
+	prevBackoff, prevPoll := officialUploadBackoff, mediaValidationPoll
 	officialUploadBackoff = func(int) time.Duration { return 0 }
-	officialValidationProbe = 0
 	mediaValidationPoll = 5 * time.Millisecond
 	t.Cleanup(func() {
-		officialUploadBackoff, officialValidationProbe, mediaValidationPoll = prevBackoff, prevProbe, prevPoll
+		officialUploadBackoff, mediaValidationPoll = prevBackoff, prevPoll
 	})
-	c, err := NewClient(config.AccountConfig{Provider: "o2", AccessToken: "at", RefreshToken: "rt", ValidationKey: "vk", JSessionID: "js", DeviceID: "fol-abc"})
+	c, err := NewClient(config.AccountConfig{Provider: "o2", AccessToken: "at", RefreshToken: "rt", ValidationKey: "vk", JSessionID: "js", DeviceID: "fol-abc"},
+		WithValidationPolling(5*time.Millisecond, 5*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,5 +542,37 @@ func TestOfficialUpload_ClientGoneAbortsAndDiscards(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.deleted) != 1 {
 		t.Fatalf("el elemento a medias debe retirarse: %v", f.deleted)
+	}
+}
+
+// El seguimiento de la validación no tiene límite propio: sigue hasta que O2 termina
+// (aquí, muchas más consultas que las que cabían en los 2 min de antes, a escala) o
+// deja de conocer el archivo. Mientras dura, WaitUploadSettled espera; si el que
+// espera se va (ctx), deja de esperar sin cortar el seguimiento.
+func TestOfficialUpload_ValidationFollowUpHasNoDeadline(t *testing.T) {
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
+	f.validating["1597720466"] = 40 // ~200 ms en «V»: muchas más consultas que la espera límite de antes, a escala
+
+	if _, err := c.UploadFileToFolder("x.bin", bytes.NewReader([]byte("abc")), 3, 1, "", "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if !c.UploadSettling("1597720466") {
+		t.Fatal("recién subido y en validación: debía constar como pendiente")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if c.WaitUploadSettled(ctx, "1597720466") {
+		t.Fatal("el que espera se fue: no debía darse por validado")
+	}
+	if !c.WaitUploadSettled(context.Background(), "1597720466") {
+		t.Fatal("debía esperar hasta el final de la validación")
+	}
+	f.mu.Lock()
+	left := f.validating["1597720466"]
+	f.mu.Unlock()
+	if left != 0 || c.UploadSettling("1597720466") {
+		t.Fatalf("el seguimiento acabó antes de validar (quedaban %d)", left)
 	}
 }

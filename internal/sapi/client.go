@@ -293,7 +293,11 @@ type Client struct {
 	wafUpload wafBreaker // pausa las subidas (servidor de subidas) tras un 403 del cortafuegos en ese servidor
 
 	hookMu           sync.Mutex
-	onMediaRefreshed func(MediaRefresh) // relectura tras subir (upload_oficial.go)
+	onMediaRefreshed func(MediaRefresh)       // relectura tras subir (upload_oficial.go)
+	settling         map[string]chan struct{} // subidas aún en validación o sin releer (ID → se cierra al terminar)
+
+	validationFirst time.Duration // primera consulta de validación tras subir (WithValidationPolling)
+	validationMax   time.Duration // espera máxima entre consultas de validación
 }
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
@@ -303,7 +307,25 @@ var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured ma
 // problema transitorio (red/5xx), no porque el refresh_token esté revocado.
 var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily failed")
 
-func NewClient(cfg config.AccountConfig) (*Client, error) {
+// Option ajusta un Client al crearlo (NewClient).
+type Option func(*Client)
+
+// WithValidationPolling cambia cuándo se consulta la validación de un archivo
+// recién subido: la primera consulta a los first y, después, cada vez más
+// espaciadas hasta un máximo de max entre consultas. Por defecto, como el cliente
+// oficial: 10 s y 1 min.
+func WithValidationPolling(first, max time.Duration) Option {
+	return func(c *Client) {
+		if first > 0 {
+			c.validationFirst = first
+		}
+		if max > 0 {
+			c.validationMax = max
+		}
+	}
+}
+
+func NewClient(cfg config.AccountConfig, opts ...Option) (*Client, error) {
 	// Transporte HTTP/2 con ClientHello emitido por uTLS, imitando un navegador
 	// convencional para no disparar el AWS CloudFront WAF Bot Control (403).
 	transport := auth.NewFingerprintedTransport()
@@ -342,6 +364,12 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		maxUploadMB:    4096,
 		sapiSem:        make(chan struct{}, maxConcurrent),
 		pacingInterval: pacing,
+
+		validationFirst: defaultValidationFirst,
+		validationMax:   defaultValidationMax,
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 
 	c.syncCookiesLocked()
@@ -1981,8 +2009,12 @@ func (c *Client) mediaValidationStatus(mediaID string, folderID int64) (string, 
 			return it.Status, nil
 		}
 	}
-	return "", fmt.Errorf("validation status: sin datos de %s", mediaID)
+	return "", fmt.Errorf("%w: %s", errValidationNoData, mediaID)
 }
+
+// errValidationNoData: O2 no devuelve el estado de ese ID (ya no existe: borrado o
+// sustituido).
+var errValidationNoData = errors.New("validation status: sin datos")
 
 // waitMediaValidated espera a que el archivo deje de estar en validación. Devuelve
 // false si no se pudo saber o se agotó la espera.
