@@ -47,6 +47,8 @@ func TestDuplicatiTestPath_RestrictedScope(t *testing.T) {
 }
 
 func TestMovistarFS_MetadataStore_ResolutionWithoutSAPI(t *testing.T) {
+	// Modo opcional que no distingue mayúsculas (por defecto los nombres son exactos, como en O2).
+	t.Setenv("WEBDAV_CASE_INSENSITIVE", "true")
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "meta_test.db")
 	ms, err := cache.NewMetadataStore(dbPath)
@@ -134,6 +136,8 @@ func TestMovistarFS_MetadataStore_ResolutionWithoutSAPI(t *testing.T) {
 }
 
 func TestMovistarFS_TombstonesAndUploadCache_CaseInsensitive(t *testing.T) {
+	// Modo opcional que no distingue mayúsculas (por defecto los nombres son exactos, como en O2).
+	t.Setenv("WEBDAV_CASE_INSENSITIVE", "true")
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "meta_tomb_test.db")
 	ms, err := cache.NewMetadataStore(dbPath)
@@ -286,7 +290,7 @@ func TestMovistarFS_MaybeTriggerSync_OnPropfind(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 
-	srv := httptest.NewServer(sapiHandler)
+	srv := newShimServer(sapiHandler)
 	defer srv.Close()
 
 	client, _ := sapi.NewClient(config.AccountConfig{RefreshToken: "active_token"})
@@ -319,7 +323,7 @@ func TestMetadataStore_ConcurrentSyncChanges(t *testing.T) {
 	defer ms.Close()
 
 	var sapiCalls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "profile/changes") {
 			sapiCalls.Add(1)
 			time.Sleep(50 * time.Millisecond) // Simulate slow network response
@@ -369,7 +373,7 @@ func TestMetadataStore_SyncChanges_AdvancesCursorOnEmptyChanges(t *testing.T) {
 	}
 
 	reqTime := int64(1794389950000)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"requesttime":  reqTime,
@@ -618,7 +622,7 @@ func TestMovistarFS_SAPIFallback_WithCooldown(t *testing.T) {
 	_ = ms.SetSyncState("last_sync_cursor", "20261111T000000Z") // initial sync marked done
 
 	var sapiMediaCalls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "subfolder") {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -715,7 +719,7 @@ func TestMovistarFS_Rename_AtomicDestination(t *testing.T) {
 	var shouldFailSAPI atomic.Bool
 	shouldFailSAPI.Store(true)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if shouldFailSAPI.Load() {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -783,7 +787,7 @@ func TestMovistarFS_RemoveAll_And_Rename_WithSQLite(t *testing.T) {
 	_ = ms.UpsertFolder(sapi.FolderItem{ID: folderID, Name: "SubFolder", ParentID: rootID})
 	_ = ms.UpsertMedia(sapi.MediaItem{ID: "m_1", Name: "test.txt", Size: 100, FolderID: folderID})
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 	}))
@@ -808,10 +812,10 @@ func TestMovistarFS_RemoveAll_And_Rename_WithSQLite(t *testing.T) {
 
 	// Verify tombstone is set with lowercase key
 	fs.cacheMu.RLock()
-	_, isTomb := fs.deletedTombstones[strings.ToLower("/subfolder/test.txt")]
+	_, _, isTomb := foldLookup(fs.deletedTombstones, "/subfolder/test.txt")
 	fs.cacheMu.RUnlock()
 	if !isTomb {
-		t.Errorf("expected tombstone in lowercase for /subfolder/test.txt")
+		t.Errorf("expected tombstone for /subfolder/test.txt")
 	}
 
 	// 2. Test RemoveAll on folder
@@ -828,9 +832,9 @@ func TestMovistarFS_RemoveAll_And_Rename_WithSQLite(t *testing.T) {
 
 	// Verify folder tombstone in lowercase
 	fs.cacheMu.RLock()
-	_, isFolTomb := fs.deletedTombstones[strings.ToLower("/subfolder")]
+	_, _, isFolTomb := foldLookup(fs.deletedTombstones, "/subfolder")
 	fs.cacheMu.RUnlock()
 	if !isFolTomb {
-		t.Errorf("expected tombstone in lowercase for /subfolder")
+		t.Errorf("expected tombstone for /subfolder")
 	}
 }

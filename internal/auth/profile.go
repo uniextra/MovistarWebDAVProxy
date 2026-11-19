@@ -5,8 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"os"
-	"strings"
+
+	"movistar-webdav-proxy/internal/config"
 )
 
 // Perfil de cliente con el que el proxy se presenta ante SAPI.
@@ -34,28 +34,15 @@ import (
 //
 // En modo web (WEB_SESSION=true) el perfil por defecto es "browser".
 const (
-	ProfileDesktop = "desktop"
-	ProfileBrowser = "browser"
+	ProfileDesktop = config.ProfileDesktop
+	ProfileBrowser = config.ProfileBrowser
 )
 
-// ClientProfile devuelve el perfil activo.
-func ClientProfile() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("SAPI_CLIENT_PROFILE"))) {
-	case "browser", "web", "chrome":
-		return ProfileBrowser
-	case "desktop", "windows":
-		return ProfileDesktop
-	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("WEB_SESSION")), "true") {
-		return ProfileBrowser
-	}
-	return ProfileDesktop
-}
+// ClientProfile devuelve el perfil activo (ver config.ClientProfile).
+func ClientProfile() string { return config.ClientProfile() }
 
 // IsDesktopProfile indica si el proxy debe imitar al cliente oficial de escritorio.
-func IsDesktopProfile() bool {
-	return ClientProfile() == ProfileDesktop
-}
+func IsDesktopProfile() bool { return config.IsDesktopProfile() }
 
 // DesktopAcceptLanguage es el Accept-Language que envía el cliente oficial (Qt).
 const DesktopAcceptLanguage = "es-ES,en,*"

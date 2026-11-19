@@ -162,6 +162,8 @@ func TestNormalDownload_ExpiredURLIsRefreshedAndRemembered(t *testing.T) {
 
 // Un error transitorio de subida (MED-1048) reintenta rebobinando el cuerpo y acaba completando la subida.
 func TestUploadFileToFolder_TransientMED1048RetriesAndSucceeds(t *testing.T) {
+	// Subida de la web (multipart); la del perfil desktop se prueba en upload_oficial_test.go.
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	const payload = "test-payload-bytes-0123456789abcdef"
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

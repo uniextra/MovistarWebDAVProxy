@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,10 @@ var (
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
 )
 
+// ErrUploadUnsupported: O2 no admite el archivo con el tipo que indica su extensión
+// (MED-1050). Se responde 415 y el cliente no debe reintentarlo.
+var ErrUploadUnsupported = errors.New("O2 Cloud does not support this file type/content (MED-1050)")
+
 // SetTransferLimits fija cuántas descargas y subidas simultáneas admite el proxy.
 // Por defecto es 1 y 1 (como el cliente oficial de escritorio). En modo web las
 // descargas van con URL firmada a CloudFront y la API la llama el navegador, así
@@ -58,13 +63,49 @@ func SetTransferLimits(downloads, uploads int) {
 	globalTransferSem = make(chan struct{}, downloads+uploads)
 }
 
+// rejectUnsupported marca la subida para responder 415: O2 no admite el archivo con
+// el tipo que indica su extensión y reintentarlo no lo arreglará.
+func (w *WebDAVFileWriter) rejectUnsupported() error {
+	if w.guard != nil {
+		w.guard.unsupported.Store(true)
+	}
+	logger.Log("[WebDAV] ❌ O2 Cloud no admite '%s': su contenido no corresponde a la extensión (MED-1050). No se reintenta.", w.name)
+	return ErrUploadUnsupported
+}
+
 type uploadGuardKey struct{}
 
 type uploadGuard struct {
 	expected int64 // Content-Length anunciado (-1 si no se sabe)
 	broken   atomic.Bool
 	tooLarge atomic.Bool
+	// unsupported: O2 rechazó el archivo por su contenido (MED-1050) → 415.
+	unsupported atomic.Bool
+	// retryLater: el cuerpo llegó entero pero O2 no aceptó la subida (sesión,
+	// validación MED-1017, corte de red, cortafuegos…). x/net/webdav lo convierte en
+	// 405, que Hyper Backup muestra como «No permission»; se responde 503 +
+	// Retry-After para que el cliente lo reintente (issues #60 y MED-1017).
+	retryLater atomic.Bool
+	reason     atomic.Value // string: por qué O2 no aceptó la subida (va en el cuerpo del 503)
 }
+
+// setRetryLater marca la subida para responder 503 y guarda el motivo, sin datos de
+// sesión, para que el cliente vea qué pasó en vez de «Method Not Allowed».
+func (g *uploadGuard) setRetryLater(err error) {
+	if g == nil {
+		return
+	}
+	if err != nil {
+		msg := validationKeyRe.ReplaceAllString(err.Error(), "${1}X")
+		if len(msg) > 300 {
+			msg = msg[:300] + "…"
+		}
+		g.reason.Store(msg)
+	}
+	g.retryLater.Store(true)
+}
+
+var validationKeyRe = regexp.MustCompile(`((?:validationkey|JSESSIONID|access_token|token)=)[^&\s;]+`)
 
 type guardedBody struct {
 	rc    io.ReadCloser
@@ -333,43 +374,50 @@ func (mfs *MovistarFS) LastRemoveErr() error {
 
 type cachedFolders struct {
 	folders []sapi.FolderItem
+	byExact map[string]sapi.FolderItem
 	byLower map[string]sapi.FolderItem
 	time    time.Time
 }
 
 func newCachedFolders(folders []sapi.FolderItem) *cachedFolders {
+	byExact := make(map[string]sapi.FolderItem, len(folders))
 	byLower := make(map[string]sapi.FolderItem, len(folders))
 	for _, f := range folders {
-		byLower[strings.ToLower(f.Name)] = f
+		byExact[f.Name] = f
+		if _, ok := byLower[strings.ToLower(f.Name)]; !ok {
+			byLower[strings.ToLower(f.Name)] = f
+		}
 	}
 	return &cachedFolders{
 		folders: folders,
+		byExact: byExact,
 		byLower: byLower,
 		time:    time.Now(),
 	}
 }
 
-func (cf *cachedFolders) find(name string) (*sapi.FolderItem, bool) {
-	lower := strings.ToLower(name)
-	if item, ok := cf.byLower[lower]; ok {
-		itemCopy := item
-		return &itemCopy, true
+func (cf *cachedFolders) find(name string, fold bool) (*sapi.FolderItem, bool) {
+	get := func(n string) (*sapi.FolderItem, bool) {
+		if item, ok := cf.byExact[n]; ok {
+			itemCopy := item
+			return &itemCopy, true
+		}
+		if fold {
+			if item, ok := cf.byLower[strings.ToLower(n)]; ok {
+				itemCopy := item
+				return &itemCopy, true
+			}
+		}
+		return nil, false
+	}
+	if item, ok := get(name); ok {
+		return item, true
 	}
 	// Tolerancia Synology HyperBackup .hbk
-	if strings.HasSuffix(lower, ".hbk") && len(lower) > 4 {
-		base := lower[:len(lower)-4]
-		if item, ok := cf.byLower[base]; ok {
-			itemCopy := item
-			return &itemCopy, true
-		}
-	} else {
-		hbk := lower + ".hbk"
-		if item, ok := cf.byLower[hbk]; ok {
-			itemCopy := item
-			return &itemCopy, true
-		}
+	if strings.HasSuffix(strings.ToLower(name), ".hbk") && len(name) > 4 {
+		return get(name[:len(name)-4])
 	}
-	return nil, false
+	return get(name + ".hbk")
 }
 
 type cachedMedia struct {
@@ -394,16 +442,20 @@ func isMoreRecentMedia(a, b sapi.MediaItem) bool {
 func newCachedMedia(media []sapi.MediaItem) *cachedMedia {
 	byExact := make(map[string]sapi.MediaItem, len(media))
 	byLower := make(map[string]sapi.MediaItem, len(media))
+	// Nombres que solo difieren en mayúsculas son archivos distintos en O2: cada uno
+	// se busca por su nombre exacto. byLower solo sirve de respaldo para quien pide
+	// un nombre con otras mayúsculas (clientes de Windows), y apunta al más reciente.
 	for _, m := range media {
-		lower := strings.ToLower(m.Name)
-		if existing, exists := byLower[lower]; exists {
+		if existing, exists := byExact[m.Name]; exists {
 			logger.Log("[WebDAV] ⚠️ Nombres duplicados en caché para '%s' (IDs: %s y %s). Seleccionando el más reciente.", m.Name, existing.ID, m.ID)
 			if isMoreRecentMedia(m, existing) {
 				byExact[m.Name] = m
-				byLower[lower] = m
 			}
 		} else {
 			byExact[m.Name] = m
+		}
+		lower := strings.ToLower(m.Name)
+		if existing, exists := byLower[lower]; !exists || isMoreRecentMedia(m, existing) {
 			byLower[lower] = m
 		}
 	}
@@ -415,10 +467,13 @@ func newCachedMedia(media []sapi.MediaItem) *cachedMedia {
 	}
 }
 
-func (cm *cachedMedia) find(name string) (*sapi.MediaItem, bool) {
+func (cm *cachedMedia) find(name string, fold bool) (*sapi.MediaItem, bool) {
 	if item, ok := cm.byExact[name]; ok {
 		itemCopy := item
 		return &itemCopy, true
+	}
+	if !fold {
+		return nil, false
 	}
 	if item, ok := cm.byLower[strings.ToLower(name)]; ok {
 		itemCopy := item
@@ -451,15 +506,97 @@ func NewMovistarFS(client *sapi.Client, metaStores ...*cache.MetadataStore) *Mov
 		syncInterval:      config.GetSyncInterval(),
 	}
 	fs.emptyFileManager = NewEmptyFileManager(fs)
+	if client != nil {
+		client.SetMediaRefreshHook(fs.applyMediaRefresh)
+	}
 	if ms != nil {
 		ms.SetTombstoneCleaner(fs.ClearTombstone)
 		ms.SetTombstoneFilter(fs.HasTombstones)
+		ms.SetNameFolding(fs.caseInsensitive)
 		go func() {
 			time.Sleep(2 * time.Second)
 			fs.emptyFileManager.BootstrapLoad()
 		}()
 	}
 	return fs
+}
+
+// applyMediaRefresh guarda lo que devuelve la relectura tras subir (como la app): la
+// URL de descarga firmada, en la caché de subidas recientes y en la base de
+// metadatos. Así la primera descarga no pasa por la URL por defecto, que O2 rechaza
+// con COM-1005. Si el archivo cambió o se borró entretanto, no se toca.
+func (mfs *MovistarFS) applyMediaRefresh(r sapi.MediaRefresh) {
+	if mfs == nil || r.ID == "" || r.URL == "" {
+		return
+	}
+	folderID := int64(-1)
+	if ms := mfs.MetadataStore(); ms != nil {
+		if m, err := ms.GetMediaByID(r.ID); err == nil && m != nil {
+			if r.UploadETag != "" && m.ETag != "" && m.ETag != r.UploadETag {
+				return // el archivo cambió después de esa subida
+			}
+			m.URL = r.URL
+			if r.ETag != "" {
+				m.ETag = r.ETag
+			}
+			logMetaErr("UpsertMedia", ms.UpsertMedia(*m))
+			folderID = m.FolderID
+		}
+	}
+	stored := folderID >= 0
+	mfs.cacheMu.Lock()
+	for _, mem := range mfs.uploadCache {
+		if mem.ID == r.ID {
+			mem.URL = r.URL
+			mem.URLConfirmed = true
+			mem.URLLookupFailedAt = time.Time{}
+			folderID = mem.FolderID
+		}
+	}
+	// los listados en memoria también: sin base de metadatos no hay de dónde recargarla
+	for _, cm := range mfs.mediaCache {
+		for i := range cm.media {
+			if cm.media[i].ID == r.ID {
+				cm.media[i].URL = r.URL
+			}
+		}
+		for k, m := range cm.byExact {
+			if m.ID == r.ID {
+				m.URL = r.URL
+				cm.byExact[k] = m
+			}
+		}
+		for k, m := range cm.byLower {
+			if m.ID == r.ID {
+				m.URL = r.URL
+				cm.byLower[k] = m
+			}
+		}
+	}
+	mfs.cacheMu.Unlock()
+	if stored {
+		mfs.InvalidateCache(folderID) // se recarga desde la base, ya con la URL
+	}
+}
+
+// cachedDownloadURL: la URL de descarga que el proxy conoce para un ID (base de
+// metadatos o listados en memoria).
+func (mfs *MovistarFS) cachedDownloadURL(id string) string {
+	if ms := mfs.MetadataStore(); ms != nil {
+		if m, err := ms.GetMediaByID(id); err == nil && m != nil {
+			return m.URL
+		}
+	}
+	mfs.cacheMu.RLock()
+	defer mfs.cacheMu.RUnlock()
+	for _, cm := range mfs.mediaCache {
+		for _, m := range cm.media {
+			if m.ID == id && m.URL != "" {
+				return m.URL
+			}
+		}
+	}
+	return ""
 }
 
 func logMetaErr(op string, err error) {
@@ -488,6 +625,7 @@ func (mfs *MovistarFS) SetMetadataStore(ms *cache.MetadataStore) {
 	if ms != nil {
 		ms.SetTombstoneCleaner(mfs.ClearTombstone)
 		ms.SetTombstoneFilter(mfs.HasTombstones)
+		ms.SetNameFolding(mfs.caseInsensitive)
 		if mfs.emptyFileManager != nil {
 			go func() {
 				time.Sleep(2 * time.Second)
@@ -528,11 +666,84 @@ func (mfs *MovistarFS) ClearTombstone(itemPath string) {
 	}
 	mfs.cacheMu.RUnlock()
 
-	lower := strings.ToLower(path.Clean("/" + itemPath))
+	lower := cacheKey(itemPath)
 	mfs.cacheMu.Lock()
 	delete(mfs.deletedTombstones, lower)
 	mfs.cacheMu.Unlock()
 }
+
+// cacheKey es la clave de las cachés en memoria (subidas recientes, carpetas
+// creadas y marcas de borrado). Distingue mayúsculas: O2 Cloud admite "A.txt" y
+// "a.txt" en la misma carpeta, y con claves en minúsculas una pisaba a la otra.
+func cacheKey(p string) string { return path.Clean("/" + p) }
+
+// foldLookup busca key en m; si no está, una clave que solo difiera en mayúsculas.
+// Devuelve la clave encontrada ("" si ninguna).
+func foldLookup[T any](m map[string]T, key string) (string, T, bool) {
+	if v, ok := m[key]; ok {
+		return key, v, true
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return k, v, true
+		}
+	}
+	var zero T
+	return "", zero, false
+}
+
+// pickByName elige, de n candidatos, el que se llama exactamente want; si no hay
+// ninguno, el primero que coincide sin distinguir mayúsculas (y, con hbk, la
+// tolerancia de Hyper Backup al sufijo .hbk). -1 si ninguno.
+func pickByName(n int, nameAt func(int) string, want string, hbk, fold bool) int {
+	for i := 0; i < n; i++ {
+		if nameAt(i) == want {
+			return i
+		}
+	}
+	same := func(a, b string) bool {
+		if fold {
+			return strings.EqualFold(a, b)
+		}
+		return a == b
+	}
+	for i := 0; i < n; i++ {
+		got := nameAt(i)
+		if same(got, want) {
+			return i
+		}
+		if hbk && strings.HasSuffix(strings.ToLower(want), ".hbk") && same(got, want[:len(want)-4]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// recentUpload busca un archivo recién subido en la caché de subidas (con cacheMu
+// tomado): por su ruta exacta y, con WEBDAV_CASE_INSENSITIVE, también con otras
+// mayúsculas si es el mismo archivo que se resolvió (o no se resolvió ninguno).
+func (mfs *MovistarFS) recentUpload(key string, resolved *sapi.MediaItem) (*MemoryFile, bool) {
+	if mem, ok := mfs.uploadCache[key]; ok {
+		return mem, true
+	}
+	if !mfs.caseInsensitive() {
+		return nil, false
+	}
+	if _, mem, ok := foldLookup(mfs.uploadCache, key); ok && (resolved == nil || resolved.ID == mem.ID) {
+		return mem, true
+	}
+	return nil, false
+}
+
+// caseInsensitiveNames: WEBDAV_CASE_INSENSITIVE=true vuelve al comportamiento
+// anterior (un nombre con otras mayúsculas encuentra el archivo). Por defecto los
+// nombres son exactos, como en O2.
+func (mfs *MovistarFS) caseInsensitive() bool {
+	return config.CaseInsensitiveNames()
+}
+
+// isSameEntryName: el mismo elemento de O2 (nombre idéntico, mayúsculas incluidas).
+func isSameEntryName(a, b string) bool { return a == b }
 
 // SetSyncInterval configures the minimum interval between automatic metadata synchronizations.
 func (mfs *MovistarFS) SetSyncInterval(d time.Duration) {
@@ -783,7 +994,7 @@ func (mfs *MovistarFS) mergeCreatedFolders(parentID int64, folders []sapi.Folder
 	now := time.Now()
 	seen := make(map[string]bool, len(folders))
 	for _, f := range folders {
-		seen[strings.ToLower(f.Name)] = true
+		seen[f.Name] = true
 	}
 
 	merged := make([]sapi.FolderItem, len(folders), len(folders)+len(mfs.createdFolders))
@@ -794,9 +1005,9 @@ func (mfs *MovistarFS) mergeCreatedFolders(parentID int64, folders []sapi.Folder
 			delete(mfs.createdFolders, p)
 			continue
 		}
-		if cf.Info.ParentID == parentID && !seen[strings.ToLower(cf.Info.Name)] {
+		if cf.Info.ParentID == parentID && !seen[cf.Info.Name] {
 			merged = append(merged, cf.Info)
-			seen[strings.ToLower(cf.Info.Name)] = true
+			seen[cf.Info.Name] = true
 		}
 	}
 	return merged
@@ -805,19 +1016,21 @@ func (mfs *MovistarFS) mergeCreatedFolders(parentID int64, folders []sapi.Folder
 func (mfs *MovistarFS) findSubfolder(parentID int64, name string) (*sapi.FolderItem, bool, error) {
 	mfs.cacheMu.RLock()
 	now := time.Now()
+	var recent []sapi.FolderItem
 	for _, cf := range mfs.createdFolders {
 		if now.Sub(cf.Time) <= 60*time.Second && cf.Info.ParentID == parentID {
-			if strings.EqualFold(cf.Info.Name, name) || (strings.HasSuffix(strings.ToLower(name), ".hbk") && strings.EqualFold(cf.Info.Name, name[:len(name)-4])) {
-				f := cf.Info
-				mfs.cacheMu.RUnlock()
-				return &f, true, nil
-			}
+			recent = append(recent, cf.Info)
 		}
+	}
+	if i := pickByName(len(recent), func(i int) string { return recent[i].Name }, name, true, mfs.caseInsensitive()); i >= 0 {
+		f := recent[i]
+		mfs.cacheMu.RUnlock()
+		return &f, true, nil
 	}
 
 	cached, ok := mfs.folderCache[parentID]
 	if ok && time.Since(cached.time) < mfs.cacheTTL {
-		item, found := cached.find(name)
+		item, found := cached.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
@@ -832,16 +1045,14 @@ func (mfs *MovistarFS) findSubfolder(parentID int64, name string) (*sapi.FolderI
 	}
 	mfs.cacheMu.RLock()
 	if c, ok := mfs.folderCache[parentID]; ok && c != nil {
-		item, found := c.find(name)
+		item, found := c.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
 	mfs.cacheMu.RUnlock()
 
-	for i := range subs {
-		if strings.EqualFold(subs[i].Name, name) || (strings.HasSuffix(strings.ToLower(name), ".hbk") && strings.EqualFold(subs[i].Name, name[:len(name)-4])) {
-			return &subs[i], true, nil
-		}
+	if i := pickByName(len(subs), func(i int) string { return subs[i].Name }, name, true, mfs.caseInsensitive()); i >= 0 {
+		return &subs[i], true, nil
 	}
 	return nil, false, nil
 }
@@ -911,7 +1122,7 @@ func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, 
 	mfs.cacheMu.RLock()
 	cached, ok := mfs.mediaCache[folderID]
 	if ok && time.Since(cached.time) < mfs.cacheTTL {
-		item, found := cached.find(name)
+		item, found := cached.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
@@ -926,15 +1137,22 @@ func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, 
 	}
 	mfs.cacheMu.RLock()
 	if c, ok := mfs.mediaCache[folderID]; ok && c != nil {
-		item, found := c.find(name)
+		item, found := c.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
 	mfs.cacheMu.RUnlock()
 
 	for i := range items {
-		if strings.EqualFold(items[i].Name, name) {
+		if items[i].Name == name {
 			return &items[i], true, nil
+		}
+	}
+	if mfs.caseInsensitive() {
+		for i := range items {
+			if strings.EqualFold(items[i].Name, name) {
+				return &items[i], true, nil
+			}
 		}
 	}
 	return nil, false, nil
@@ -1045,14 +1263,14 @@ func (mfs *MovistarFS) ensureFolderChain(dirPath string) (*sapi.FolderItem, erro
 		if found == nil {
 			subs, err := mfs.getSubfolders(currentID)
 			if err == nil {
-				for _, s := range subs {
-					if strings.EqualFold(s.Name, part) {
+				if i := pickByName(len(subs), func(i int) string { return subs[i].Name }, part, false, mfs.caseInsensitive()); i >= 0 {
+					s := subs[i]
+					{
 						item := s
 						found = &item
 						if ms != nil {
 							_ = ms.UpsertFolder(item)
 						}
-						break
 					}
 				}
 			}
@@ -1094,8 +1312,43 @@ func (mfs *MovistarFS) localMetadataReady() bool {
 // opcional. Con allowSAPI=false, lo que no está en SQLite se da por inexistente sin
 // llamar a la API (ver OpenFile: la comprobación previa a cada subida).
 func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
+	folderInfo, mediaInfo, isFolder, err = mfs.resolvePathExact(rawPath, allowSAPI)
+	if !errors.Is(err, os.ErrNotExist) || !mfs.caseInsensitive() {
+		return
+	}
+	// Nada con ese nombre exacto ni en la base ni en O2: un archivo o una carpeta
+	// recién creados que solo difieren en mayúsculas (clientes de Windows que piden
+	// el mismo con otras). La marca de borrado manda también aquí.
+	key := cacheKey(rawPath)
+	mfs.cacheMu.RLock()
+	defer mfs.cacheMu.RUnlock()
+	tomb := func(k string) bool {
+		exp, ok := mfs.deletedTombstones[k]
+		return ok && time.Now().Before(exp)
+	}
+	if tomb(key) {
+		return
+	}
+	if k, cf, ok := foldLookup(mfs.createdFolders, key); ok && !tomb(k) && time.Since(cf.Time) < 60*time.Second {
+		info := cf.Info
+		return &info, nil, true, nil
+	}
+	if k, mem, ok := foldLookup(mfs.uploadCache, key); ok && !tomb(k) {
+		return nil, &sapi.MediaItem{
+			ID:               mem.ID,
+			Name:             mem.Name,
+			Size:             mem.Size,
+			URL:              mem.URL,
+			FolderID:         mem.FolderID,
+			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
+		}, false, nil
+	}
+	return
+}
+
+func (mfs *MovistarFS) resolvePathExact(rawPath string, allowSAPI bool) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	cleanPath := path.Clean("/" + rawPath)
-	lowerPath := strings.ToLower(cleanPath)
+	pathKey := cacheKey(cleanPath)
 
 	rootID, err := mfs.getRootFolderID()
 	if err != nil {
@@ -1132,21 +1385,25 @@ func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderIn
 
 	// Check in-memory caches and active tombstones
 	mfs.cacheMu.RLock()
+	// Las cachés van por nombre exacto (O2 distingue mayúsculas); la búsqueda con
+	// otras mayúsculas se hace al final, en resolvePathOpts, si nada coincide exacto.
+	cf, cfOK := mfs.createdFolders[pathKey]
+	mem, upOK := mfs.uploadCache[pathKey]
 	var isTomb bool
-	if exp, ok := mfs.deletedTombstones[lowerPath]; ok && time.Now().Before(exp) {
+	if exp, ok := mfs.deletedTombstones[pathKey]; ok && time.Now().Before(exp) {
 		isTomb = true
 	}
 
 	// 1. Check createdFolders con verificación de TTL (60s)
 	var createdF *sapi.FolderItem
-	if cf, ok := mfs.createdFolders[lowerPath]; ok && time.Since(cf.Time) < 60*time.Second {
+	if cfOK && time.Since(cf.Time) < 60*time.Second {
 		info := cf.Info
 		createdF = &info
 	}
 
 	// 2. Check uploadCache
 	var uploadMi *sapi.MediaItem
-	if mem, ok := mfs.uploadCache[lowerPath]; ok {
+	if upOK {
 		uploadMi = &sapi.MediaItem{
 			ID:               mem.ID,
 			Name:             mem.Name,
@@ -1187,7 +1444,7 @@ func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderIn
 				currentFolder = f
 				if isLast {
 					// When item exists in SQLite metaStore, clear any tombstone! SQLite is authoritative.
-					mfs.ClearTombstone(lowerPath)
+					mfs.ClearTombstone(pathKey)
 					return currentFolder, nil, true, nil
 				}
 				continue
@@ -1198,11 +1455,11 @@ func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderIn
 				m, mErr := ms.GetMediaByFolderAndName(currentID, part)
 				if mErr == nil && m != nil {
 					// When item exists in SQLite metaStore, clear any tombstone! SQLite is authoritative.
-					mfs.ClearTombstone(lowerPath)
+					mfs.ClearTombstone(pathKey)
 					return nil, m, false, nil
 				}
 				if vf, vfErr := ms.GetVirtualEmptyFile(currentID, part); vfErr == nil && vf != nil {
-					mfs.ClearTombstone(lowerPath)
+					mfs.ClearTombstone(pathKey)
 					vMedia := &sapi.MediaItem{
 						ID:               fmt.Sprintf("virtual:%d:%s", currentID, vf.Name),
 						Name:             vf.Name,
@@ -1218,14 +1475,15 @@ func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderIn
 			mfs.cacheMu.RLock()
 			var foundCreated *sapi.FolderItem
 			now := time.Now()
+			var recent []sapi.FolderItem
 			for _, cf := range mfs.createdFolders {
 				if now.Sub(cf.Time) <= 60*time.Second && cf.Info.ParentID == currentID {
-					if strings.EqualFold(cf.Info.Name, part) || (strings.HasSuffix(strings.ToLower(part), ".hbk") && strings.EqualFold(cf.Info.Name, part[:len(part)-4])) {
-						item := cf.Info
-						foundCreated = &item
-						break
-					}
+					recent = append(recent, cf.Info)
 				}
+			}
+			if i := pickByName(len(recent), func(i int) string { return recent[i].Name }, part, true, mfs.caseInsensitive()); i >= 0 {
+				item := recent[i]
+				foundCreated = &item
 			}
 			mfs.cacheMu.RUnlock()
 
@@ -1258,7 +1516,7 @@ func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderIn
 				currentID = f.ID
 				currentFolder = f
 				if isLast {
-					mfs.ClearTombstone(lowerPath)
+					mfs.ClearTombstone(pathKey)
 					return currentFolder, nil, true, nil
 				}
 				continue
@@ -1267,11 +1525,11 @@ func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderIn
 			if isLast {
 				m, mErr := ms.GetMediaByFolderAndName(currentID, part)
 				if mErr == nil && m != nil {
-					mfs.ClearTombstone(lowerPath)
+					mfs.ClearTombstone(pathKey)
 					return nil, m, false, nil
 				}
 				if vf, vfErr := ms.GetVirtualEmptyFile(currentID, part); vfErr == nil && vf != nil {
-					mfs.ClearTombstone(lowerPath)
+					mfs.ClearTombstone(pathKey)
 					vMedia := &sapi.MediaItem{
 						ID:               fmt.Sprintf("virtual:%d:%s", currentID, vf.Name),
 						Name:             vf.Name,
@@ -1326,7 +1584,7 @@ func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderIn
 
 func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	cleanPath := path.Clean("/" + name)
-	lowerPath := strings.ToLower(cleanPath)
+	pathKey := cacheKey(cleanPath)
 
 	// Si es una carpeta de sistema o metadatos de SO ($RECYCLE.BIN, .Trashes, etc.), absorber silenciosamente
 	if isOSJunkPath(cleanPath) {
@@ -1339,8 +1597,8 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 
 	// Clear tombstone AND clear any conflicting uploadCache entry if re-creating
 	mfs.cacheMu.Lock()
-	delete(mfs.deletedTombstones, lowerPath)
-	delete(mfs.uploadCache, lowerPath)
+	delete(mfs.deletedTombstones, pathKey)
+	delete(mfs.uploadCache, pathKey)
 	mfs.cacheMu.Unlock()
 
 	parentDir := path.Dir(cleanPath)
@@ -1360,11 +1618,12 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		return err
 	}
 	for _, s := range subs {
-		if strings.EqualFold(s.Name, folderName) {
+		// Solo con el nombre exacto: O2 admite carpetas que difieren en mayúsculas.
+		if isSameEntryName(s.Name, folderName) {
 			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar/O2 Cloud (ID: %d). Reutilizando.", folderName, s.ID)
 			mfs.cacheMu.Lock()
-			delete(mfs.uploadCache, lowerPath)
-			mfs.createdFolders[lowerPath] = &CreatedFolder{Info: s, Time: time.Now()}
+			delete(mfs.uploadCache, pathKey)
+			mfs.createdFolders[pathKey] = &CreatedFolder{Info: s, Time: time.Now()}
 			mfs.cacheMu.Unlock()
 			return nil
 		}
@@ -1383,8 +1642,8 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(parentFolder.ID, time.Now().UTC().Format("20060102T150405Z")))
 	}
 	mfs.cacheMu.Lock()
-	delete(mfs.uploadCache, lowerPath)
-	mfs.createdFolders[lowerPath] = &CreatedFolder{Info: *created, Time: time.Now()}
+	delete(mfs.uploadCache, pathKey)
+	mfs.createdFolders[pathKey] = &CreatedFolder{Info: *created, Time: time.Now()}
 	mfs.cacheMu.Unlock()
 	mfs.InvalidateCache(parentFolder.ID)
 
@@ -1393,7 +1652,7 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 
 func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
 	cleanPath := path.Clean("/" + name)
-	lowerPath := strings.ToLower(cleanPath)
+	pathKey := cacheKey(cleanPath)
 
 	// Absorber escrituras o PROPPATCH sobre archivos de sistema (desktop.ini, .DS_Store, etc.)
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && isOSJunkPath(cleanPath) {
@@ -1440,12 +1699,18 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}
 
 		// Chequear si ya existe un archivo con ese nombre para borrarlo antes y no crear sufijo ' (1)'
+		// Solo se sobrescribe un archivo con el nombre EXACTO: O2 admite "A.txt" y
+		// "a.txt" juntos, y antes subir "a.txt" pisaba "A.txt" (y al revés en cada copia).
 		var existingID string
-		if err == nil && !isF && mediaInfo != nil {
+		if err == nil && !isF && mediaInfo != nil && isSameEntryName(mediaInfo.Name, fileName) {
 			existingID = mediaInfo.ID
 		}
 
 		fw := NewWebDAVFileWriter(mfs, cleanPath, fileName, parentFolder.ID, existingID)
+		fw.ctx = ctx
+		if existingID != "" {
+			fw.existingItem = mediaInfo
+		}
 		fw.modTime = ocMtimeFromContext(ctx)
 		fw.guard, _ = ctx.Value(uploadGuardKey{}).(*uploadGuard)
 		return fw, nil
@@ -1479,9 +1744,9 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		return NewWebDAVDirReader(mfs, cleanPath, folderInfo.ID, mt), nil
 	}
 
-	// Comprobar memoria primero
+	// Comprobar memoria primero (con otras mayúsculas, solo si es el mismo archivo resuelto)
 	mfs.cacheMu.RLock()
-	if mem, ok := mfs.uploadCache[lowerPath]; ok {
+	if mem, ok := mfs.recentUpload(pathKey, mediaInfo); ok {
 		mfs.cacheMu.RUnlock()
 		if mem.Size == 0 || len(mem.Content) > 0 {
 			return NewWebDAVMemoryReader(cleanPath, mem), nil
@@ -1506,7 +1771,10 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		// La subida no siempre devuelve URL de descarga y SAPI tarda unos segundos en
 		// indexar el archivo recién subido; esperamos brevemente en ambos modos a que
 		// GetMediaByID devuelva la URL firmada en lugar de caer en /media/content?id=.
-		r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		r.resolveURL = func() string {
+			mfs.waitUploadSettled(ctx, mem.ID, mem.Name)
+			return mfs.waitForDownloadURL(mem)
+		}
 		return r, nil
 	}
 	mfs.cacheMu.RUnlock()
@@ -1523,7 +1791,36 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}), nil
 	}
 
-	return NewWebDAVFileReader(mfs, cleanPath, *mediaInfo), nil
+	r := NewWebDAVFileReader(mfs, cleanPath, *mediaInfo)
+	if mfs.client != nil && mfs.client.UploadSettling(mediaInfo.ID) {
+		id, name := mediaInfo.ID, mediaInfo.Name
+		r.resolveURL = func() string {
+			if mfs.waitUploadSettled(ctx, id, name) {
+				return mfs.cachedDownloadURL(id)
+			}
+			return ""
+		}
+	}
+	return r, nil
+}
+
+// waitUploadSettled: un archivo recién subido no se puede descargar hasta que O2
+// termina de validarlo (antes, la URL por defecto da COM-1005 y la firmada aún no
+// existe). La descarga espera a que termine la validación y la relectura, sin límite
+// propio: mientras el cliente siga conectado.
+func (mfs *MovistarFS) waitUploadSettled(ctx context.Context, id, name string) bool {
+	if mfs.client == nil || id == "" || !mfs.client.UploadSettling(id) {
+		return false
+	}
+	logger.Log("[WebDAV] ⏳ '%s' aún se está validando en O2: la descarga espera a que termine...", name)
+	start := time.Now()
+	ok := mfs.client.WaitUploadSettled(ctx, id)
+	if ok {
+		logger.Log("[WebDAV] ✔ '%s' validado tras %s: se descarga", name, time.Since(start).Round(time.Second))
+	} else if ctx.Err() != nil {
+		logger.Log("[WebDAV] ⚠️ El cliente dejó de esperar a '%s' (%s en validación)", name, time.Since(start).Round(time.Second))
+	}
+	return ok
 }
 
 // urlLookupErrorBackoff es el tiempo durante el que no se vuelve a consultar la URL de
@@ -1580,7 +1877,7 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 	mfs.setLastRemoveErr(nil)
 	defer func() { mfs.setLastRemoveErr(err) }()
 	cleanPath := path.Clean("/" + name)
-	lowerPath := strings.ToLower(cleanPath)
+	pathKey := cacheKey(cleanPath)
 	if cleanPath == "/" || cleanPath == "." {
 		return fs.ErrPermission
 	}
@@ -1600,7 +1897,7 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || isControlOrLockFile(cleanPath) {
 			mfs.cacheMu.Lock()
-			delete(mfs.uploadCache, lowerPath)
+			delete(mfs.uploadCache, pathKey)
 			mfs.cacheMu.Unlock()
 			return nil // WebDAV idempotencia / lock file graceful
 		}
@@ -1644,9 +1941,9 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 			}
 		}
 		mfs.cacheMu.Lock()
-		delete(mfs.createdFolders, lowerPath)
-		delete(mfs.uploadCache, lowerPath)
-		mfs.deletedTombstones[lowerPath] = time.Now().Add(15 * time.Second)
+		delete(mfs.createdFolders, pathKey)
+		delete(mfs.uploadCache, pathKey)
+		mfs.deletedTombstones[pathKey] = time.Now().Add(15 * time.Second)
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(folderInfo.ParentID)
 		mfs.InvalidateCache(folderInfo.ID)
@@ -1664,8 +1961,8 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 				}
 			}
 			mfs.cacheMu.Lock()
-			delete(mfs.uploadCache, lowerPath)
-			mfs.deletedTombstones[lowerPath] = time.Now().Add(15 * time.Second)
+			delete(mfs.uploadCache, pathKey)
+			mfs.deletedTombstones[pathKey] = time.Now().Add(15 * time.Second)
 			mfs.cacheMu.Unlock()
 			mfs.InvalidateCache(mediaInfo.FolderID)
 			return nil
@@ -1679,7 +1976,7 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 			// desde la subida antes de lanzar la petición de borrado a SAPI.
 			mfs.cacheMu.RLock()
 			var waitTime time.Duration
-			if mem, ok := mfs.uploadCache[lowerPath]; ok && !mem.CachedAt.IsZero() {
+			if mem, ok := mfs.uploadCache[pathKey]; ok && !mem.CachedAt.IsZero() {
 				if elapsed := time.Since(mem.CachedAt); elapsed < 6*time.Second {
 					waitTime = 6*time.Second - elapsed
 				}
@@ -1723,8 +2020,8 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 			logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(mediaInfo.FolderID, time.Now().UTC().Format("20060102T150405Z")))
 		}
 		mfs.cacheMu.Lock()
-		delete(mfs.uploadCache, lowerPath)
-		mfs.deletedTombstones[lowerPath] = time.Now().Add(15 * time.Second)
+		delete(mfs.uploadCache, pathKey)
+		mfs.deletedTombstones[pathKey] = time.Now().Add(15 * time.Second)
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(mediaInfo.FolderID)
 		return nil
@@ -1736,8 +2033,8 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) error {
 	oldClean := path.Clean("/" + oldName)
 	newClean := path.Clean("/" + newName)
-	oldLower := strings.ToLower(oldClean)
-	newLower := strings.ToLower(newClean)
+	oldKey := cacheKey(oldClean)
+	newKey := cacheKey(newClean)
 
 	if oldClean == "/" || oldClean == "." || newClean == "/" || newClean == "." {
 		return fs.ErrPermission
@@ -1790,7 +2087,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 	logger.Log("[WebDAV] 🔄 Renombrando: '%s' -> '%s'...", oldClean, newClean)
 
 	if isF && oldFolder != nil {
-		err := mfs.client.UpdateFolder(oldFolder.ID, newBaseName, parentFolder.ID)
+		err := mfs.client.UpdateFolderItem(*oldFolder, newBaseName, parentFolder.ID)
 		if err != nil {
 			return err
 		}
@@ -1801,9 +2098,9 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 			logMetaErr("UpdateFolderModificationDate parent", ms.UpdateFolderModificationDate(parentFolder.ID, nowMod))
 		}
 		mfs.cacheMu.Lock()
-		delete(mfs.createdFolders, oldLower)
-		delete(mfs.deletedTombstones, newLower)
-		mfs.deletedTombstones[oldLower] = time.Now().Add(15 * time.Second)
+		delete(mfs.createdFolders, oldKey)
+		delete(mfs.deletedTombstones, newKey)
+		mfs.deletedTombstones[oldKey] = time.Now().Add(15 * time.Second)
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(oldFolder.ParentID)
 		mfs.InvalidateCache(parentFolder.ID)
@@ -1814,7 +2111,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		if strings.HasPrefix(oldMedia.ID, "virtual:") {
 			var destToDelete *sapi.MediaItem
 			_, destMedia, destIsFolder, destErr := mfs.resolvePath(newClean)
-			if destErr == nil && !destIsFolder && destMedia != nil && destMedia.ID != "" {
+			if destErr == nil && !destIsFolder && destMedia != nil && destMedia.ID != "" && isSameEntryName(destMedia.Name, newBaseName) && destMedia.ID != oldMedia.ID {
 				destToDelete = destMedia
 			}
 			if destToDelete != nil {
@@ -1837,10 +2134,10 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 				_ = ms.UpdateFolderModificationDate(parentFolder.ID, nowMod)
 			}
 			mfs.cacheMu.Lock()
-			delete(mfs.uploadCache, oldLower)
-			delete(mfs.deletedTombstones, newLower)
-			mfs.deletedTombstones[oldLower] = time.Now().Add(15 * time.Second)
-			mfs.uploadCache[newLower] = &MemoryFile{
+			delete(mfs.uploadCache, oldKey)
+			delete(mfs.deletedTombstones, newKey)
+			mfs.deletedTombstones[oldKey] = time.Now().Add(15 * time.Second)
+			mfs.uploadCache[newKey] = &MemoryFile{
 				ID:       fmt.Sprintf("virtual:%d:%s", parentFolder.ID, newBaseName),
 				Name:     newBaseName,
 				FolderID: parentFolder.ID,
@@ -1861,7 +2158,10 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		// Comprobar si el destino ya existe en Movistar Cloud para borrarlo SOLO tras completar el movimiento con éxito
 		var destToDelete *sapi.MediaItem
 		_, destMedia, destIsFolder, destErr := mfs.resolvePath(newClean)
-		if destErr == nil && !destIsFolder && destMedia != nil && destMedia.ID != "" {
+		// Solo es «el destino» un archivo con ese nombre exacto y distinto del que se
+		// mueve: O2 distingue mayúsculas, y en un cambio solo de mayúsculas la búsqueda
+		// sin distinguirlas encontraría el propio origen (y se borraría tras moverlo).
+		if destErr == nil && !destIsFolder && destMedia != nil && destMedia.ID != "" && isSameEntryName(destMedia.Name, newBaseName) && destMedia.ID != oldMedia.ID {
 			destToDelete = destMedia
 		}
 
@@ -1876,7 +2176,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 				modTime := oldMedia.ModificationDate.Time()
 				var content []byte
 				mfs.cacheMu.RLock()
-				mem, inCache := mfs.uploadCache[oldLower]
+				mem, inCache := mfs.uploadCache[oldKey]
 				mfs.cacheMu.RUnlock()
 				if inCache {
 					modTime = mem.ModTime
@@ -1917,7 +2217,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 					}))
 				}
 			} else {
-				if err := mfs.client.UpdateMedia(oldMedia.ID, oldMedia.Name, newBaseName, parentFolder.ID); err != nil {
+				if err := mfs.client.UpdateMediaItem(*oldMedia, newBaseName, parentFolder.ID); err != nil {
 					return err
 				}
 				// Borrar destino previo sólo tras completar UpdateMedia con éxito
@@ -1938,18 +2238,18 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 			}
 		}
 		mfs.cacheMu.Lock()
-		delete(mfs.deletedTombstones, newLower)
-		mfs.deletedTombstones[oldLower] = time.Now().Add(15 * time.Second)
+		delete(mfs.deletedTombstones, newKey)
+		mfs.deletedTombstones[oldKey] = time.Now().Add(15 * time.Second)
 		if reuploaded != nil {
 			// El archivo nuevo tiene otro ID y SAPI tarda en listarlo: se registra como
 			// una subida recién hecha para que se vea y se lea en seguida.
-			delete(mfs.uploadCache, oldLower)
-			mfs.uploadCache[newLower] = reuploaded
-		} else if mem, ok := mfs.uploadCache[oldLower]; ok {
-			delete(mfs.uploadCache, oldLower)
+			delete(mfs.uploadCache, oldKey)
+			mfs.uploadCache[newKey] = reuploaded
+		} else if mem, ok := mfs.uploadCache[oldKey]; ok {
+			delete(mfs.uploadCache, oldKey)
 			mem.Name = newBaseName
 			mem.FolderID = parentFolder.ID
-			mfs.uploadCache[newLower] = mem
+			mfs.uploadCache[newKey] = mem
 		}
 		mfs.cacheMu.Unlock()
 		mfs.InvalidateCache(oldMedia.FolderID)
@@ -2203,7 +2503,7 @@ func (mfs *MovistarFS) Stat(ctx context.Context, name string) (os.FileInfo, erro
 	}
 
 	mfs.cacheMu.RLock()
-	if mem, ok := mfs.uploadCache[strings.ToLower(cleanPath)]; ok {
+	if mem, ok := mfs.recentUpload(cacheKey(cleanPath), mediaInfo); ok {
 		mfs.cacheMu.RUnlock()
 		return &VirtualFileInfo{
 			name:    mem.Name,
@@ -2267,11 +2567,14 @@ type WebDAVFileWriter struct {
 	name           string
 	parentFolderID int64
 	existingID     string
+	existingItem   *sapi.MediaItem // el archivo que se sobrescribe (para reenviar su fecha de creación)
+	ctx            context.Context // petición del cliente: si se va, la subida a O2 se aborta
 	buf            *bytes.Buffer
 	tmpFile        *os.File
 	size           int64
 	closed         bool
 	semAcquired    bool
+	spoolOnly      bool // el hueco de RAM estaba ocupado: este cuerpo va directo al spool en disco
 	failed         bool
 	modTime        time.Time // fecha pedida por el cliente (X-OC-Mtime); cero = ahora
 	guard          *uploadGuard
@@ -2279,6 +2582,9 @@ type WebDAVFileWriter struct {
 	streamPW       *io.PipeWriter
 	streamDone     chan streamUploadResult
 	streamFailed   bool
+	// pending: subida en flujo cortada a medias; el reintento desde disco continúa
+	// sobre ese ID (perfil desktop, como la app oficial) en lugar de crear otro.
+	pending *sapi.UploadInterruptedError
 }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
@@ -2306,6 +2612,19 @@ func (w *WebDAVFileWriter) releasePathLock() {
 	}
 }
 
+// upload sube el contenido: sobrescribe el archivo existente (con su fecha de
+// creación, como la app) o crea uno nuevo.
+func (w *WebDAVFileWriter) upload(body io.Reader, size int64, mimeType string) (*sapi.MediaItem, error) {
+	ctx := w.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if id := w.sapiExistingID(); id != "" && w.existingItem != nil && w.existingItem.ID == id {
+		return w.mfs.client.UploadFileReplacingCtx(ctx, *w.existingItem, w.name, body, size, w.parentFolderID, mimeType, w.modTime)
+	}
+	return w.mfs.client.UploadFileToFolderCtx(ctx, w.name, body, size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+}
+
 // sapiExistingID devuelve el ID real de SAPI que se puede sobrescribir. Los IDs
 // virtual:<folder>:<name> existen solo en SQLite/memoria; enviarlos a SAPI provoca
 // PAPI-0000 / HTTP 405 al convertir un archivo vacío emulado en uno con contenido.
@@ -2316,8 +2635,48 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 	return w.existingID
 }
 
+// streamUploadsEnabled indica si se sube en flujo directo (por defecto sí; con
+// WEBDAV_STREAM_UPLOAD=false, no): el contenido se reenvía a O2 mientras llega, como
+// la app oficial, y el cliente recibe la respuesta poco después del último byte. Sin
+// flujo, el cuerpo se recibe entero (RAM o spool) y el cliente espera en silencio a
+// que el proxy lo suba: en archivos grandes, más que el tiempo de espera de rclone
+// (5 min). El envío en flujo no retiene el hueco de la API (ver sapi.DoRequest), y
+// nunca se espera turno ni hueco de RAM antes de leer un cuerpo (tryAcquireUploadTurn,
+// Write), así que varias subidas a la vez no se bloquean entre sí.
+func (mfs *MovistarFS) streamUploads() bool { return config.StreamUploads() }
+
+// tryAcquireUploadTurn intenta coger, sin esperar, el turno de subida a SAPI
+// (uploadSem + globalTransferSem). Devuelve false si alguno está ocupado.
+func tryAcquireUploadTurn() bool {
+	select {
+	case uploadSem <- struct{}{}:
+	default:
+		return false
+	}
+	select {
+	case globalTransferSem <- struct{}{}:
+		return true
+	default:
+		<-uploadSem
+		return false
+	}
+}
+
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
+	if !w.mfs.streamUploads() {
+		return
+	}
 	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 {
+		return
+	}
+	// Solo se sube en flujo si el turno de subida está libre AHORA. Si otro fichero
+	// lo tiene, esperar aquí bloquearía la lectura de este cuerpo (el io.Pipe no
+	// avanza) y, con clientes que multiplexan varias subidas en una conexión
+	// (restic -> rclone por HTTP/2), el que tiene el turno puede estar esperando
+	// precisamente datos que van detrás de este cuerpo: interbloqueo hasta que el
+	// cliente corta por timeout. En ese caso el cuerpo se guarda entero en el
+	// spool y se sube en Close() cuando llegue el turno.
+	if !tryAcquireUploadTurn() {
 		return
 	}
 	w.ensurePathLock()
@@ -2330,14 +2689,13 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
 
 	go func() {
-		uploadSem <- struct{}{}
-		globalTransferSem <- struct{}{}
+		// el turno ya se cogió en tryAcquireUploadTurn
 		defer func() {
 			<-globalTransferSem
 			<-uploadSem
 		}()
 		body, tr := trackUpload(w.path, expectedSize, pr)
-		media, err := w.mfs.client.UploadFileToFolder(w.name, body, expectedSize, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		media, err := w.upload(body, expectedSize, mimeType)
 		tr.Done()
 		_ = pr.Close()
 		w.streamDone <- streamUploadResult{media: media, err: err}
@@ -2357,8 +2715,13 @@ func (w *WebDAVFileWriter) abortStream(err error) {
 		w.streamPW = nil
 	}
 	if w.streamDone != nil {
-		<-w.streamDone
+		res := <-w.streamDone
 		w.streamDone = nil
+		w.mfs.client.DiscardInterruptedUpload(res.err, w.name)
+	}
+	if w.pending != nil {
+		w.mfs.client.DiscardInterruptedUpload(w.pending, w.name)
+		w.pending = nil
 	}
 	w.releasePathLock()
 }
@@ -2383,9 +2746,20 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	if w.failed {
 		return 0, ErrUploadTooLarge
 	}
-	if !w.semAcquired {
-		uploadBufferSem <- struct{}{}
-		w.semAcquired = true
+	if !w.semAcquired && !w.spoolOnly {
+		// No esperar nunca aquí: mientras se espera no se lee el cuerpo del cliente,
+		// y quien tiene el hueco puede depender de que este cuerpo avance (ver
+		// startStreamUpload). Si el hueco de RAM está ocupado, este cuerpo va al
+		// spool en disco. Los ficheros de control se emulan en memoria y son
+		// pequeños: siguen en RAM aunque no haya hueco.
+		select {
+		case uploadBufferSem <- struct{}{}:
+			w.semAcquired = true
+		default:
+			if !(w.parentFolderID < 0 || isControlOrLockFile(w.path)) {
+				w.spoolOnly = true
+			}
+		}
 	}
 
 	maxBytes := GetMaxUploadBytes()
@@ -2399,7 +2773,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	}
 
 	rambufMax := GetUploadRAMBufferMaxBytes()
-	if w.tmpFile == nil && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
+	if w.tmpFile == nil && (w.spoolOnly || w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
 		tmpDir := getUploadTempDir()
 		tmp, err := os.CreateTemp(tmpDir, "webdav_upload_*")
 		if err != nil {
@@ -2528,10 +2902,10 @@ func (w *WebDAVFileWriter) Close() error {
 			}
 		}
 
-		lowerPath := strings.ToLower(w.path)
+		pathKey := cacheKey(w.path)
 		w.mfs.cacheMu.Lock()
-		delete(w.mfs.deletedTombstones, lowerPath)
-		w.mfs.uploadCache[lowerPath] = &MemoryFile{
+		delete(w.mfs.deletedTombstones, pathKey)
+		w.mfs.uploadCache[pathKey] = &MemoryFile{
 			ID:       virtualID,
 			Name:     w.name,
 			FolderID: w.parentFolderID,
@@ -2575,7 +2949,14 @@ func (w *WebDAVFileWriter) Close() error {
 			}
 			logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
 			return ErrUploadTooLarge
+		} else if errors.Is(res.err, sapi.ErrMediaUnsupported) && !config.UnsupportedAsFile() {
+			w.cleanupTemp()
+			return w.rejectUnsupported()
 		} else {
+			var ie *sapi.UploadInterruptedError
+			if errors.As(res.err, &ie) && ie.MediaID != "" {
+				w.pending = ie
+			}
 			logger.Log("[WebDAV] ⚠️ Subida en flujo requirió reintento desde disco para '%s': %v", w.name, res.err)
 		}
 	}
@@ -2601,7 +2982,19 @@ func (w *WebDAVFileWriter) Close() error {
 
 		mimeType := mime.TypeByExtension(filepath.Ext(w.name))
 		body, tr := trackUpload(w.path, w.size, reader)
-		media, err = w.mfs.client.UploadFileToFolder(w.name, body, w.size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+		if w.pending != nil && w.tmpFile != nil {
+			ctx := w.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			media, err = w.mfs.client.UploadFileContinueCtx(ctx, w.pending.MediaID, w.pending.New, w.name, body, w.size, w.parentFolderID, mimeType, w.modTime)
+		} else {
+			if w.pending != nil {
+				w.mfs.client.DiscardInterruptedUpload(w.pending, w.name)
+			}
+			media, err = w.upload(body, w.size, mimeType)
+		}
+		w.pending = nil
 		tr.Done()
 		<-globalTransferSem
 		<-uploadSem
@@ -2613,7 +3006,11 @@ func (w *WebDAVFileWriter) Close() error {
 				logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
 				return ErrUploadTooLarge
 			}
+			if errors.Is(err, sapi.ErrMediaUnsupported) {
+				return w.rejectUnsupported()
+			}
 			logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
+			w.guard.setRetryLater(err)
 			return err
 		}
 	}
@@ -2626,9 +3023,9 @@ func (w *WebDAVFileWriter) Close() error {
 	if !w.modTime.IsZero() {
 		modTime = w.modTime
 	}
-	lowerPath := strings.ToLower(w.path)
-	delete(w.mfs.deletedTombstones, lowerPath)
-	w.mfs.uploadCache[lowerPath] = &MemoryFile{
+	pathKey := cacheKey(w.path)
+	delete(w.mfs.deletedTombstones, pathKey)
+	w.mfs.uploadCache[pathKey] = &MemoryFile{
 		ID:       media.ID,
 		Name:     w.name,
 		FolderID: w.parentFolderID,
@@ -2787,9 +3184,9 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 				r.cacheBuf = nil
 				now := time.Now()
 				r.mfs.cacheMu.Lock()
-				lowerRPath := strings.ToLower(r.path)
-				if _, isTomb := r.mfs.deletedTombstones[lowerRPath]; !isTomb {
-					r.mfs.uploadCache[lowerRPath] = &MemoryFile{
+				readKey := cacheKey(r.path)
+				if _, isTomb := r.mfs.deletedTombstones[readKey]; !isTomb {
+					r.mfs.uploadCache[readKey] = &MemoryFile{
 						ID:       r.item.ID,
 						Name:     r.item.Name,
 						FolderID: r.item.FolderID,
@@ -3138,10 +3535,10 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 				continue
 			}
 			childPath := path.Clean(path.Join(d.path, s.Name))
-			childLower := strings.ToLower(childPath)
-			if exp, isTomb := d.mfs.deletedTombstones[childLower]; isTomb && now.Before(exp) {
+			childKey := cacheKey(childPath)
+			if exp, isTomb := d.mfs.deletedTombstones[childKey]; isTomb && now.Before(exp) {
 				if ms != nil {
-					tombstonesToClear = append(tombstonesToClear, childLower)
+					tombstonesToClear = append(tombstonesToClear, childKey)
 				} else {
 					continue
 				}
@@ -3154,10 +3551,10 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 
 		for _, m := range media {
 			childPath := path.Clean(path.Join(d.path, m.Name))
-			childLower := strings.ToLower(childPath)
-			if exp, isTomb := d.mfs.deletedTombstones[childLower]; isTomb && now.Before(exp) {
+			childKey := cacheKey(childPath)
+			if exp, isTomb := d.mfs.deletedTombstones[childKey]; isTomb && now.Before(exp) {
 				if ms != nil {
-					tombstonesToClear = append(tombstonesToClear, childLower)
+					tombstonesToClear = append(tombstonesToClear, childKey)
 				} else {
 					continue
 				}
@@ -3171,8 +3568,8 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 
 		for _, mem := range d.mfs.uploadCache {
 			childPath := path.Clean(path.Join(d.path, mem.Name))
-			childLower := strings.ToLower(childPath)
-			if exp, isTomb := d.mfs.deletedTombstones[childLower]; isTomb && now.Before(exp) {
+			childKey := cacheKey(childPath)
+			if exp, isTomb := d.mfs.deletedTombstones[childKey]; isTomb && now.Before(exp) {
 				continue
 			}
 			if mem.FolderID == d.folderID && !seen[mem.Name] && !isOSJunk(mem.Name) && !isDuplicatiTestPath(mem.Name) {
@@ -3188,8 +3585,8 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 				d.mfs.cacheMu.RLock()
 				for _, vf := range vFiles {
 					childPath := path.Clean(path.Join(d.path, vf.Name))
-					childLower := strings.ToLower(childPath)
-					if exp, isTomb := d.mfs.deletedTombstones[childLower]; isTomb && now.Before(exp) {
+					childKey := cacheKey(childPath)
+					if exp, isTomb := d.mfs.deletedTombstones[childKey]; isTomb && now.Before(exp) {
 						continue
 					}
 					name := vf.Name

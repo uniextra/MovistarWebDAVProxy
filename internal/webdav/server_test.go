@@ -15,7 +15,7 @@ import (
 
 func newMockSAPIServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 		action := r.URL.Query().Get("action")
@@ -619,7 +619,7 @@ func TestWebDAV_StreamUploadLargeFile(t *testing.T) {
 
 func TestWebDAV_SmallFileDownloadCachedInMemory(t *testing.T) {
 	var downloads int
-	mockSAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockSAPI := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		action := r.URL.Query().Get("action")
 		switch {

@@ -19,6 +19,8 @@ import (
 // el archivo para leer sus propiedades. Eso no debe provocar ninguna llamada a O2: la
 // URL de descarga solo se consulta si alguien lee el contenido.
 func TestPropfindTrasSubida_NoLlamaAO2(t *testing.T) {
+	// cuenta las llamadas a O2 aparte de la relectura tras subir (SAPI_REFRESH_AFTER_UPLOAD)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 	f := &fakeO2{}
 	f.set(true, false)
 	srv, payload := uploadThenServer(t, f)
@@ -49,7 +51,7 @@ func TestPropfindTrasSubida_NoLlamaAO2(t *testing.T) {
 // responder 503 + Retry-After sin enviar nada a O2, en vez de 409/500 que rclone reintenta.
 func TestEscriturasDuranteBloqueoWAF_503SinLlamarAO2(t *testing.T) {
 	var hits int32
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.Header().Set("Server", "CloudFront")
 		w.Header().Set("Content-Type", "text/html")
@@ -113,7 +115,7 @@ func TestEscriturasDuranteBloqueoWAF_503SinLlamarAO2(t *testing.T) {
 // servidor de subidas) sin hacer ninguna llamada a la API.
 func TestSubidaDuranteBloqueoDeLaAPI(t *testing.T) {
 	var apiHits, uploadHits int32
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/sapi/upload") {
 			atomic.AddInt32(&uploadHits, 1)
 			_, _ = io.Copy(io.Discard, r.Body)
@@ -185,8 +187,10 @@ func TestSubidaDuranteBloqueoDeLaAPI(t *testing.T) {
 // local: subir un archivo nuevo no debe hacer ninguna llamada a la API (antes, 2 por
 // archivo: ListAllSubfolders + ListAllMediaInFolder, lo que disparaba el WAF).
 func TestSubidaNuevaSinConsultarALaAPI(t *testing.T) {
+	// cuenta las llamadas a O2 aparte de la relectura tras subir (SAPI_REFRESH_AFTER_UPLOAD)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 	var apiHits, uploadHits int32
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/sapi/upload") {
 			atomic.AddInt32(&uploadHits, 1)
 			_, _ = io.Copy(io.Discard, r.Body)

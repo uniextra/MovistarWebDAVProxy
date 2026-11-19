@@ -250,7 +250,16 @@ func TestTokensEncryptionKey_AESGCM(t *testing.T) {
 	}
 }
 
+func TestGetSyncInterval_DesktopDefaultIsOfficialCadence(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	t.Setenv("SYNC_INTERVAL_SEC", "")
+	if got := GetSyncInterval(); got != 300*time.Second {
+		t.Errorf("perfil desktop: por defecto %v, la app oficial pide cambios cada 5 min", got)
+	}
+}
+
 func TestGetSyncInterval(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	t.Setenv("SYNC_INTERVAL_SEC", "")
 	if got := GetSyncInterval(); got != 60*time.Second {
 		t.Errorf("expected default 60s, got %v", got)
@@ -275,18 +284,26 @@ func TestGetSyncInterval(t *testing.T) {
 func TestTransferLimits(t *testing.T) {
 	t.Setenv("WEBDAV_MAX_DOWNLOADS", "")
 	t.Setenv("WEBDAV_MAX_UPLOADS", "")
-	if d, u := TransferLimits(false); d != 4 || u != 2 {
-		t.Errorf("sin modo web: esperado 4/2, obtenido %d/%d", d, u)
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	t.Setenv("SAPI_OFFICIAL_CLIENT", "")
+	// Como la app (perfil desktop): de una en una.
+	if d, u := TransferLimits(false); d != 1 || u != 1 {
+		t.Errorf("como la app: esperado 1/1, obtenido %d/%d", d, u)
 	}
 	if d, u := TransferLimits(true); d != 4 || u != 2 {
 		t.Errorf("modo web: esperado 4/2, obtenido %d/%d", d, u)
 	}
+	t.Setenv("SAPI_OFFICIAL_CLIENT", "false")
+	if d, u := TransferLimits(false); d != 4 || u != 2 {
+		t.Errorf("SAPI_OFFICIAL_CLIENT=false: esperado 4/2, obtenido %d/%d", d, u)
+	}
+	t.Setenv("SAPI_OFFICIAL_CLIENT", "")
 	t.Setenv("WEBDAV_MAX_DOWNLOADS", "6")
 	t.Setenv("WEBDAV_MAX_UPLOADS", "0")
-	if d, u := TransferLimits(false); d != 6 || u != 2 {
-		t.Errorf("con variables (modo normal): esperado 6/2 (0 se ignora), obtenido %d/%d", d, u)
-	}
 	if d, u := TransferLimits(true); d != 6 || u != 2 {
 		t.Errorf("con variables (modo web): esperado 6/2 (0 se ignora), obtenido %d/%d", d, u)
+	}
+	if d, u := TransferLimits(false); d != 6 || u != 1 {
+		t.Errorf("con variables (como la app): manda la variable, esperado 6/1, obtenido %d/%d", d, u)
 	}
 }

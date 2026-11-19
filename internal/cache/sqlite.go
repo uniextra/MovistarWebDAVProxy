@@ -30,6 +30,7 @@ type MetadataStore struct {
 	cleanerMu           sync.RWMutex
 	tombstoneCleaner    func(path string)
 	hasTombstonesFilter func() bool
+	nameFolding         atomic.Pointer[func() bool] // buscar nombres sin distinguir mayúsculas (SetNameFolding)
 	rootFolderID        atomic.Int64
 }
 
@@ -399,6 +400,20 @@ func (s *MetadataStore) GetFolderPath(folderID int64) (string, error) {
 	return "/" + strings.Join(segments, "/"), nil
 }
 
+// SetNameFolding indica cómo buscar por nombre: fold() == true, sin distinguir
+// mayúsculas; si no, nombres exactos (por defecto). La capa WebDAV lo fija según la
+// cuenta (config.CaseInsensitiveNames).
+func (s *MetadataStore) SetNameFolding(fold func() bool) {
+	s.nameFolding.Store(&fold)
+}
+
+func (s *MetadataStore) nameCollation() string {
+	if f := s.nameFolding.Load(); f != nil && *f != nil && (*f)() {
+		return "NOCASE"
+	}
+	return "BINARY"
+}
+
 // GetFolderByParentAndName retrieves a folder by parent ID and name (case-insensitive).
 // Includes Synology HyperBackup .hbk tolerance: if name has .hbk suffix, searches without it,
 // and if name has no .hbk suffix, searches with .hbk appended.
@@ -415,10 +430,12 @@ func (s *MetadataStore) GetFolderByParentAndName(parentID int64, name string) (*
 	query := `
 		SELECT id, name, parent_id, magic, offline, creation_date, modification_date
 		FROM folders
-		WHERE parent_id = ? AND name = ? COLLATE NOCASE
+		WHERE parent_id = ? AND name = ? COLLATE ` + s.nameCollation() + `
+		ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END
 		LIMIT 1
 	`
-	row := s.db.QueryRow(query, parentID, name)
+	// O2 distingue mayúsculas: primero la carpeta con el nombre exacto.
+	row := s.db.QueryRow(query, parentID, name, name)
 	f, err := scanFolder(row.Scan)
 	if err == nil {
 		return f, nil
@@ -436,7 +453,7 @@ func (s *MetadataStore) GetFolderByParentAndName(parentID int64, name string) (*
 		altName = name + ".hbk"
 	}
 
-	row = s.db.QueryRow(query, parentID, altName)
+	row = s.db.QueryRow(query, parentID, altName, altName)
 	f, err = scanFolder(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -529,10 +546,12 @@ func (s *MetadataStore) GetMediaByFolderAndName(folderID int64, name string) (*s
 	query := `
 		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
 		FROM media
-		WHERE folder_id = ? AND name = ? COLLATE NOCASE
-		ORDER BY modification_date DESC, id DESC
+		WHERE folder_id = ? AND name = ? COLLATE ` + s.nameCollation() + `
+		ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END, modification_date DESC, id DESC
 	`
-	rows, err := s.db.Query(query, folderID, name)
+	// O2 distingue mayúsculas ("A.txt" y "a.txt" son archivos distintos): manda el
+	// nombre exacto; otro con distintas mayúsculas solo sirve si no hay exacto.
+	rows, err := s.db.Query(query, folderID, name, name)
 	if err != nil {
 		return nil, fmt.Errorf("query media %q in folder %d: %w", name, folderID, err)
 	}
@@ -549,13 +568,15 @@ func (s *MetadataStore) GetMediaByFolderAndName(folderID int64, name string) (*s
 	if len(items) == 0 {
 		return nil, nil
 	}
-	if len(items) > 1 {
-		var ids []string
-		for _, itm := range items {
-			ids = append(ids, itm.ID)
+	var sameName []string
+	for _, itm := range items {
+		if itm.Name == items[0].Name {
+			sameName = append(sameName, itm.ID)
 		}
+	}
+	if len(sameName) > 1 {
 		logger.Log("[Metadata] ⚠️ Nombres duplicados detectados para '%s' en carpeta %d: IDs %v. Seleccionando el más reciente (%s, ID: %s)",
-			name, folderID, ids, items[0].ModificationDate, items[0].ID)
+			items[0].Name, folderID, sameName, items[0].ModificationDate, items[0].ID)
 	}
 	res := items[0]
 	return &res, nil
@@ -571,7 +592,7 @@ func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, err
 		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
 		FROM media
 		WHERE folder_id = ?
-		ORDER BY name COLLATE NOCASE ASC, modification_date DESC, id DESC
+		ORDER BY name COLLATE NOCASE ASC, name COLLATE BINARY ASC, modification_date DESC, id DESC
 	`
 	rows, err := s.db.Query(query, folderID)
 	if err != nil {
@@ -580,7 +601,7 @@ func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, err
 	defer rows.Close()
 
 	items := make([]sapi.MediaItem, 0)
-	var lastLower string
+	var lastName string
 	var currentGroup []sapi.MediaItem
 
 	flushGroup := func() {
@@ -604,10 +625,11 @@ func (s *MetadataStore) ListMediaInFolder(folderID int64) ([]sapi.MediaItem, err
 		if err != nil {
 			return nil, fmt.Errorf("scan media row in folder %d: %w", folderID, err)
 		}
-		low := strings.ToLower(m.Name)
-		if low != lastLower {
+		// Solo son duplicados los del mismo nombre exacto: "A.txt" y "a.txt" son
+		// dos archivos en O2 y se listan los dos.
+		if m.Name != lastName {
 			flushGroup()
-			lastLower = low
+			lastName = m.Name
 		}
 		currentGroup = append(currentGroup, *m)
 	}
@@ -626,7 +648,7 @@ func (s *MetadataStore) GetDuplicateMediaInFolder(folderID int64, name string) (
 	query := `
 		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
 		FROM media
-		WHERE folder_id = ? AND name = ? COLLATE NOCASE
+		WHERE folder_id = ? AND name = ? COLLATE BINARY
 		ORDER BY modification_date DESC, id DESC
 	`
 	rows, err := s.db.Query(query, folderID, strings.TrimSpace(name))

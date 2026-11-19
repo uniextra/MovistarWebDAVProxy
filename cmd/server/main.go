@@ -214,7 +214,15 @@ func main() {
 	// 3. Workers KeepAlive y DeltaSync en segundo plano con Context para shutdown limpio
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runKeepAlive(ctx, client, webdavServer.IsRunning)
+	if client.OfficialHeartbeatEnabled() {
+		// Perfil desktop: arranque y latido como el cliente oficial de Windows.
+		go func() {
+			client.OfficialStartup()
+			runOfficialHeartbeat(ctx, client, webdavServer.IsRunning)
+		}()
+	} else {
+		go runKeepAlive(ctx, client, webdavServer.IsRunning)
+	}
 	go runDeltaSync(ctx, client, webdavServer.IsRunning, webdavServer.MetadataStore, webdavServer.FS, syncInterval)
 
 	webdavPort := "8080"
@@ -339,6 +347,45 @@ func computeKeepAliveInterval(expiresInStr string, consecutiveFailures int) time
 		}
 	}
 	return 5 * time.Minute
+}
+
+// runOfficialHeartbeat late como el cliente oficial de Windows: system/information
+// cada minuto y, cada cinco, subscription/plan, subscription, profile/role,
+// get-update-info y get-storage-space. Sustituye a runKeepAlive en el perfil desktop.
+func runOfficialHeartbeat(ctx context.Context, client *sapi.Client, isRunning func() bool) {
+	ticker := time.NewTicker(config.HeartbeatInterval())
+	defer ticker.Stop()
+	lastFull := time.Now()
+	expiredLogged := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if isRunning != nil && !isRunning() {
+			continue
+		}
+		if client.IsSessionExpired() {
+			if !expiredLogged {
+				logger.Log("[KeepAlive] ⏸️ Sesión expirada pendiente de revinculación en el panel web. Pausando el latido.")
+				expiredLogged = true
+			}
+			continue
+		}
+		expiredLogged = false
+		if err := client.OfficialMinuteBeat(); err != nil {
+			logger.Log("[KeepAlive] ⚠️ system/information: %v", err)
+		}
+		if time.Since(lastFull) >= config.HeartbeatFullInterval()-time.Second {
+			lastFull = time.Now()
+			if err := client.OfficialFiveMinuteBeat(); err != nil {
+				logger.Log("[KeepAlive] ⚠️ Ronda de 5 minutos con error (la sesión sigue activa salvo aviso): %v", err)
+			} else {
+				logger.Log("[KeepAlive] 💓 Sesión verificada en Movistar Cloud (HTTP 200).")
+			}
+		}
+	}
 }
 
 func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() bool) {

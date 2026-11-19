@@ -16,7 +16,7 @@ import (
 func o2ConFotos(t *testing.T, fotos [][2]string) (*Server, *atomic.Int32, func()) {
 	t.Helper()
 	var borrados atomic.Int32
-	o2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	o2 := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		action := r.URL.Query().Get("action")
 		switch {

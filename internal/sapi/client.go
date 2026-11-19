@@ -270,7 +270,11 @@ type Client struct {
 	rootFolderID     int64
 	sessionExpired   bool
 	refreshTransient bool
-	OnSessionExpired func(err error)
+	// Fallos de login/oauth en el perfil desktop (ver desktopLoginFailed).
+	loginFailures     int
+	loginFailingSince time.Time
+	loginRetryAt      time.Time
+	OnSessionExpired  func(err error)
 
 	// web, si no es nil, sustituye la autenticación del cliente de escritorio por
 	// la sesión de la web (ver EnableWebSession).
@@ -287,16 +291,46 @@ type Client struct {
 
 	waf       wafBreaker // pausa las llamadas a la API de O2 tras un 403 del cortafuegos (waf_breaker.go)
 	wafUpload wafBreaker // pausa las subidas (servidor de subidas) tras un 403 del cortafuegos en ese servidor
+
+	hookMu           sync.Mutex
+	onMediaRefreshed func(MediaRefresh)       // relectura tras subir (upload_oficial.go)
+	settling         map[string]chan struct{} // subidas aún en validación o sin releer (ID → se cierra al terminar)
+
+	validationFirst time.Duration // primera consulta de validación tras subir (WithValidationPolling)
+	validationMax   time.Duration // espera máxima entre consultas de validación
 }
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
 var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured max file size limit")
 
+// ErrMediaUnsupported (MED-1050): O2 no admite el archivo con el tipo que indica su
+// extensión (p. ej. un .jpg cuyo contenido no es una imagen). Es definitivo: la app
+// oficial lo deja sin subir y no lo reintenta.
+var ErrMediaUnsupported = errors.New("SAPI MED-1050: the file extension or the format is not supported")
+
 // ErrSessionRefreshTransient indica que la renovación de sesión falló por un
 // problema transitorio (red/5xx), no porque el refresh_token esté revocado.
 var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily failed")
 
-func NewClient(cfg config.AccountConfig) (*Client, error) {
+// Option ajusta un Client al crearlo (NewClient).
+type Option func(*Client)
+
+// WithValidationPolling cambia, para este cliente, cuándo se consulta la validación
+// de un archivo recién subido: la primera consulta a los first y, después, cada vez
+// más espaciadas hasta un máximo de max entre consultas. Por defecto,
+// SAPI_VALIDATION_FIRST_SEC y SAPI_VALIDATION_MAX_SEC (10 s y 1 min, como la app).
+func WithValidationPolling(first, max time.Duration) Option {
+	return func(c *Client) {
+		if first > 0 {
+			c.validationFirst = first
+		}
+		if max > 0 {
+			c.validationMax = max
+		}
+	}
+}
+
+func NewClient(cfg config.AccountConfig, opts ...Option) (*Client, error) {
 	// Transporte HTTP/2 con ClientHello emitido por uTLS, imitando un navegador
 	// convencional para no disparar el AWS CloudFront WAF Bot Control (403).
 	transport := auth.NewFingerprintedTransport()
@@ -335,6 +369,12 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 		maxUploadMB:    4096,
 		sapiSem:        make(chan struct{}, maxConcurrent),
 		pacingInterval: pacing,
+
+		validationFirst: config.ValidationFirstWait(),
+		validationMax:   config.ValidationMaxWait(),
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 
 	c.syncCookiesLocked()
@@ -481,6 +521,10 @@ func (c *Client) appendValidationKey(rawURL string) string {
 
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
+		return rawURL
+	}
+	// La app oficial pide system/information sin validationkey.
+	if strings.HasSuffix(parsed.Path, "/system/information") && auth.IsDesktopProfile() {
 		return rawURL
 	}
 
@@ -679,6 +723,21 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		return false, false
 	}
 
+	// Tras un login fallido no se vuelve a intentar hasta que pasa la espera: cada
+	// 401 de las peticiones en curso pediría otro login y O2 (CloudFront/WAF)
+	// bloquea las ráfagas de logins.
+	if !forceOAuth && auth.IsDesktopProfile() {
+		c.mu.RLock()
+		retryAt := c.loginRetryAt
+		c.mu.RUnlock()
+		if time.Now().Before(retryAt) {
+			c.mu.Lock()
+			c.refreshTransient = true
+			c.mu.Unlock()
+			return false, true
+		}
+	}
+
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
 	c.mu.Lock()
 	c.refreshTransient = false
@@ -692,6 +751,7 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		sapiBase = auth.GetSAPIBaseURL(cfg.Provider)
 	}
 
+	var step1 *auth.SAPILoginResult
 	if !forceOAuth && cfg.AccessToken != "" {
 		wasStaleLRD := cfg.LastRefreshDate > 1750000000000 && time.Since(time.UnixMilli(cfg.LastRefreshDate)) > 45*time.Minute
 		loginLRD := cfg.LastRefreshDate
@@ -700,6 +760,7 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		}
 		loginClient, primedJSess := c.newSAPILoginClient(sapiBase, cfg.Provider)
 		res := auth.SAPILoginOAuth(loginClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, loginLRD, cfg.ExpiresIn)
+		step1 = &res
 		// Un 200 con cookies NO garantiza que el access_token siga siendo válido:
 		// SAPI puede devolver cookies de sesión y un cuerpo de error. Exigimos además
 		// evidencia de una sesión OAuth real (credenciales rotadas o validationkey sin error),
@@ -709,6 +770,7 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 		if res.StatusCode == http.StatusOK && res.Error == nil && hasSession {
 			c.mu.Lock()
 			c.sessionExpired = false
+			c.loginFailures, c.loginFailingSince, c.loginRetryAt = 0, time.Time{}, time.Time{}
 			if res.ValidationKey != "" {
 				c.cfg.ValidationKey = res.ValidationKey
 			}
@@ -757,6 +819,9 @@ func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 	// "invalid_request / Invalid Token". En el perfil "desktop" solo se hace si se
 	// pide expresamente con OAUTH_REFRESH_FALLBACK=true.
 	if !apisegRefreshAllowed() {
+		if c.desktopLoginFailed(step1) {
+			return false, true
+		}
 		c.mu.Lock()
 		wasExpired := c.sessionExpired
 		c.sessionExpired = true
@@ -963,8 +1028,19 @@ func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
 	if until := freno.blockedUntil(); !until.IsZero() {
 		return nil, wafBlockedError(until, req.Method, req.URL.Path)
 	}
-	c.acquireSlot()
-	defer c.releaseSlot()
+	// El envío de contenido al servidor de subidas no ocupa el hueco de la API: dura
+	// todo lo que tarde en llegar el archivo (en flujo, lo que tarde el cliente en
+	// mandarlo), y retenerlo bloqueaba cualquier otra llamada a la API mientras
+	// tanto: el interbloqueo con restic -> rclone, que necesita respuesta a otras
+	// peticiones para seguir enviando. Las subidas tienen su propio límite (uploadSem)
+	// y su propio freno del cortafuegos; la app oficial también sigue con su latido y
+	// sus consultas a la API mientras sube.
+	if freno == &c.wafUpload {
+		c.paceRequest()
+	} else {
+		c.acquireSlot()
+		defer c.releaseSlot()
+	}
 	// Las peticiones que esperaban turno cuando saltó el bloqueo tampoco se envían.
 	if until := freno.blockedUntil(); !until.IsZero() {
 		return nil, wafBlockedError(until, req.Method, req.URL.Path)
@@ -1574,32 +1650,41 @@ func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
 }
 
 func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) {
-	u := fmt.Sprintf("%s/media/folder?action=save", c.baseURL)
-	payload := map[string]interface{}{
-		"data": map[string]interface{}{
-			"name":     name,
-			"parentid": parentID,
-			"magic":    false,
-			"offline":  false,
-		},
-	}
-	bodyBytes, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	var respBody []byte
+	var status int
+	if c.officialClient() {
+		var err error
+		respBody, status, err = c.officialFolderSave(officialFolderCreateData(name, parentID, time.Now()))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		u := fmt.Sprintf("%s/media/folder?action=save", c.baseURL)
+		payload := map[string]interface{}{
+			"data": map[string]interface{}{
+				"name":     name,
+				"parentid": parentID,
+				"magic":    false,
+				"offline":  false,
+			},
+		}
+		bodyBytes, _ := json.Marshal(payload)
+		req, err := http.NewRequest("POST", u, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 
-	resp, err := c.DoRequest(req)
-	if err != nil {
-		return nil, err
+		resp, err := c.DoRequest(req)
+		if err != nil {
+			return nil, err
+		}
+		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		status = resp.StatusCode
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		return nil, fmt.Errorf("create folder failed (%d): %s", resp.StatusCode, string(respBody))
+	if status != http.StatusOK && status != http.StatusCreated && status != http.StatusNoContent {
+		return nil, fmt.Errorf("create folder failed (%d): %s", status, string(respBody))
 	}
 
 	var res struct {
@@ -1705,6 +1790,15 @@ func (c *Client) UpdateFolder(folderID int64, name string, parentID int64) error
 var ErrFolderUpdatesLimit = errors.New("la carpeta supera el límite de elementos por operación de Movistar Cloud (FOL-1036)")
 
 func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
+	if c.officialClient() && !permanent {
+		// Como la app: media/folder?action=softdelete&id=<id>, cuerpo vacío.
+		err := c.deleteFolderLegacy(folderID, false)
+		if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
+			return err
+		}
+		logOfficialFallback("Borrado de la carpeta", folderID, err)
+		return c.deleteFolderModern(folderID, false)
+	}
 	err := c.deleteFolderModern(folderID, permanent)
 	if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
 		return err
@@ -1813,10 +1907,10 @@ func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
 // Comprobado con O2 Cloud subiendo y moviendo archivos reales de cada formato:
 //   - audio:   mp3, m4a (AAC y ALAC), wav
 //   - vídeo:   mp4
-//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff
+//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff, y heic/heif (la app oficial
+//     de Windows los sube con upload/picture; capturado el 18/11/2026)
 //   - genérico (la app no los trata como multimedia): aac, ogg, opus, wma, aiff, flac,
-//     mkv, mov, m4v, 3gp, avi, webm, wmv, mpg, ts, flv, heic, heif, avif, svg y
-//     cualquier otro.
+//     mkv, mov, m4v, 3gp, avi, webm, wmv, mpg, ts, flv, avif, svg y cualquier otro.
 //
 // Si una extensión clasificada como multimedia resultara genérica para SAPI,
 // UpdateMedia recurre a la operación genérica.
@@ -1836,7 +1930,7 @@ func mediaKindForName(name string) string {
 		return "audio"
 	case "mp4":
 		return "video"
-	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff":
+	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif":
 		return "picture"
 	}
 	return "file"
@@ -1872,8 +1966,22 @@ var (
 // (POST /media?action=get-validation-status, el que consulta la web tras subir).
 // "V" y "A" indican que aún se está validando.
 func (c *Client) MediaValidationStatus(mediaID string) (string, error) {
+	return c.mediaValidationStatus(mediaID, 0)
+}
+
+// mediaValidationStatus consulta el estado; con folderID, el cuerpo es el de la app
+// de escritorio: {"data":{"ids":[{"folder_id":…,"id":…}]}}.
+func (c *Client) mediaValidationStatus(mediaID string, folderID int64) (string, error) {
 	u := fmt.Sprintf("%s/media?action=get-validation-status", c.baseURL)
-	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"ids": []map[string]string{{"id": mediaID}}}})
+	entry := map[string]interface{}{"id": mediaID}
+	if folderID > 0 {
+		if n, err := strconv.ParseInt(mediaID, 10, 64); err == nil {
+			entry = map[string]interface{}{"folder_id": folderID, "id": n}
+		} else {
+			entry["folder_id"] = folderID
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"ids": []map[string]interface{}{entry}}})
 	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -1904,15 +2012,23 @@ func (c *Client) MediaValidationStatus(mediaID string) (string, error) {
 			return it.Status, nil
 		}
 	}
-	return "", fmt.Errorf("validation status: sin datos de %s", mediaID)
+	return "", fmt.Errorf("%w: %s", errValidationNoData, mediaID)
 }
+
+// errValidationNoData: O2 no devuelve el estado de ese ID (ya no existe: borrado o
+// sustituido).
+var errValidationNoData = errors.New("validation status: sin datos")
 
 // waitMediaValidated espera a que el archivo deje de estar en validación. Devuelve
 // false si no se pudo saber o se agotó la espera.
 func (c *Client) waitMediaValidated(mediaID string) bool {
+	return c.waitMediaValidatedIn(mediaID, 0)
+}
+
+func (c *Client) waitMediaValidatedIn(mediaID string, folderID int64) bool {
 	deadline := time.Now().Add(mediaValidationMaxWait)
 	for {
-		st, err := c.MediaValidationStatus(mediaID)
+		st, err := c.mediaValidationStatus(mediaID, folderID)
 		if err != nil {
 			return false
 		}
@@ -1943,6 +2059,14 @@ func mediaMoveDelay(attempt int) time.Duration {
 // archivo guardado) y, si falla, del nuevo y de la genérica. Si SAPI aún está validando
 // el archivo (MED-1017) se reintenta. Devuelve error si ninguna operación lo confirma.
 func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int64) error {
+	return c.updateMediaKinds(mediaID, currentName, newName, func(kind string) error {
+		return c.saveMediaMetadata(kind, mediaID, newName, folderID)
+	})
+}
+
+// updateMediaKinds prueba save con el tipo deducido del nombre actual, del nuevo y
+// el genérico, esperando a la validación si SAPI responde MED-1017.
+func (c *Client) updateMediaKinds(mediaID, currentName, newName string, save func(kind string) error) error {
 	var kinds []string
 	for _, k := range []string{mediaKindForName(currentName), mediaKindForName(newName), "file"} {
 		dup := false
@@ -1960,7 +2084,7 @@ func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int6
 	for i, kind := range kinds {
 		var err error
 		for attempt := 0; ; attempt++ {
-			err = c.saveMediaMetadata(kind, mediaID, newName, folderID)
+			err = save(kind)
 			if err == nil || !strings.Contains(err.Error(), "MED-1017") || attempt >= mediaMoveRetries {
 				break
 			}
@@ -2084,6 +2208,13 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 	if len(nameOrKind) > 0 {
 		targetKind = mediaKindForName(nameOrKind[0])
 	}
+	// Perfil desktop: primero la llamada de la app (media?action=softdelete&id=, sin
+	// cuerpo); si la rechazara, la operación por tipo.
+	officialFirst := c.officialClient()
+	fallbackKind := ""
+	if officialFirst {
+		fallbackKind, targetKind = targetKind, ""
+	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -2168,9 +2299,15 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 				return nil
 			}
 			lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
-			if targetKind != "" {
+			if targetKind != "" && !officialFirst {
 				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%s); se usa la llamada genérica.", mediaID, targetKind, res.Error.Code)
 				targetKind = ""
+				attempt--
+				continue
+			}
+			if targetKind == "" && fallbackKind != "" {
+				logOfficialFallback("Borrado del archivo", mediaID, lastErr)
+				targetKind, fallbackKind = fallbackKind, ""
 				attempt--
 				continue
 			}
@@ -2179,9 +2316,15 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
-			if targetKind != "" {
+			if targetKind != "" && !officialFirst {
 				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%d); se usa la llamada genérica.", mediaID, targetKind, resp.StatusCode)
 				targetKind = ""
+				attempt--
+				continue
+			}
+			if targetKind == "" && fallbackKind != "" {
+				logOfficialFallback("Borrado del archivo", mediaID, lastErr)
+				targetKind, fallbackKind = fallbackKind, ""
 				attempt--
 				continue
 			}
@@ -2197,6 +2340,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 // modificación del archivo en la nube (p. ej. la original, recibida vía X-OC-Mtime);
 // si es cero, se usa la hora actual.
 func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
+	if c.officialClient() {
+		return c.uploadOfficial(officialUpload{
+			name: fileName, reader: reader, size: size, folderID: folderID,
+			mime: mimeType, existing: existingMediaID, modTime: modTime,
+		})
+	}
 	c.mu.RLock()
 	uploadEndpoint := fmt.Sprintf("%s/sapi/upload?action=save", c.uploadURL)
 	c.mu.RUnlock()

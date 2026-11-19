@@ -30,7 +30,7 @@ func copyCloud(t *testing.T, copyReply string) (*Server, *[]string) {
 		return map[string]interface{}{"id": id, "name": name, "size": 10, "folderid": folder,
 			"url": "/sapi/download/" + id, "creationdate": "20260101T000000Z", "modificationdate": "20260101T000000Z"}
 	}
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mock := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		action := r.URL.Query().Get("action")
 		mu.Lock()
@@ -59,6 +59,17 @@ func copyCloud(t *testing.T, copyReply string) (*Server, *[]string) {
 		case r.URL.Path == "/sapi/media/file" && action == "copy":
 			b, _ := io.ReadAll(r.Body)
 			copies = append(copies, string(b))
+			if strings.HasPrefix(copyReply, "__cut") {
+				// O2 no responde a tiempo (la conexión se corta); con __cut_done__ la
+				// copia se completa igualmente en el servidor.
+				copied = copyReply == "__cut_done__"
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						_ = conn.Close()
+					}
+				}
+				return
+			}
 			if strings.Contains(copyReply, `"id"`) {
 				copied = true
 			}
@@ -121,5 +132,41 @@ func TestCopy_FallsBackWhenRejectedOrExisting(t *testing.T) {
 	}
 	if len(*copies) != 1 {
 		t.Errorf("no debía haber más copias, hubo %d", len(*copies))
+	}
+}
+
+func fastCopyWait(t *testing.T) {
+	t.Setenv("WEBDAV_COPY_POLL_SEC", "0.01")
+	t.Setenv("WEBDAV_COPY_WAIT_BASE_SEC", "0.1")
+	t.Setenv("WEBDAV_COPY_WAIT_MAX_SEC", "0.2")
+}
+
+// La copia de 3 GB tardó más que el tiempo de espera y O2 la terminó igualmente:
+// el proxy no debe bajar y subir el archivo (dejaría dos con el mismo nombre), sino
+// esperar a que la copia aparezca en el destino.
+func TestCopy_NoResponseButCopiedInCloud_NoDuplicate(t *testing.T) {
+	fastCopyWait(t)
+	srv, copies := copyCloud(t, "__cut_done__")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, copyReq("/dst/b.bin"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("COPY = %d, esperado 201 al encontrar la copia", rec.Code)
+	}
+	if len(*copies) != 1 {
+		t.Fatalf("copias pedidas = %d", len(*copies))
+	}
+}
+
+// Si tras la espera la copia no aparece, 503 para que el cliente reintente, nunca
+// la copia descargando y subiendo (la de la nube podría aparecer después).
+func TestCopy_NoResponseAndNotFound_AsksToRetry(t *testing.T) {
+	fastCopyWait(t)
+	srv, _ := copyCloud(t, "__cut_none__")
+	rec := httptest.NewRecorder()
+	if !srv.tryServerCopy(rec, copyReq("/dst/b.bin")) {
+		t.Fatal("con resultado desconocido no debe dejarse al manejador normal (duplicaría)")
+	}
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("COPY = %d (Retry-After %q), esperado 503", rec.Code, rec.Header().Get("Retry-After"))
 	}
 }

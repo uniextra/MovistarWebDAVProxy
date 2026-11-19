@@ -3,7 +3,6 @@ package webdav
 import (
 	"context"
 	"io"
-	"net/http/httptest"
 	"testing"
 
 	emersion "github.com/emersion/go-webdav"
@@ -14,7 +13,7 @@ func TestEmersionWebDAVClient_Compatibility(t *testing.T) {
 	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
 	defer cleanup()
 
-	ts := httptest.NewServer(srv)
+	ts := newShimServer(srv)
 	defer ts.Close()
 
 	client, err := emersion.NewClient(nil, ts.URL)

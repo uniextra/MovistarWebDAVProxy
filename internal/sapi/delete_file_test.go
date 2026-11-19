@@ -10,6 +10,8 @@ import (
 )
 
 func TestDeleteFile_OfficialFormat(t *testing.T) {
+	// Formato de la web; el del cliente de escritorio se prueba en metadatos_oficial_test.go.
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	var capturedPath string
 	var capturedQuery map[string][]string
 	var capturedContentType string
@@ -71,6 +73,8 @@ func TestDeleteFile_OfficialFormat(t *testing.T) {
 }
 
 func TestDeleteFile_FallbackToLegacy(t *testing.T) {
+	// Formato de la web; el del cliente de escritorio se prueba en metadatos_oficial_test.go.
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	var calls []string
 	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.URL.Path+"?"+r.URL.RawQuery)
@@ -194,6 +198,8 @@ func TestDeleteFile_APIError(t *testing.T) {
 }
 
 func TestDeleteFolder_OfficialFormat(t *testing.T) {
+	// Formato de la web; el del cliente de escritorio se prueba en metadatos_oficial_test.go.
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	var capturedPath string
 	var capturedQuery map[string][]string
 	var capturedContentType string
@@ -252,6 +258,8 @@ func TestDeleteFolder_OfficialFormat(t *testing.T) {
 }
 
 func TestDeleteFolder_FallbackToLegacy(t *testing.T) {
+	// Formato de la web; el del cliente de escritorio se prueba en metadatos_oficial_test.go.
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	var calls []string
 	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.URL.Path+"?"+r.URL.RawQuery)

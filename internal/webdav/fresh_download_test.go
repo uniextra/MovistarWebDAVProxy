@@ -103,7 +103,7 @@ func (f *fakeO2) queryCount() int {
 // uploadThenServer sube 300 KB (más del límite de 256 KB que se sirve desde memoria).
 func uploadThenServer(t *testing.T, f *fakeO2) (*Server, []byte) {
 	t.Helper()
-	mock := httptest.NewServer(f.handler(t))
+	mock := newShimServer(f.handler(t))
 	t.Cleanup(mock.Close)
 
 	client, err := sapi.NewClient(config.AccountConfig{
@@ -135,6 +135,8 @@ func readBack(srv *Server) []byte {
 // Caso normal: SAPI ya conoce el archivo -> lectura inmediata correcta y la URL se
 // recuerda (una sola consulta aunque se lea varias veces).
 func TestFreshRead_FoundIsUsedAndRemembered(t *testing.T) {
+	// cuenta las llamadas a O2 aparte de la relectura tras subir (SAPI_REFRESH_AFTER_UPLOAD)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 	f := &fakeO2{}
 	f.set(true, false)
 	srv, payload := uploadThenServer(t, f)
@@ -186,6 +188,8 @@ func TestFreshRead_NotYetIndexedRetriesOnNextRead(t *testing.T) {
 // Issue #41: PUT seguido inmediatamente de GET mientras SAPI termina de indexar en modo normal
 // debe esperar el sondeo de waitForDownloadURL y devolver el contenido en la primera lectura.
 func TestIssue41_ImmediateGetAfterPutWhileSapiIndexingInNormalMode(t *testing.T) {
+	// cuenta las llamadas a O2 aparte de la relectura tras subir (SAPI_REFRESH_AFTER_UPLOAD)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 	oldWait, oldPoll := reuploadSourceWait, reuploadSourcePoll
 	reuploadSourceWait = 2 * time.Second
 	reuploadSourcePoll = 40 * time.Millisecond
@@ -215,6 +219,8 @@ func TestIssue41_ImmediateGetAfterPutWhileSapiIndexingInNormalMode(t *testing.T)
 // ese archivo hasta pasado urlLookupErrorBackoff (downloadRange sí intenta 1 refresco si el
 // cuerpo llega vacío).
 func TestFreshRead_ErrorBacksOffBeforeRetrying(t *testing.T) {
+	// cuenta las llamadas a O2 aparte de la relectura tras subir (SAPI_REFRESH_AFTER_UPLOAD)
+	t.Setenv("SAPI_REFRESH_AFTER_UPLOAD", "false")
 	old := urlLookupErrorBackoff
 	urlLookupErrorBackoff = 800 * time.Millisecond
 	defer func() { urlLookupErrorBackoff = old }()

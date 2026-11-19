@@ -15,6 +15,8 @@ import (
 )
 
 func TestUploadFileToFolder_Retries408WithFreshConnection(t *testing.T) {
+	// Subida de la web (multipart); la del perfil desktop se prueba en upload_oficial_test.go.
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

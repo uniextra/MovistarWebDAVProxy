@@ -69,9 +69,16 @@ func WebSessionEnabled() bool {
 }
 
 // TransferLimits devuelve las descargas y subidas simultáneas (WEBDAV_MAX_DOWNLOADS,
-// WEBDAV_MAX_UPLOADS). Por defecto 4 descargas y 2 subidas para ambos modos (la web sube de 2 en 2).
+// WEBDAV_MAX_UPLOADS). Por defecto 4 descargas y 2 subidas (la web sube de 2 en 2),
+// salvo donde el proxy habla como el cliente oficial (OfficialClient, perfil
+// desktop): 1 y 1, como la app, que transfiere de una en una y no baja
+// mientras sube (medido el 19/11/2026: 3 × 1 GB por una sola conexión con
+// upload.*, y la bajada pendiente, después).
 func TransferLimits(webMode bool) (downloads, uploads int) {
 	downloads, uploads = 4, 2
+	if !webMode && OfficialClient() {
+		downloads, uploads = 1, 1
+	}
 	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WEBDAV_MAX_DOWNLOADS"))); err == nil && n > 0 {
 		downloads = n
 	}
@@ -82,7 +89,8 @@ func TransferLimits(webMode bool) (downloads, uploads int) {
 }
 
 // GetSyncInterval returns the metadata delta sync interval configured via SYNC_INTERVAL_SEC.
-// Default: 60s, minimum: 15s.
+// Default: 300s in the desktop profile (the official Windows client asks for
+// profile/changes every 5 minutes), 60s otherwise; minimum: 15s.
 func GetSyncInterval() time.Duration {
 	if env := strings.TrimSpace(os.Getenv("SYNC_INTERVAL_SEC")); env != "" {
 		if sec, err := strconv.Atoi(env); err == nil {
@@ -91,6 +99,9 @@ func GetSyncInterval() time.Duration {
 			}
 			return time.Duration(sec) * time.Second
 		}
+	}
+	if IsDesktopProfile() {
+		return 300 * time.Second
 	}
 	return 60 * time.Second
 }

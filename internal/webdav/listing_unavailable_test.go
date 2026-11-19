@@ -13,7 +13,7 @@ import (
 
 func TestPropfindDoesNotReturnEmptySuccessWhenProviderFails(t *testing.T) {
 	// Simular un backend SAPI que falla con error 503 o 403 al listar subcarpetas o media
-	mockSAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockSAPI := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		action := r.URL.Query().Get("action")
 

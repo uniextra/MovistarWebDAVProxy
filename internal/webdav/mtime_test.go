@@ -47,7 +47,7 @@ func newMtimeMockSAPI(t *testing.T) (*httptest.Server, func() []map[string]inter
 	var mu sync.Mutex
 	var uploads []map[string]interface{}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		action := r.URL.Query().Get("action")
 		switch {

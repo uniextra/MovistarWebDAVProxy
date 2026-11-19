@@ -3,6 +3,7 @@ package sapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,16 +70,28 @@ func AccountSettings(info map[string]interface{}) map[string]interface{} {
 
 // apiErrorCode devuelve el código de error de SAPI del cuerpo ({"error":{"code":...}}), si lo hay.
 func apiErrorCode(b []byte) string {
+	code, _, _ := apiError(b)
+	return code
+}
+
+// apiError devuelve el error de SAPI del cuerpo ({"error":{"code","message"}}); ok
+// indica si lo hay.
+func apiError(b []byte) (code, message string, ok bool) {
 	var res struct {
 		Error *struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(b, &res) == nil && res.Error != nil {
-		return res.Error.Code
+	if json.Unmarshal(b, &res) != nil || res.Error == nil {
+		return "", "", false
 	}
-	return ""
+	return res.Error.Code, res.Error.Message, true
 }
+
+// ErrCopyOutcomeUnknown: la petición de copia no obtuvo respuesta, así que no se sabe
+// si O2 la hizo (las de archivos grandes tardan más que el tiempo de espera).
+var ErrCopyOutcomeUnknown = errors.New("resultado de la copia en la nube desconocido")
 
 // CopyFile copia un archivo dentro de la nube, como la web (POST /media/file?action=copy
 // con {"data":{"id","parentid","name"}}), sin descargarlo ni volver a subirlo.
@@ -100,10 +113,18 @@ func (c *Client) CopyFile(mediaID string, parentID int64, name string) (string, 
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	resp, err := c.DoRequest(req)
 	if err != nil {
-		return "", err
+		if errors.Is(err, ErrWAFBlocked) {
+			return "", err
+		}
+		// Sin respuesta (p. ej. O2 tarda más de 60 s en copiar 3 GB): la copia puede
+		// terminar igualmente en el servidor. Copiar a mano daría un duplicado.
+		return "", fmt.Errorf("%w: %v", ErrCopyOutcomeUnknown, err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode == http.StatusBadGateway {
+		return "", fmt.Errorf("%w: HTTP %d", ErrCopyOutcomeUnknown, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("copy file failed (%d): %s", resp.StatusCode, string(b))
 	}

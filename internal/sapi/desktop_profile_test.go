@@ -181,10 +181,15 @@ func TestDesktopProfile_DoesNotSlideLastRefreshDate(t *testing.T) {
 }
 
 // Si SAPI rechaza la sesión, el perfil "desktop" no canjea el refresh_token en
-// apiseg (el cliente oficial nunca lo hace): marca la sesión para revincular.
+// apiseg (el cliente oficial nunca lo hace). Un login fallido no la da por perdida
+// al momento (issue #60): se conserva, se espera antes de volver a intentarlo y
+// solo se marca para revincular si O2 la sigue rechazando durante un buen rato.
 func TestDesktopProfile_NoApisegRefreshOn401(t *testing.T) {
+	var logins atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logins.Add(1)
 		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"AUTH-1000"}}`))
 	}))
 	defer srv.Close()
 
@@ -195,11 +200,51 @@ func TestDesktopProfile_NoApisegRefreshOn401(t *testing.T) {
 	if ok {
 		t.Fatalf("refreshSessionInternal succeeded against a server that only answers 401")
 	}
-	if !client.IsSessionExpired() {
-		t.Errorf("session not marked expired")
+	if client.IsSessionExpired() || !client.RefreshTransient() {
+		t.Fatalf("un primer login fallido debe ser transitorio (expirada=%v transitorio=%v)", client.IsSessionExpired(), client.RefreshTransient())
 	}
 	// El canje en apiseg reintenta con esperas de segundos; aquí no debe ocurrir.
 	if time.Since(start) > 3*time.Second {
 		t.Errorf("refresh took %v; it looks like it tried apiseg", time.Since(start))
+	}
+
+	// Durante la espera no se repite el login (ráfagas de logins = bloqueo del WAF).
+	before := logins.Load()
+	if ok, _ := client.refreshSessionInternal(false); ok || logins.Load() != before {
+		t.Fatalf("se repitió el login durante la espera (%d → %d)", before, logins.Load())
+	}
+
+	// Si O2 sigue rechazándolo durante el tiempo y los intentos fijados, se da por caducada.
+	t.Setenv("SAPI_LOGIN_GIVEUP_REJECTIONS", "2")
+	t.Setenv("SAPI_LOGIN_GIVEUP_SEC", "0.000001")
+	client.mu.Lock()
+	client.loginRetryAt = time.Time{}
+	client.mu.Unlock()
+	client.refreshSessionInternal(false)
+	if !client.IsSessionExpired() {
+		t.Errorf("tras rechazos repetidos la sesión debe marcarse para revincular")
+	}
+}
+
+// El 401 vacío del borde de CloudFront no dice nada de las credenciales: nunca
+// marca la sesión como caducada, por muchas veces que ocurra.
+func TestDesktopProfile_CloudFrontEmpty401NeverExpires(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", "CloudFront")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	t.Setenv("SAPI_LOGIN_GIVEUP_REJECTIONS", "1")
+	t.Setenv("SAPI_LOGIN_GIVEUP_SEC", "0.000001")
+
+	client := newDesktopTestClient(t, srv.URL, time.Now().Add(-5*time.Minute).UnixMilli())
+	for i := 0; i < 5; i++ {
+		client.mu.Lock()
+		client.loginRetryAt = time.Time{}
+		client.mu.Unlock()
+		client.refreshSessionInternal(false)
+	}
+	if client.IsSessionExpired() {
+		t.Fatal("un 401 vacío de CloudFront no debe dar la sesión por caducada")
 	}
 }
