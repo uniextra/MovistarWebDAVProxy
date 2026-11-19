@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/sapi"
 
@@ -31,6 +30,7 @@ type MetadataStore struct {
 	cleanerMu           sync.RWMutex
 	tombstoneCleaner    func(path string)
 	hasTombstonesFilter func() bool
+	nameFolding         atomic.Pointer[func() bool] // buscar nombres sin distinguir mayúsculas (SetNameFolding)
 	rootFolderID        atomic.Int64
 }
 
@@ -400,8 +400,15 @@ func (s *MetadataStore) GetFolderPath(folderID int64) (string, error) {
 	return "/" + strings.Join(segments, "/"), nil
 }
 
-func nameCollation() string {
-	if config.CaseInsensitiveNames() {
+// SetNameFolding indica cómo buscar por nombre: fold() == true, sin distinguir
+// mayúsculas; si no, nombres exactos (por defecto). La capa WebDAV lo fija según la
+// cuenta (config.CaseInsensitiveNamesFor).
+func (s *MetadataStore) SetNameFolding(fold func() bool) {
+	s.nameFolding.Store(&fold)
+}
+
+func (s *MetadataStore) nameCollation() string {
+	if f := s.nameFolding.Load(); f != nil && *f != nil && (*f)() {
 		return "NOCASE"
 	}
 	return "BINARY"
@@ -423,7 +430,7 @@ func (s *MetadataStore) GetFolderByParentAndName(parentID int64, name string) (*
 	query := `
 		SELECT id, name, parent_id, magic, offline, creation_date, modification_date
 		FROM folders
-		WHERE parent_id = ? AND name = ? COLLATE ` + nameCollation() + `
+		WHERE parent_id = ? AND name = ? COLLATE ` + s.nameCollation() + `
 		ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END
 		LIMIT 1
 	`
@@ -539,7 +546,7 @@ func (s *MetadataStore) GetMediaByFolderAndName(folderID int64, name string) (*s
 	query := `
 		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
 		FROM media
-		WHERE folder_id = ? AND name = ? COLLATE ` + nameCollation() + `
+		WHERE folder_id = ? AND name = ? COLLATE ` + s.nameCollation() + `
 		ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END, modification_date DESC, id DESC
 	`
 	// O2 distingue mayúsculas ("A.txt" y "a.txt" son archivos distintos): manda el

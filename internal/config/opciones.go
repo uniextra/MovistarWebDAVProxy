@@ -84,15 +84,28 @@ func OfficialClientForHost(host string) bool {
 	return OfficialClientFor(provider)
 }
 
-// StreamUploads (WEBDAV_STREAM_UPLOAD, por defecto true): subir a O2 mientras el
-// archivo llega del cliente, como la app.
-func StreamUploads() bool { return envBool("WEBDAV_STREAM_UPLOAD", true) }
+// StreamUploadsFor (WEBDAV_STREAM_UPLOAD): subir a O2 mientras el archivo llega del
+// cliente, como la app. Sin la variable, sí donde se habla como la app
+// (OfficialClientFor: O2 en el perfil desktop) y no en el resto, como antes.
+func StreamUploadsFor(provider string) bool {
+	if v, ok := envBoolSet("WEBDAV_STREAM_UPLOAD"); ok {
+		return v
+	}
+	return OfficialClientFor(provider)
+}
 
-// CaseInsensitiveNames (WEBDAV_CASE_INSENSITIVE, por defecto false): buscar nombres
-// sin distinguir mayúsculas. O2 Cloud las distingue («A.txt» y «a.txt» son dos
-// archivos), y responder a «a.txt» con «A.txt» hacía que rclone diera por subido un
-// archivo que no lo estaba o, en un cambio solo de mayúsculas, borrara el origen.
-func CaseInsensitiveNames() bool { return envBool("WEBDAV_CASE_INSENSITIVE", false) }
+// CaseInsensitiveNamesFor (WEBDAV_CASE_INSENSITIVE): buscar nombres sin distinguir
+// mayúsculas. O2 Cloud las distingue («A.txt» y «a.txt» son dos archivos), y
+// responder a «a.txt» con «A.txt» hacía que rclone diera por subido un archivo que no
+// lo estaba o, en un cambio solo de mayúsculas, borrara el origen. Sin la variable,
+// nombres exactos donde se habla como la app (comprobado con O2) y, en el resto,
+// sin distinguir, como antes.
+func CaseInsensitiveNamesFor(provider string) bool {
+	if v, ok := envBoolSet("WEBDAV_CASE_INSENSITIVE"); ok {
+		return v
+	}
+	return !OfficialClientFor(provider)
+}
 
 // RefreshAfterUpload (SAPI_REFRESH_AFTER_UPLOAD, por defecto true): releer cada
 // archivo subido, como la app, para guardar su URL de descarga firmada.
@@ -151,13 +164,21 @@ func CopyWaitBytesPerSec() int64 {
 
 // envBool lee un sí/no; vacío o no reconocido = def.
 func envBool(name string, def bool) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
+	if v, ok := envBoolSet(name); ok {
+		return v
 	}
 	return def
+}
+
+// envBoolSet lee un sí/no; ok = false si la variable está vacía o no se reconoce.
+func envBoolSet(name string) (value, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	return false, false
 }
 
 // envInt lee un entero positivo; vacío o no válido = def.

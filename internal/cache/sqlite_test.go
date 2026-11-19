@@ -111,9 +111,9 @@ func TestSyncState(t *testing.T) {
 }
 
 func TestFolderCRUD_AndCaseInsensitivity(t *testing.T) {
-	// Modo opcional que no distingue mayúsculas (por defecto los nombres son exactos, como en O2).
-	t.Setenv("WEBDAV_CASE_INSENSITIVE", "true")
+	// Modo que no distingue mayúsculas (por defecto la base busca nombres exactos, como O2).
 	store, _ := createTempStore(t)
+	store.SetNameFolding(func() bool { return true })
 
 	// Initially no root folder
 	rf, err := store.GetRootFolder()
@@ -204,9 +204,9 @@ func TestFolderCRUD_AndCaseInsensitivity(t *testing.T) {
 }
 
 func TestFolder_HBKTolerance(t *testing.T) {
-	// Modo opcional que no distingue mayúsculas (por defecto los nombres son exactos, como en O2).
-	t.Setenv("WEBDAV_CASE_INSENSITIVE", "true")
+	// Modo que no distingue mayúsculas (por defecto la base busca nombres exactos, como O2).
 	store, _ := createTempStore(t)
+	store.SetNameFolding(func() bool { return true })
 
 	// Folder stored with .hbk suffix
 	f1 := sapi.FolderItem{ID: 400, Name: "NAS_Backup.hbk", ParentID: 10}
@@ -245,9 +245,9 @@ func TestFolder_HBKTolerance(t *testing.T) {
 }
 
 func TestMediaCRUD_AndCaseInsensitivity(t *testing.T) {
-	// Modo opcional que no distingue mayúsculas (por defecto los nombres son exactos, como en O2).
-	t.Setenv("WEBDAV_CASE_INSENSITIVE", "true")
+	// Modo que no distingue mayúsculas (por defecto la base busca nombres exactos, como O2).
 	store, _ := createTempStore(t)
+	store.SetNameFolding(func() bool { return true })
 
 	// Upsert media
 	m1 := sapi.MediaItem{

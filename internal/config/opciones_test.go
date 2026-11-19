@@ -74,3 +74,29 @@ func TestEnvHelpers(t *testing.T) {
 		t.Error("envBool(no reconocido) debía dar el valor por defecto")
 	}
 }
+
+// Flujo directo y nombres exactos son lo nuevo y solo se han probado con O2: por
+// defecto, solo con O2; con Movistar, como antes (sin flujo, sin distinguir
+// mayúsculas). Con la variable puesta, manda la variable.
+func TestStreamAndCaseDefaultsFollowProvider(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	t.Setenv("SAPI_OFFICIAL_CLIENT", "")
+	t.Setenv("WEBDAV_STREAM_UPLOAD", "")
+	t.Setenv("WEBDAV_CASE_INSENSITIVE", "")
+	if !StreamUploadsFor("o2") || CaseInsensitiveNamesFor("o2") {
+		t.Error("O2: flujo directo y nombres exactos por defecto")
+	}
+	if StreamUploadsFor("movistar") || !CaseInsensitiveNamesFor("movistar") {
+		t.Error("Movistar: como antes, sin flujo y sin distinguir mayúsculas")
+	}
+	t.Setenv("WEBDAV_STREAM_UPLOAD", "true")
+	t.Setenv("WEBDAV_CASE_INSENSITIVE", "false")
+	if !StreamUploadsFor("movistar") || CaseInsensitiveNamesFor("movistar") {
+		t.Error("con la variable puesta, manda la variable")
+	}
+	t.Setenv("WEBDAV_STREAM_UPLOAD", "off")
+	t.Setenv("WEBDAV_CASE_INSENSITIVE", "on")
+	if StreamUploadsFor("o2") || !CaseInsensitiveNamesFor("o2") {
+		t.Error("con la variable puesta, manda la variable (O2)")
+	}
+}

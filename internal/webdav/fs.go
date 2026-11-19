@@ -380,13 +380,13 @@ func newCachedFolders(folders []sapi.FolderItem) *cachedFolders {
 	}
 }
 
-func (cf *cachedFolders) find(name string) (*sapi.FolderItem, bool) {
+func (cf *cachedFolders) find(name string, fold bool) (*sapi.FolderItem, bool) {
 	get := func(n string) (*sapi.FolderItem, bool) {
 		if item, ok := cf.byExact[n]; ok {
 			itemCopy := item
 			return &itemCopy, true
 		}
-		if caseInsensitiveNames() {
+		if fold {
 			if item, ok := cf.byLower[strings.ToLower(n)]; ok {
 				itemCopy := item
 				return &itemCopy, true
@@ -451,12 +451,12 @@ func newCachedMedia(media []sapi.MediaItem) *cachedMedia {
 	}
 }
 
-func (cm *cachedMedia) find(name string) (*sapi.MediaItem, bool) {
+func (cm *cachedMedia) find(name string, fold bool) (*sapi.MediaItem, bool) {
 	if item, ok := cm.byExact[name]; ok {
 		itemCopy := item
 		return &itemCopy, true
 	}
-	if !caseInsensitiveNames() {
+	if !fold {
 		return nil, false
 	}
 	if item, ok := cm.byLower[strings.ToLower(name)]; ok {
@@ -496,6 +496,7 @@ func NewMovistarFS(client *sapi.Client, metaStores ...*cache.MetadataStore) *Mov
 	if ms != nil {
 		ms.SetTombstoneCleaner(fs.ClearTombstone)
 		ms.SetTombstoneFilter(fs.HasTombstones)
+		ms.SetNameFolding(fs.caseInsensitive)
 		go func() {
 			time.Sleep(2 * time.Second)
 			fs.emptyFileManager.BootstrapLoad()
@@ -608,6 +609,7 @@ func (mfs *MovistarFS) SetMetadataStore(ms *cache.MetadataStore) {
 	if ms != nil {
 		ms.SetTombstoneCleaner(mfs.ClearTombstone)
 		ms.SetTombstoneFilter(mfs.HasTombstones)
+		ms.SetNameFolding(mfs.caseInsensitive)
 		if mfs.emptyFileManager != nil {
 			go func() {
 				time.Sleep(2 * time.Second)
@@ -677,13 +679,12 @@ func foldLookup[T any](m map[string]T, key string) (string, T, bool) {
 // pickByName elige, de n candidatos, el que se llama exactamente want; si no hay
 // ninguno, el primero que coincide sin distinguir mayúsculas (y, con hbk, la
 // tolerancia de Hyper Backup al sufijo .hbk). -1 si ninguno.
-func pickByName(n int, nameAt func(int) string, want string, hbk bool) int {
+func pickByName(n int, nameAt func(int) string, want string, hbk, fold bool) int {
 	for i := 0; i < n; i++ {
 		if nameAt(i) == want {
 			return i
 		}
 	}
-	fold := caseInsensitiveNames()
 	same := func(a, b string) bool {
 		if fold {
 			return strings.EqualFold(a, b)
@@ -709,7 +710,7 @@ func (mfs *MovistarFS) recentUpload(key string, resolved *sapi.MediaItem) (*Memo
 	if mem, ok := mfs.uploadCache[key]; ok {
 		return mem, true
 	}
-	if !caseInsensitiveNames() {
+	if !mfs.caseInsensitive() {
 		return nil, false
 	}
 	if _, mem, ok := foldLookup(mfs.uploadCache, key); ok && (resolved == nil || resolved.ID == mem.ID) {
@@ -721,7 +722,17 @@ func (mfs *MovistarFS) recentUpload(key string, resolved *sapi.MediaItem) (*Memo
 // caseInsensitiveNames: WEBDAV_CASE_INSENSITIVE=true vuelve al comportamiento
 // anterior (un nombre con otras mayúsculas encuentra el archivo). Por defecto los
 // nombres son exactos, como en O2.
-func caseInsensitiveNames() bool { return config.CaseInsensitiveNames() }
+func (mfs *MovistarFS) caseInsensitive() bool {
+	return config.CaseInsensitiveNamesFor(mfs.provider())
+}
+
+// provider es el proveedor de la cuenta vinculada ("o2" o "movistar").
+func (mfs *MovistarFS) provider() string {
+	if mfs == nil || mfs.client == nil {
+		return ""
+	}
+	return mfs.client.GetConfig().Provider
+}
 
 // isSameEntryName: el mismo elemento de O2 (nombre idéntico, mayúsculas incluidas).
 func isSameEntryName(a, b string) bool { return a == b }
@@ -1003,7 +1014,7 @@ func (mfs *MovistarFS) findSubfolder(parentID int64, name string) (*sapi.FolderI
 			recent = append(recent, cf.Info)
 		}
 	}
-	if i := pickByName(len(recent), func(i int) string { return recent[i].Name }, name, true); i >= 0 {
+	if i := pickByName(len(recent), func(i int) string { return recent[i].Name }, name, true, mfs.caseInsensitive()); i >= 0 {
 		f := recent[i]
 		mfs.cacheMu.RUnlock()
 		return &f, true, nil
@@ -1011,7 +1022,7 @@ func (mfs *MovistarFS) findSubfolder(parentID int64, name string) (*sapi.FolderI
 
 	cached, ok := mfs.folderCache[parentID]
 	if ok && time.Since(cached.time) < mfs.cacheTTL {
-		item, found := cached.find(name)
+		item, found := cached.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
@@ -1026,13 +1037,13 @@ func (mfs *MovistarFS) findSubfolder(parentID int64, name string) (*sapi.FolderI
 	}
 	mfs.cacheMu.RLock()
 	if c, ok := mfs.folderCache[parentID]; ok && c != nil {
-		item, found := c.find(name)
+		item, found := c.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
 	mfs.cacheMu.RUnlock()
 
-	if i := pickByName(len(subs), func(i int) string { return subs[i].Name }, name, true); i >= 0 {
+	if i := pickByName(len(subs), func(i int) string { return subs[i].Name }, name, true, mfs.caseInsensitive()); i >= 0 {
 		return &subs[i], true, nil
 	}
 	return nil, false, nil
@@ -1103,7 +1114,7 @@ func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, 
 	mfs.cacheMu.RLock()
 	cached, ok := mfs.mediaCache[folderID]
 	if ok && time.Since(cached.time) < mfs.cacheTTL {
-		item, found := cached.find(name)
+		item, found := cached.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
@@ -1118,7 +1129,7 @@ func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, 
 	}
 	mfs.cacheMu.RLock()
 	if c, ok := mfs.mediaCache[folderID]; ok && c != nil {
-		item, found := c.find(name)
+		item, found := c.find(name, mfs.caseInsensitive())
 		mfs.cacheMu.RUnlock()
 		return item, found, nil
 	}
@@ -1129,7 +1140,7 @@ func (mfs *MovistarFS) findMedia(folderID int64, name string) (*sapi.MediaItem, 
 			return &items[i], true, nil
 		}
 	}
-	if caseInsensitiveNames() {
+	if mfs.caseInsensitive() {
 		for i := range items {
 			if strings.EqualFold(items[i].Name, name) {
 				return &items[i], true, nil
@@ -1244,7 +1255,7 @@ func (mfs *MovistarFS) ensureFolderChain(dirPath string) (*sapi.FolderItem, erro
 		if found == nil {
 			subs, err := mfs.getSubfolders(currentID)
 			if err == nil {
-				if i := pickByName(len(subs), func(i int) string { return subs[i].Name }, part, false); i >= 0 {
+				if i := pickByName(len(subs), func(i int) string { return subs[i].Name }, part, false, mfs.caseInsensitive()); i >= 0 {
 					s := subs[i]
 					{
 						item := s
@@ -1294,7 +1305,7 @@ func (mfs *MovistarFS) localMetadataReady() bool {
 // llamar a la API (ver OpenFile: la comprobación previa a cada subida).
 func (mfs *MovistarFS) resolvePathOpts(rawPath string, allowSAPI bool) (folderInfo *sapi.FolderItem, mediaInfo *sapi.MediaItem, isFolder bool, err error) {
 	folderInfo, mediaInfo, isFolder, err = mfs.resolvePathExact(rawPath, allowSAPI)
-	if !errors.Is(err, os.ErrNotExist) || !caseInsensitiveNames() {
+	if !errors.Is(err, os.ErrNotExist) || !mfs.caseInsensitive() {
 		return
 	}
 	// Nada con ese nombre exacto ni en la base ni en O2: un archivo o una carpeta
@@ -1462,7 +1473,7 @@ func (mfs *MovistarFS) resolvePathExact(rawPath string, allowSAPI bool) (folderI
 					recent = append(recent, cf.Info)
 				}
 			}
-			if i := pickByName(len(recent), func(i int) string { return recent[i].Name }, part, true); i >= 0 {
+			if i := pickByName(len(recent), func(i int) string { return recent[i].Name }, part, true, mfs.caseInsensitive()); i >= 0 {
 				item := recent[i]
 				foundCreated = &item
 			}
@@ -2624,7 +2635,7 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 // (5 min). El envío en flujo no retiene el hueco de la API (ver sapi.DoRequest), y
 // nunca se espera turno ni hueco de RAM antes de leer un cuerpo (tryAcquireUploadTurn,
 // Write), así que varias subidas a la vez no se bloquean entre sí.
-func streamUploadsEnabled() bool { return config.StreamUploads() }
+func (mfs *MovistarFS) streamUploads() bool { return config.StreamUploadsFor(mfs.provider()) }
 
 // tryAcquireUploadTurn intenta coger, sin esperar, el turno de subida a SAPI
 // (uploadSem + globalTransferSem). Devuelve false si alguno está ocupado.
@@ -2644,7 +2655,7 @@ func tryAcquireUploadTurn() bool {
 }
 
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
-	if !streamUploadsEnabled() {
+	if !w.mfs.streamUploads() {
 		return
 	}
 	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 {
