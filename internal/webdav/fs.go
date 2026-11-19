@@ -40,6 +40,10 @@ var (
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
 )
 
+// ErrUploadUnsupported: O2 no admite el archivo con el tipo que indica su extensión
+// (MED-1050). Se responde 415 y el cliente no debe reintentarlo.
+var ErrUploadUnsupported = errors.New("O2 Cloud does not support this file type/content (MED-1050)")
+
 // SetTransferLimits fija cuántas descargas y subidas simultáneas admite el proxy.
 // Por defecto es 1 y 1 (como el cliente oficial de escritorio). En modo web las
 // descargas van con URL firmada a CloudFront y la API la llama el navegador, así
@@ -59,12 +63,24 @@ func SetTransferLimits(downloads, uploads int) {
 	globalTransferSem = make(chan struct{}, downloads+uploads)
 }
 
+// rejectUnsupported marca la subida para responder 415: O2 no admite el archivo con
+// el tipo que indica su extensión y reintentarlo no lo arreglará.
+func (w *WebDAVFileWriter) rejectUnsupported() error {
+	if w.guard != nil {
+		w.guard.unsupported.Store(true)
+	}
+	logger.Log("[WebDAV] ❌ O2 Cloud no admite '%s': su contenido no corresponde a la extensión (MED-1050). No se reintenta.", w.name)
+	return ErrUploadUnsupported
+}
+
 type uploadGuardKey struct{}
 
 type uploadGuard struct {
 	expected int64 // Content-Length anunciado (-1 si no se sabe)
 	broken   atomic.Bool
 	tooLarge atomic.Bool
+	// unsupported: O2 rechazó el archivo por su contenido (MED-1050) → 415.
+	unsupported atomic.Bool
 	// retryLater: el cuerpo llegó entero pero O2 no aceptó la subida (sesión,
 	// validación MED-1017, corte de red, cortafuegos…). x/net/webdav lo convierte en
 	// 405, que Hyper Backup muestra como «No permission»; se responde 503 +
@@ -2941,6 +2957,9 @@ func (w *WebDAVFileWriter) Close() error {
 			}
 			logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
 			return ErrUploadTooLarge
+		} else if errors.Is(res.err, sapi.ErrMediaUnsupported) && !config.UnsupportedAsFile() {
+			w.cleanupTemp()
+			return w.rejectUnsupported()
 		} else {
 			var ie *sapi.UploadInterruptedError
 			if errors.As(res.err, &ie) && ie.MediaID != "" {
@@ -2994,6 +3013,9 @@ func (w *WebDAVFileWriter) Close() error {
 				}
 				logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
 				return ErrUploadTooLarge
+			}
+			if errors.Is(err, sapi.ErrMediaUnsupported) {
+				return w.rejectUnsupported()
 			}
 			logger.Log("[WebDAV] ❌ Error al subir '%s': %v", w.name, err)
 			w.guard.setRetryLater(err)

@@ -95,6 +95,7 @@ type officialUpload struct {
 	pendingNew bool            // pendingID lo creó ese intento (no es un archivo que ya existía)
 	ctx        context.Context // la petición del cliente: si se va, la subida se aborta
 	modTime    time.Time
+	kind       string // tipo forzado (upload/<kind>); vacío: el de la extensión
 }
 
 func (p officialUpload) context() context.Context {
@@ -178,17 +179,29 @@ func (c *Client) DiscardInterruptedUpload(err error, name string) {
 	if !errors.As(err, &ie) || !ie.New || ie.MediaID == "" {
 		return
 	}
-	if derr := c.DeleteFile(ie.MediaID, name); derr != nil {
-		logger.Log("[SAPI] ⚠️ No se pudo retirar el elemento a medias de '%s' (ID %s): %v", name, ie.MediaID, derr)
+	c.retireNewItem(ie.MediaID, name, "a medias", "tras fallar su subida")
+}
+
+// retireNewItem borra (a la papelera) un elemento que creó una subida que no llegó a
+// buen término, para no dejar en la nube un archivo vacío o incompleto.
+func (c *Client) retireNewItem(id, name, what, why string) {
+	if derr := c.DeleteFile(id, name); derr != nil {
+		logger.Log("[SAPI] ⚠️ No se pudo retirar el elemento %s de '%s' (ID %s): %v", what, name, id, derr)
 		return
 	}
-	logger.Log("[SAPI] 🧹 Retirado el elemento a medias de '%s' (ID %s) tras fallar su subida", name, ie.MediaID)
+	logger.Log("[SAPI] 🧹 Retirado el elemento %s de '%s' (ID %s) %s", what, name, id, why)
 }
 
 func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
-	kind := mediaKindForName(p.name)
+	kind := p.kind
+	if kind == "" {
+		kind = mediaKindForName(p.name)
+	}
 	// El tipo como lo manda la app (sin "; charset=…" y con sus valores para m4a, heic…).
 	contentType := contentTypeForName(p.name)
+	if kind == "file" && mediaKindForName(p.name) != "file" {
+		contentType = "application/octet-stream" // imagen/audio/vídeo subido como genérico
+	}
 	now := time.Now()
 	modTime := now
 	if !p.modTime.IsZero() {
@@ -201,6 +214,9 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 		var err error
 		id, err = c.officialSaveMetadata(kind, p, contentType, now, modTime)
 		if err != nil {
+			if retry, ok := c.unsupportedAsFile(err, kind, p); ok {
+				return c.uploadOfficial(retry)
+			}
 			return nil, err
 		}
 	} else {
@@ -218,6 +234,15 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 				c.DiscardInterruptedUpload(ie, p.name)
 			}
 			return nil, ie
+		}
+		// O2 respondió con un error propio (MED-1050, MED-1020…): la subida no se ha
+		// cortado, se ha rechazado. No se continúa sobre el ID; si lo creó esta subida, se
+		// retira para no dejar un elemento vacío en la nube.
+		if isNew {
+			c.retireNewItem(id, p.name, "creado", "porque O2 rechazó la subida")
+		}
+		if retry, ok := c.unsupportedAsFile(err, kind, p); ok {
+			return c.uploadOfficial(retry)
 		}
 		return nil, err
 	}
@@ -241,6 +266,26 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 	}
 	c.afterOfficialSave(id, p.folderID, res.Status, res.Etag)
 	return item, nil
+}
+
+// unsupportedAsFile prepara, si procede, el reintento como archivo genérico de una
+// imagen, audio o vídeo que O2 rechazó por su contenido (MED-1050). Solo con
+// SAPI_UNSUPPORTED_AS_FILE, en archivos nuevos y con un cuerpo que se pueda rebobinar.
+func (c *Client) unsupportedAsFile(err error, kind string, p officialUpload) (officialUpload, bool) {
+	if !errors.Is(err, ErrMediaUnsupported) || kind == "file" || !config.UnsupportedAsFile() ||
+		p.existing != "" || (p.pendingID != "" && !p.pendingNew) {
+		return p, false
+	}
+	seeker, ok := p.reader.(io.ReadSeeker)
+	if !ok {
+		return p, false
+	}
+	if _, serr := seeker.Seek(0, io.SeekStart); serr != nil {
+		return p, false
+	}
+	logger.Log("[SAPI] ↪ O2 no admite '%s' como %s (MED-1050); se sube como archivo genérico (SAPI_UNSUPPORTED_AS_FILE).", p.name, kind)
+	p.kind, p.pendingID, p.pendingNew = "file", "", false
+	return p, true
 }
 
 // officialSaveMetadata crea el elemento (o actualiza el que se sobrescribe) y devuelve su ID.
@@ -287,6 +332,8 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 		switch {
 		case resp.StatusCode == http.StatusRequestEntityTooLarge || code == "MED-1020":
 			return "", ErrFileTooLarge
+		case code == "MED-1050":
+			return "", fmt.Errorf("%w (save-metadata %s)", ErrMediaUnsupported, kind)
 		case code == "MED-1017" && p.existing != "" && attempt < mediaMoveRetries:
 			// El archivo que se sobrescribe aún se está validando (subido hace segundos):
 			// se espera a que termine, como la app, en lugar de reintentar a ciegas.
@@ -316,6 +363,23 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 		}
 		return id, nil
 	}
+}
+
+// RejectedError: O2 contestó al envío del contenido con un error propio
+// ({"error":{"code","message"}}). La subida no se cortó: el servidor la rechazó, así
+// que no se reanuda sobre el mismo ID.
+type RejectedError struct {
+	Op, Code, Message string
+}
+
+func (e *RejectedError) Error() string {
+	return fmt.Sprintf("%s API error: %s (%s)", e.Op, e.Message, e.Code)
+}
+
+// isRejection: el error es una respuesta de O2 que rechaza el archivo, no un corte.
+func isRejection(err error) bool {
+	var re *RejectedError
+	return errors.As(err, &re) || errors.Is(err, ErrMediaUnsupported) || errors.Is(err, ErrFileTooLarge)
 }
 
 // ErrMediaValidating (MED-1017): O2 aún valida el archivo y no deja operar sobre él.
@@ -374,6 +438,9 @@ func (c *Client) officialSendContent(kind, id string, p officialUpload, contentT
 			return nil, &UploadInterruptedError{MediaID: id, Err: fmt.Errorf("el cliente abandonó la subida: %w", p.context().Err())}
 		}
 		if !retry {
+			if isRejection(err) {
+				return nil, err // O2 rechazó el archivo: no es un corte y no se reanuda
+			}
 			return nil, &UploadInterruptedError{MediaID: id, Err: err}
 		}
 		if !canSeek {
@@ -428,6 +495,8 @@ func (c *Client) officialPostContent(kind, id string, p officialUpload, contentT
 	switch {
 	case resp.StatusCode == http.StatusRequestEntityTooLarge || code == "MED-1020":
 		return nil, false, ErrFileTooLarge
+	case code == "MED-1050":
+		return nil, false, fmt.Errorf("%w (upload/%s)", ErrMediaUnsupported, kind)
 	case code == "MED-1017":
 		// Sobrescritura de un archivo que aún se valida: se espera y se reintenta.
 		c.waitMediaValidatedIn(id, p.folderID)
@@ -440,7 +509,7 @@ func (c *Client) officialPostContent(kind, id string, p officialUpload, contentT
 		code == "MED-1048", code == "PAPI-0000":
 		return nil, true, fmt.Errorf("upload content failed (%d): %s", resp.StatusCode, summarizeHTTPErrorBody(b))
 	case isErr:
-		return nil, false, fmt.Errorf("upload content API error: %s (%s)", msg, code)
+		return nil, false, &RejectedError{Op: "upload content", Code: code, Message: msg}
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return nil, false, fmt.Errorf("upload content failed (%d): %s", resp.StatusCode, summarizeHTTPErrorBody(b))
 	}

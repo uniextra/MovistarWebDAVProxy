@@ -111,6 +111,12 @@ func CaseInsensitiveNamesFor(provider string) bool {
 // archivo subido, como la app, para guardar su URL de descarga firmada.
 func RefreshAfterUpload() bool { return envBool("SAPI_REFRESH_AFTER_UPLOAD", true) }
 
+// UnsupportedAsFile (SAPI_UNSUPPORTED_AS_FILE, por defecto false): si O2 rechaza una
+// imagen, audio o vídeo porque su contenido no corresponde a la extensión (MED-1050),
+// volver a subirlo como archivo genérico (upload/file) para que no se pierda. La app
+// oficial no lo hace: deja el archivo sin subir. Solo para archivos nuevos.
+func UnsupportedAsFile() bool { return envBool("SAPI_UNSUPPORTED_AS_FILE", false) }
+
 // Latido como la app: system/information cada HeartbeatInterval y el resto de
 // consultas periódicas cada HeartbeatFullInterval.
 func HeartbeatInterval() time.Duration { return envSeconds("SAPI_HEARTBEAT_SEC", 60*time.Second) }

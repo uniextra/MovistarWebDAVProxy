@@ -126,6 +126,7 @@ Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con 
 | :--- | :--- | :--- |
 | `SAPI_OFFICIAL_CLIENT` | `auto` | `auto`: hablar como la app solo con O2. `true`: también con Movistar (sin probar). `false`: nunca (subida multipart y operaciones de antes). |
 | `SAPI_REFRESH_AFTER_UPLOAD` | `true` | Tras cada subida, esperar a que O2 valide el archivo y releerlo (`media?action=get`) para guardar su URL de descarga firmada, como la app. En segundo plano. Sin ella, la primera descarga de cada archivo subido pasa por la URL por defecto, que O2 rechaza (`COM-1005`), y necesita una consulta más. |
+| `SAPI_UNSUPPORTED_AS_FILE` | `false` | Si O2 rechaza una imagen, audio o vídeo porque su contenido no corresponde a la extensión (`MED-1050`, por ejemplo un `.jpg` dañado), volver a subirlo como archivo genérico (`upload/file`) para no perderlo. La app no lo hace: deja el archivo sin subir. Solo para archivos nuevos; una sobrescritura sigue rechazada. |
 | `SAPI_VALIDATION_FIRST_SEC` | `10` *(app)* | Segundos hasta la primera consulta de validación tras subir. |
 | `SAPI_VALIDATION_MAX_SEC` | `60` *(app)* | Espera máxima entre consultas de validación (crecen desde la primera hasta aquí). No hay límite de tiempo total: se sigue hasta que O2 termina. |
 | `SAPI_VALIDATION_MAX_FAILURES` | `60` | Consultas de validación seguidas que pueden fallar antes de dejar de seguir un archivo (~1 h). |
@@ -144,6 +145,8 @@ Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con 
 | `WEBDAV_COPY_WAIT_MAX_SEC` | `600` | …hasta este máximo. Si no aparece, `503` para que el cliente reintente. |
 
 Los valores en segundos admiten decimales (`0.5`). Un valor vacío o no válido usa el de por defecto.
+
+**Archivos que O2 no admite (`MED-1050`).** O2 comprueba que el contenido de las imágenes (`jpg`, `png`, `heic`…), audios (`mp3`, `m4a`, `wav`) y vídeos (`mp4`) corresponda a su extensión. Si no corresponde, rechaza el archivo. La app oficial lo marca como no admitido y no lo reintenta; el proxy hace lo mismo y responde **`415 Unsupported Media Type`** (sin `Retry-After`), para que el cliente lo señale y siga con lo demás en vez de reintentarlo sin fin. Con `SAPI_UNSUPPORTED_AS_FILE=true` se sube como archivo genérico.
 ---
 
 ## 🔒 5. Seguridad y Autenticación Detallada

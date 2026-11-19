@@ -100,3 +100,16 @@ func TestStreamAndCaseDefaultsFollowProvider(t *testing.T) {
 		t.Error("con la variable puesta, manda la variable (O2)")
 	}
 }
+
+// Por defecto, como la app: una imagen que O2 rechaza por su contenido no se vuelve a
+// subir como genérico.
+func TestUnsupportedAsFileIsOptIn(t *testing.T) {
+	t.Setenv("SAPI_UNSUPPORTED_AS_FILE", "")
+	if UnsupportedAsFile() {
+		t.Error("por defecto debe estar desactivado")
+	}
+	t.Setenv("SAPI_UNSUPPORTED_AS_FILE", "true")
+	if !UnsupportedAsFile() {
+		t.Error("con true debe activarse")
+	}
+}

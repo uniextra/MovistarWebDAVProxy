@@ -303,6 +303,11 @@ type Client struct {
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
 var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured max file size limit")
 
+// ErrMediaUnsupported (MED-1050): O2 no admite el archivo con el tipo que indica su
+// extensión (p. ej. un .jpg cuyo contenido no es una imagen). Es definitivo: la app
+// oficial lo deja sin subir y no lo reintenta.
+var ErrMediaUnsupported = errors.New("SAPI MED-1050: the file extension or the format is not supported")
+
 // ErrSessionRefreshTransient indica que la renovación de sesión falló por un
 // problema transitorio (red/5xx), no porque el refresh_token esté revocado.
 var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily failed")

@@ -40,7 +40,8 @@ type fakeOfficialSAPI struct {
 	deleted    []string
 	validating map[string]int // id → consultas que faltan para darlo por validado
 	valBodies  []string
-	med1017    map[string]int // id → save-metadata que se rechazan con MED-1017
+	med1017    map[string]int    // id → save-metadata que se rechazan con MED-1017
+	reject     map[string]string // tipo (upload/<tipo>) → código con el que O2 rechaza el contenido
 }
 
 func newFakeOfficialSAPI(t *testing.T) (*fakeOfficialSAPI, *httptest.Server) {
@@ -48,6 +49,7 @@ func newFakeOfficialSAPI(t *testing.T) (*fakeOfficialSAPI, *httptest.Server) {
 		t: t, nextID: 1597720466,
 		meta: map[string]map[string]interface{}{}, data: map[string][]byte{},
 		cutAfter: map[int]int64{}, validating: map[string]int{}, med1017: map[string]int{},
+		reject: map[string]string{},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
@@ -166,7 +168,13 @@ func (f *fakeOfficialSAPI) saveContent(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.data[id] = append(f.data[id], b...)
+	code := f.reject[strings.TrimPrefix(r.URL.Path, "/sapi/upload/")]
 	f.mu.Unlock()
+	if code != "" {
+		// Como O2 con un .jpg que no es una imagen: recibe todo y rechaza el contenido.
+		fmt.Fprintf(w, `{"error":{"code":"%s","message":"The file extension or the format is not supported.","parameters":[],"cause":""}}`, code)
+		return
+	}
 	fmt.Fprintf(w, `{"success":"Media uploaded successfully","id":"%s","lastupdate":1795019796220,"status":"V","etag":"eDw2tSxQNqE2cGmZ"}`, id)
 }
 
@@ -663,5 +671,82 @@ func TestOfficialUpload_OnlyO2ByDefault(t *testing.T) {
 		if official != forced || (legacy.Load() > 0) == forced {
 			t.Errorf("Movistar, SAPI_OFFICIAL_CLIENT forzado=%v: como la app=%v, multipart=%d", forced, official, legacy.Load())
 		}
+	}
+}
+
+// O2 rechaza una imagen cuyo contenido no lo es (MED-1050). La app lo da por
+// definitivo (MediaUnsupported, sin reintentos): ni se reanuda sobre el ID ni se
+// vuelve a intentar, y el elemento creado se retira.
+func TestOfficialUpload_UnsupportedIsFinalLikeTheApp(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reader func([]byte) io.Reader
+	}{
+		{"flujo", func(b []byte) io.Reader { return io.MultiReader(bytes.NewReader(b)) }},
+		{"disco", func(b []byte) io.Reader { return bytes.NewReader(b) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFakeOfficialSAPI(t)
+			c := newOfficialTestClient(t, srv)
+			f.reject["picture"] = "MED-1050"
+			payload := randomPayload(t, 300000)
+			_, err := c.UploadFileToFolder("falsa.jpg", tc.reader(payload), int64(len(payload)), 1, "", "", time.Time{})
+			if !errors.Is(err, ErrMediaUnsupported) {
+				t.Fatalf("se esperaba ErrMediaUnsupported, llegó %v", err)
+			}
+			var ie *UploadInterruptedError
+			if errors.As(err, &ie) {
+				t.Fatalf("un rechazo de O2 no es una subida interrumpida: %v", err)
+			}
+			if f.posts != 1 || len(f.queries) != 0 {
+				t.Fatalf("no debe reintentar ni reanudar: %d envíos, %d consultas de offset", f.posts, len(f.queries))
+			}
+			if len(f.deleted) != 1 {
+				t.Fatalf("debe retirar el elemento creado: %v", f.deleted)
+			}
+		})
+	}
+}
+
+// Con SAPI_UNSUPPORTED_AS_FILE=true, la imagen rechazada se sube como genérico
+// (upload/file) para no perderla.
+func TestOfficialUpload_UnsupportedAsFileOption(t *testing.T) {
+	t.Setenv("SAPI_UNSUPPORTED_AS_FILE", "true")
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	f.reject["picture"] = "MED-1050"
+	payload := randomPayload(t, 300000)
+	item, err := c.UploadFileToFolder("falsa.jpg", bytes.NewReader(payload), int64(len(payload)), 1, "", "", time.Time{})
+	if err != nil {
+		t.Fatalf("debía subirse como genérico: %v", err)
+	}
+	if strings.Join(f.postKinds, ",") != "picture,file" {
+		t.Fatalf("tipos usados = %v", f.postKinds)
+	}
+	if len(f.deleted) != 1 || f.deleted[0] == item.ID {
+		t.Fatalf("debe retirar solo el elemento rechazado: %v (nuevo %s)", f.deleted, item.ID)
+	}
+	if ct := f.metaBodies[1]["contenttype"]; ct != "application/octet-stream" {
+		t.Fatalf("contenttype del genérico = %v", ct)
+	}
+	if !bytes.Equal(f.data[item.ID], payload) {
+		t.Fatal("contenido distinto")
+	}
+}
+
+// La opción no se aplica a una sobrescritura: el archivo que ya existe conserva su
+// tipo y nunca se borra.
+func TestOfficialUpload_UnsupportedAsFileNeverOnOverwrite(t *testing.T) {
+	t.Setenv("SAPI_UNSUPPORTED_AS_FILE", "true")
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	f.reject["picture"] = "MED-1050"
+	f.meta["1597568679"] = map[string]interface{}{}
+	_, err := c.UploadFileToFolder("foto.jpg", bytes.NewReader(randomPayload(t, 1000)), 1000, 1, "", "1597568679", time.Time{})
+	if !errors.Is(err, ErrMediaUnsupported) {
+		t.Fatalf("se esperaba ErrMediaUnsupported, llegó %v", err)
+	}
+	if f.posts != 1 || len(f.deleted) != 0 {
+		t.Fatalf("sin reintentos ni borrados: %d envíos, retirados %v", f.posts, f.deleted)
 	}
 }
