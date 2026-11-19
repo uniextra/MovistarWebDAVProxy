@@ -284,18 +284,27 @@ func TestGetSyncInterval(t *testing.T) {
 func TestTransferLimits(t *testing.T) {
 	t.Setenv("WEBDAV_MAX_DOWNLOADS", "")
 	t.Setenv("WEBDAV_MAX_UPLOADS", "")
-	if d, u := TransferLimits(false); d != 4 || u != 2 {
-		t.Errorf("sin modo web: esperado 4/2, obtenido %d/%d", d, u)
+	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
+	t.Setenv("SAPI_OFFICIAL_CLIENT", "")
+	if d, u := TransferLimits(false, "movistar"); d != 4 || u != 2 {
+		t.Errorf("Movistar sin modo web: esperado 4/2, obtenido %d/%d", d, u)
 	}
-	if d, u := TransferLimits(true); d != 4 || u != 2 {
+	if d, u := TransferLimits(true, "o2"); d != 4 || u != 2 {
 		t.Errorf("modo web: esperado 4/2, obtenido %d/%d", d, u)
+	}
+	// Como la app (O2, perfil desktop): de una en una.
+	if d, u := TransferLimits(false, "o2"); d != 1 || u != 1 {
+		t.Errorf("O2 como la app: esperado 1/1, obtenido %d/%d", d, u)
 	}
 	t.Setenv("WEBDAV_MAX_DOWNLOADS", "6")
 	t.Setenv("WEBDAV_MAX_UPLOADS", "0")
-	if d, u := TransferLimits(false); d != 6 || u != 2 {
+	if d, u := TransferLimits(false, "movistar"); d != 6 || u != 2 {
 		t.Errorf("con variables (modo normal): esperado 6/2 (0 se ignora), obtenido %d/%d", d, u)
 	}
-	if d, u := TransferLimits(true); d != 6 || u != 2 {
+	if d, u := TransferLimits(true, "o2"); d != 6 || u != 2 {
 		t.Errorf("con variables (modo web): esperado 6/2 (0 se ignora), obtenido %d/%d", d, u)
+	}
+	if d, u := TransferLimits(false, "o2"); d != 6 || u != 1 {
+		t.Errorf("con variables (O2): manda la variable, esperado 6/1, obtenido %d/%d", d, u)
 	}
 }

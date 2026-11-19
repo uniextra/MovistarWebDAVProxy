@@ -48,8 +48,8 @@ Esta guía reúne toda la referencia técnica del proxy: variables de entorno co
 | :--- | :--- | :--- |
 | `MAX_UPLOAD_MB` | `4096` | Tamaño máximo permitido por archivo en subidas `PUT` (en MB). |
 | `WEBDAV_BUFFER_MB` | `32` | Tamaño máximo del búfer en RAM (MB) antes de hacer spool a disco (óptimo para Duplicati y Restic). |
-| `WEBDAV_MAX_DOWNLOADS` | `4` | Descargas simultáneas hacia la nube. |
-| `WEBDAV_MAX_UPLOADS` | `2` | Subidas simultáneas hacia la nube. |
+| `WEBDAV_MAX_DOWNLOADS` | `1` con O2 (perfil `desktop`); `4` en el resto | Descargas simultáneas hacia la nube. Con O2, como el cliente oficial, que transfiere de una en una y no baja mientras sube. |
+| `WEBDAV_MAX_UPLOADS` | `1` con O2 (perfil `desktop`); `2` en el resto | Subidas simultáneas hacia la nube. Con O2, como el cliente oficial: en la medición del 19/11/2026 subió 3 archivos de 1 GB por una sola conexión con `upload.*`, uno tras otro (~30 MB/s). |
 | `UPLOAD_RESPONSE_TIMEOUT_SEC` | `300` | Tiempo máximo de espera (segundos) tras enviar el archivo hasta que el servidor de subida responde. |
 | `SYNC_INTERVAL_SEC` | `300` en `desktop`, `60` en `browser` | Intervalo de sincronización incremental de metadatos (mínimo `15` segundos). En el perfil `desktop` es la cadencia del cliente oficial (consulta los cambios cada 5 minutos). |
 | `WEBDAV_STREAM_UPLOAD` | `true` con O2, `false` con Movistar | Sube a la nube mientras el archivo aún llega del cliente, como el cliente oficial: la respuesta llega justo después del último byte, sin esperas largas que agoten el tiempo del cliente (rclone corta a los 5 min). La subida al host de subidas no ocupa el hueco de `SAPI_MAX_CONCURRENT`, así que varias subidas a la vez no se bloquean entre sí. Sin la variable, activado donde el proxy habla como la app (O2 en el perfil `desktop`, ver `SAPI_OFFICIAL_CLIENT`); con Movistar, como antes. |

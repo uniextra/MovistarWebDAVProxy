@@ -173,7 +173,7 @@ func main() {
 		}
 	}
 
-	maxDown, maxUp := config.TransferLimits(client.WebMode())
+	maxDown, maxUp := config.TransferLimits(client.WebMode(), client.GetConfig().Provider)
 	webdav.SetTransferLimits(maxDown, maxUp)
 	if client.WebMode() && strings.TrimSpace(os.Getenv("SAPI_MAX_CONCURRENT")) == "" {
 		// En modo web las llamadas a la API ya las limita el navegador; aquí solo hay
