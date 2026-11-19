@@ -5,43 +5,27 @@ import (
 	"time"
 )
 
-// Hablar como la app solo está probado con O2: por defecto, solo con O2; con
-// SAPI_OFFICIAL_CLIENT=true también con Movistar (para probarlo) y con false nunca.
-// Fuera del perfil desktop, nunca.
-func TestOfficialClientFor(t *testing.T) {
+// Hablar como la app es lo normal con Movistar y con O2 (el mismo servicio): sin la
+// variable o con «auto» (el valor de antes), sí; con false, nunca. Fuera del perfil
+// desktop, nunca.
+func TestOfficialClient(t *testing.T) {
 	cases := []struct {
-		profile, mode, provider string
-		want                    bool
+		profile, mode string
+		want          bool
 	}{
-		{"desktop", "", "o2", true},
-		{"desktop", "", "O2", true},
-		{"desktop", "", "movistar", false},
-		{"desktop", "", "", false},
-		{"desktop", "true", "movistar", true},
-		{"desktop", "false", "o2", false},
-		{"browser", "true", "o2", false},
+		{"desktop", "", true},
+		{"desktop", "auto", true},
+		{"desktop", "true", true},
+		{"desktop", "false", false},
+		{"desktop", "off", false},
+		{"browser", "true", false},
+		{"browser", "", false},
 	}
 	for _, c := range cases {
 		t.Setenv("SAPI_CLIENT_PROFILE", c.profile)
 		t.Setenv("SAPI_OFFICIAL_CLIENT", c.mode)
-		if got := OfficialClientFor(c.provider); got != c.want {
-			t.Errorf("perfil %s, SAPI_OFFICIAL_CLIENT=%q, %s → %v, esperado %v", c.profile, c.mode, c.provider, got, c.want)
-		}
-	}
-}
-
-func TestOfficialClientForHost(t *testing.T) {
-	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
-	t.Setenv("SAPI_OFFICIAL_CLIENT", "")
-	for host, want := range map[string]bool{
-		"upload.cloud.o2online.es":   true,
-		"cloud.o2online.es.":         true,
-		"o2online.es":                true,
-		"upload.micloud.movistar.es": false,
-		"evil-o2online.es":           false,
-	} {
-		if got := OfficialClientForHost(host); got != want {
-			t.Errorf("%s → %v, esperado %v", host, got, want)
+		if got := OfficialClient(); got != c.want {
+			t.Errorf("perfil %s, SAPI_OFFICIAL_CLIENT=%q → %v, esperado %v", c.profile, c.mode, got, c.want)
 		}
 	}
 }
@@ -75,29 +59,31 @@ func TestEnvHelpers(t *testing.T) {
 	}
 }
 
-// Flujo directo y nombres exactos son lo nuevo y solo se han probado con O2: por
-// defecto, solo con O2; con Movistar, como antes (sin flujo, sin distinguir
-// mayúsculas). Con la variable puesta, manda la variable.
-func TestStreamAndCaseDefaultsFollowProvider(t *testing.T) {
+// Flujo directo y nombres exactos siguen a SAPI_OFFICIAL_CLIENT: por defecto sí; con
+// SAPI_OFFICIAL_CLIENT=false, como antes (sin flujo, sin distinguir mayúsculas). Con
+// la variable propia puesta, manda esa variable.
+func TestStreamAndCaseDefaultsFollowOfficialClient(t *testing.T) {
 	t.Setenv("SAPI_CLIENT_PROFILE", "desktop")
 	t.Setenv("SAPI_OFFICIAL_CLIENT", "")
 	t.Setenv("WEBDAV_STREAM_UPLOAD", "")
 	t.Setenv("WEBDAV_CASE_INSENSITIVE", "")
-	if !StreamUploadsFor("o2") || CaseInsensitiveNamesFor("o2") {
-		t.Error("O2: flujo directo y nombres exactos por defecto")
+	if !StreamUploads() || CaseInsensitiveNames() {
+		t.Error("por defecto: flujo directo y nombres exactos")
 	}
-	if StreamUploadsFor("movistar") || !CaseInsensitiveNamesFor("movistar") {
-		t.Error("Movistar: como antes, sin flujo y sin distinguir mayúsculas")
+	t.Setenv("SAPI_OFFICIAL_CLIENT", "false")
+	if StreamUploads() || !CaseInsensitiveNames() {
+		t.Error("SAPI_OFFICIAL_CLIENT=false: como antes, sin flujo y sin distinguir mayúsculas")
 	}
 	t.Setenv("WEBDAV_STREAM_UPLOAD", "true")
 	t.Setenv("WEBDAV_CASE_INSENSITIVE", "false")
-	if !StreamUploadsFor("movistar") || CaseInsensitiveNamesFor("movistar") {
+	if !StreamUploads() || CaseInsensitiveNames() {
 		t.Error("con la variable puesta, manda la variable")
 	}
+	t.Setenv("SAPI_OFFICIAL_CLIENT", "")
 	t.Setenv("WEBDAV_STREAM_UPLOAD", "off")
 	t.Setenv("WEBDAV_CASE_INSENSITIVE", "on")
-	if StreamUploadsFor("o2") || !CaseInsensitiveNamesFor("o2") {
-		t.Error("con la variable puesta, manda la variable (O2)")
+	if StreamUploads() || !CaseInsensitiveNames() {
+		t.Error("con la variable puesta, manda la variable (como la app)")
 	}
 }
 

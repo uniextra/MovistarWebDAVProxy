@@ -30,13 +30,10 @@ import (
 //     que ya tenía el proxy: DeleteFile y deleteFolderLegacy).
 
 // officialClient indica si se habla como el cliente oficial de Windows: perfil
-// desktop, con sesión OAuth propia y, por defecto, solo con O2 (ver
-// config.OfficialClientFor). El perfil browser y el modo web hablan como la web.
+// desktop y con sesión OAuth propia, con Movistar y con O2 (ver
+// config.OfficialClient). El perfil browser y el modo web hablan como la web.
 func (c *Client) officialClient() bool {
-	c.mu.RLock()
-	provider := c.cfg.Provider
-	c.mu.RUnlock()
-	return config.OfficialClientFor(provider) && !c.WebMode()
+	return config.OfficialClient() && !c.WebMode()
 }
 
 // officialContentTypes: los content-type que la app manda (capturados) y que el

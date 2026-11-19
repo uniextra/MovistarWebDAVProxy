@@ -70,13 +70,13 @@ func WebSessionEnabled() bool {
 
 // TransferLimits devuelve las descargas y subidas simultáneas (WEBDAV_MAX_DOWNLOADS,
 // WEBDAV_MAX_UPLOADS). Por defecto 4 descargas y 2 subidas (la web sube de 2 en 2),
-// salvo donde el proxy habla como el cliente oficial (OfficialClientFor: O2 en el
-// perfil desktop): 1 y 1, como la app, que transfiere de una en una y no baja
+// salvo donde el proxy habla como el cliente oficial (OfficialClient, perfil
+// desktop): 1 y 1, como la app, que transfiere de una en una y no baja
 // mientras sube (medido el 19/11/2026: 3 × 1 GB por una sola conexión con
 // upload.*, y la bajada pendiente, después).
-func TransferLimits(webMode bool, provider string) (downloads, uploads int) {
+func TransferLimits(webMode bool) (downloads, uploads int) {
 	downloads, uploads = 4, 2
-	if !webMode && OfficialClientFor(provider) {
+	if !webMode && OfficialClient() {
 		downloads, uploads = 1, 1
 	}
 	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WEBDAV_MAX_DOWNLOADS"))); err == nil && n > 0 {

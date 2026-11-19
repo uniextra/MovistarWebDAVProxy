@@ -739,15 +739,7 @@ func (mfs *MovistarFS) recentUpload(key string, resolved *sapi.MediaItem) (*Memo
 // anterior (un nombre con otras mayúsculas encuentra el archivo). Por defecto los
 // nombres son exactos, como en O2.
 func (mfs *MovistarFS) caseInsensitive() bool {
-	return config.CaseInsensitiveNamesFor(mfs.provider())
-}
-
-// provider es el proveedor de la cuenta vinculada ("o2" o "movistar").
-func (mfs *MovistarFS) provider() string {
-	if mfs == nil || mfs.client == nil {
-		return ""
-	}
-	return mfs.client.GetConfig().Provider
+	return config.CaseInsensitiveNames()
 }
 
 // isSameEntryName: el mismo elemento de O2 (nombre idéntico, mayúsculas incluidas).
@@ -2651,7 +2643,7 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 // (5 min). El envío en flujo no retiene el hueco de la API (ver sapi.DoRequest), y
 // nunca se espera turno ni hueco de RAM antes de leer un cuerpo (tryAcquireUploadTurn,
 // Write), así que varias subidas a la vez no se bloquean entre sí.
-func (mfs *MovistarFS) streamUploads() bool { return config.StreamUploadsFor(mfs.provider()) }
+func (mfs *MovistarFS) streamUploads() bool { return config.StreamUploads() }
 
 // tryAcquireUploadTurn intenta coger, sin esperar, el turno de subida a SAPI
 // (uploadSem + globalTransferSem). Devuelve false si alguno está ocupado.

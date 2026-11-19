@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Opciones del perfil desktop: el proxy hablando con O2 Cloud como el cliente
+// Opciones del perfil desktop: el proxy hablando con la nube como el cliente
 // oficial de Windows. Están todas aquí, cada una con su variable de entorno y su
 // valor por defecto, y documentadas en docs/configuration.md. Se leen al usarlas,
 // así que no hay que reiniciar nada más que el proceso para cambiarlas.
@@ -43,68 +43,37 @@ func IsDesktopProfile() bool {
 	return ClientProfile() == ProfileDesktop
 }
 
-// officialClientMode: SAPI_OFFICIAL_CLIENT = auto (por defecto) | true | false.
-func officialClientMode() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("SAPI_OFFICIAL_CLIENT"))) {
-	case "1", "true", "yes", "on":
-		return "on"
-	case "0", "false", "no", "off":
-		return "off"
-	}
-	return "auto"
+// OfficialClient (SAPI_OFFICIAL_CLIENT, por defecto true): con el perfil desktop, el
+// proxy habla como el cliente oficial (subida en dos pasos, reanudación, latido,
+// relectura, seguimiento de la validación, borrados y metadatos como la app). Movistar
+// Cloud y O2 Cloud son el mismo servicio, así que vale igual para los dos (probado con
+// O2 y con Movistar). Con false, nunca: subida multipart y operaciones de antes.
+// Fuera del perfil desktop, tampoco.
+func OfficialClient() bool {
+	return IsDesktopProfile() && envBool("SAPI_OFFICIAL_CLIENT", true)
 }
 
-// OfficialClientFor indica si, con el perfil desktop, el proxy habla como el
-// cliente oficial (subida en dos pasos, reanudación, latido, relectura, seguimiento
-// de la validación, borrados y metadatos como la app) para ese proveedor. Por
-// defecto solo con O2: todo eso se ha comprobado contra O2 Cloud y nunca contra
-// Movistar Cloud. SAPI_OFFICIAL_CLIENT=true lo activa también con Movistar (para
-// probarlo) y false lo desactiva siempre.
-func OfficialClientFor(provider string) bool {
-	if !IsDesktopProfile() {
-		return false
-	}
-	switch officialClientMode() {
-	case "on":
-		return true
-	case "off":
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(provider), "o2")
-}
-
-// OfficialClientForHost es OfficialClientFor según el servidor al que se conecta
-// (para la huella TLS hacia los servidores de subida y descarga).
-func OfficialClientForHost(host string) bool {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	provider := "movistar"
-	if h == "o2online.es" || strings.HasSuffix(h, ".o2online.es") {
-		provider = "o2"
-	}
-	return OfficialClientFor(provider)
-}
-
-// StreamUploadsFor (WEBDAV_STREAM_UPLOAD): subir a O2 mientras el archivo llega del
+// StreamUploads (WEBDAV_STREAM_UPLOAD): subir a la nube mientras el archivo llega del
 // cliente, como la app. Sin la variable, sí donde se habla como la app
-// (OfficialClientFor: O2 en el perfil desktop) y no en el resto, como antes.
-func StreamUploadsFor(provider string) bool {
+// (OfficialClient) y no en el resto, como antes.
+func StreamUploads() bool {
 	if v, ok := envBoolSet("WEBDAV_STREAM_UPLOAD"); ok {
 		return v
 	}
-	return OfficialClientFor(provider)
+	return OfficialClient()
 }
 
-// CaseInsensitiveNamesFor (WEBDAV_CASE_INSENSITIVE): buscar nombres sin distinguir
-// mayúsculas. O2 Cloud las distingue («A.txt» y «a.txt» son dos archivos), y
+// CaseInsensitiveNames (WEBDAV_CASE_INSENSITIVE): buscar nombres sin distinguir
+// mayúsculas. La nube las distingue («A.txt» y «a.txt» son dos archivos), y
 // responder a «a.txt» con «A.txt» hacía que rclone diera por subido un archivo que no
 // lo estaba o, en un cambio solo de mayúsculas, borrara el origen. Sin la variable,
-// nombres exactos donde se habla como la app (comprobado con O2) y, en el resto,
-// sin distinguir, como antes.
-func CaseInsensitiveNamesFor(provider string) bool {
+// nombres exactos donde se habla como la app y, en el resto, sin distinguir, como
+// antes.
+func CaseInsensitiveNames() bool {
 	if v, ok := envBoolSet("WEBDAV_CASE_INSENSITIVE"); ok {
 		return v
 	}
-	return !OfficialClientFor(provider)
+	return !OfficialClient()
 }
 
 // RefreshAfterUpload (SAPI_REFRESH_AFTER_UPLOAD, por defecto true): releer cada

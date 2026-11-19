@@ -402,7 +402,7 @@ func (s *MetadataStore) GetFolderPath(folderID int64) (string, error) {
 
 // SetNameFolding indica cómo buscar por nombre: fold() == true, sin distinguir
 // mayúsculas; si no, nombres exactos (por defecto). La capa WebDAV lo fija según la
-// cuenta (config.CaseInsensitiveNamesFor).
+// cuenta (config.CaseInsensitiveNames).
 func (s *MetadataStore) SetNameFolding(fold func() bool) {
 	s.nameFolding.Store(&fold)
 }

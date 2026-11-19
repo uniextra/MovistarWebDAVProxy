@@ -319,15 +319,11 @@ func NewFingerprintedTransport() http.RoundTripper {
 		ft.sapiH1 = newSAPIHTTP1Transport()
 		// El cliente oficial usa la misma huella (sin ALPN) también con el servidor de
 		// subidas: capturado el 18/11/2026, JA3 57fbe0ae… hacia upload.cloud.o2online.es.
-		// Solo donde se habla como la app (por defecto, O2: config.OfficialClientFor);
-		// en el resto, el TLS estándar de Go de siempre.
+		// Solo donde se habla como la app (config.OfficialClient); con
+		// SAPI_OFFICIAL_CLIENT=false, el TLS estándar de Go de siempre.
 		std := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}}
 		h1.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				host = addr
-			}
-			if config.OfficialClientForHost(host) {
+			if config.OfficialClient() {
 				return dialTLSContextHTTP1Only(ctx, network, addr)
 			}
 			return std.DialContext(ctx, network, addr)

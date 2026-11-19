@@ -638,10 +638,10 @@ func TestOfficialUpload_FollowUpStopsAfterPersistentFailures(t *testing.T) {
 	}
 }
 
-// Con Movistar, por defecto, se sigue subiendo como antes (multipart, una petición):
-// lo que hace la app solo está comprobado con O2. SAPI_OFFICIAL_CLIENT=true lo activa.
-func TestOfficialUpload_OnlyO2ByDefault(t *testing.T) {
-	for _, forced := range []bool{false, true} {
+// Con Movistar también se sube como la app (el mismo servicio que O2). Con
+// SAPI_OFFICIAL_CLIENT=false, como antes (multipart, una petición).
+func TestOfficialUpload_MovistarLikeO2(t *testing.T) {
+	for _, off := range []bool{false, true} {
 		f, _ := newFakeOfficialSAPI(t)
 		var legacy atomic.Int32
 		wrapped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -657,19 +657,19 @@ func TestOfficialUpload_OnlyO2ByDefault(t *testing.T) {
 		c.mu.Lock()
 		c.cfg.Provider = "movistar"
 		c.mu.Unlock()
-		if forced {
-			t.Setenv("SAPI_OFFICIAL_CLIENT", "true")
+		if off {
+			t.Setenv("SAPI_OFFICIAL_CLIENT", "false")
 		} else {
 			t.Setenv("SAPI_OFFICIAL_CLIENT", "")
 		}
 		if _, err := c.UploadFileToFolder("m.bin", bytes.NewReader([]byte("abc")), 3, 1, "", "", time.Time{}); err != nil {
-			t.Fatalf("forzado=%v: %v", forced, err)
+			t.Fatalf("desactivado=%v: %v", off, err)
 		}
 		f.mu.Lock()
 		official := len(f.meta) > 0
 		f.mu.Unlock()
-		if official != forced || (legacy.Load() > 0) == forced {
-			t.Errorf("Movistar, SAPI_OFFICIAL_CLIENT forzado=%v: como la app=%v, multipart=%d", forced, official, legacy.Load())
+		if official == off || (legacy.Load() > 0) != off {
+			t.Errorf("Movistar, SAPI_OFFICIAL_CLIENT desactivado=%v: como la app=%v, multipart=%d", off, official, legacy.Load())
 		}
 	}
 }
