@@ -649,6 +649,16 @@ func (mfs *MovistarFS) BootstrapEmptyFiles() {
 	mfs.emptyFileManager.BootstrapLoad()
 }
 
+// BootstrapEmptyFilesIfPending carga los vacíos solo si en este arranque aún no se pudo
+// (p. ej. la sincronización inicial falló y no había metadatos). Para la sincronización
+// periódica: una vez cargados no vuelve a descargar el manifiesto.
+func (mfs *MovistarFS) BootstrapEmptyFilesIfPending() {
+	if mfs == nil || mfs.emptyFileManager == nil || mfs.emptyFileManager.bootstrapped.Load() {
+		return
+	}
+	mfs.emptyFileManager.BootstrapLoad()
+}
+
 // HasTombstones reports whether there are any active deleted tombstones in memory.
 func (mfs *MovistarFS) HasTombstones() bool {
 	if mfs == nil {

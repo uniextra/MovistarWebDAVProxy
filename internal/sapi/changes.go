@@ -181,9 +181,9 @@ func (c *Client) GetProfileChanges(from string) (*ProfileChangesResponse, error)
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		logger.Log("[SAPI] ⚠️ 401 en profile/changes (Server: %s, X-Cache: %s, Body: %s)",
-			resp.Header.Get("Server"), resp.Header.Get("X-Cache"), string(b))
+			resp.Header.Get("Server"), resp.Header.Get("X-Cache"), summarizeHTTPErrorBody(b))
 		return nil, errors.New("sesión SAPI no autorizada (HTTP 401): vincula la cuenta en el panel web")
 	}
 	if resp.StatusCode != http.StatusOK {
