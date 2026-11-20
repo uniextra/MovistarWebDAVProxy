@@ -106,6 +106,26 @@
         </div>
     </header>
 
+    <!-- Aviso de nueva versión disponible -->
+    <div id="update-banner" class="hidden mb-6 bg-amber-50 border border-amber-300 text-amber-800 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="flex items-center space-x-3 text-xs sm:text-sm">
+            <span class="text-lg">🆕</span>
+            <div>
+                <span class="font-bold">Nueva versión disponible:</span>
+                <span id="update-banner-version" class="font-mono font-semibold px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded border border-amber-300 ml-1"></span>
+                <span class="text-amber-800 opacity-80 ml-1">(actual: {{.Version}})</span>
+            </div>
+        </div>
+        <div class="flex items-center space-x-2 self-end sm:self-auto">
+            <a id="update-banner-link" href="https://github.com/uniextra/MovistarWebDAVProxy/releases" target="_blank" rel="noopener" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded-xl text-xs transition shadow-sm">
+                Ver Release en GitHub ↗
+            </a>
+            <button type="button" onclick="dismissUpdateBanner()" class="p-1.5 text-amber-800 hover:opacity-75 rounded-lg transition" title="Cerrar aviso" aria-label="Cerrar aviso">
+                ✕
+            </button>
+        </div>
+    </div>
+
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
         <!-- Sesión web (modo web): sustituye a la tarjeta de dispositivo OAuth -->
         <div id="web-session-card" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
@@ -635,6 +655,7 @@
                     return;
                 }
                 const data = await res.json();
+                handleUpdateNotification(data);
                 const logoutBtn = document.getElementById('logout-btn');
                 if (logoutBtn && typeof data.auth_enabled === 'boolean') {
                     if (data.auth_enabled) {
@@ -1004,6 +1025,45 @@
                     .catch(() => fallbackCopy(text));
             } else {
                 fallbackCopy(text);
+            }
+        }
+
+        let currentLatestRelease = '';
+        function dismissUpdateBanner() {
+            const banner = document.getElementById('update-banner');
+            if (banner) banner.classList.add('hidden');
+            if (currentLatestRelease) {
+                try { sessionStorage.setItem('mc_update_dismissed_' + currentLatestRelease, '1'); } catch (e) {}
+            }
+        }
+
+        function handleUpdateNotification(data) {
+            const banner = document.getElementById('update-banner');
+            if (!banner) return;
+            if (!data || !data.update_available || !data.latest_version) {
+                banner.classList.add('hidden');
+                return;
+            }
+            currentLatestRelease = data.latest_version;
+            const verEl = document.getElementById('update-banner-version');
+            if (verEl) verEl.textContent = data.latest_version;
+            const linkEl = document.getElementById('update-banner-link');
+            if (linkEl && data.release_url) linkEl.href = data.release_url;
+
+            let dismissed = false;
+            let notifiedInSession = false;
+            try {
+                dismissed = sessionStorage.getItem('mc_update_dismissed_' + data.latest_version) === '1';
+                notifiedInSession = sessionStorage.getItem('mc_update_notified_' + data.latest_version) === '1';
+            } catch (e) {}
+
+            if (!dismissed) {
+                banner.classList.remove('hidden');
+            }
+
+            if (!notifiedInSession && data.notify_update_session !== false) {
+                try { sessionStorage.setItem('mc_update_notified_' + data.latest_version, '1'); } catch (e) {}
+                showToast(`🆕 Nueva versión ${data.latest_version} disponible en GitHub.`, 'warning', 8000);
             }
         }
 

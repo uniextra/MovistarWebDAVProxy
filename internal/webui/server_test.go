@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/sapi"
+	"movistar-webdav-proxy/internal/updater"
 	"movistar-webdav-proxy/internal/webdav"
 )
 
@@ -1015,5 +1017,110 @@ func TestWebUI_CompleteLogin_RejectsWhenSAPIReturns401(t *testing.T) {
 	}
 	if syncCalled {
 		t.Errorf("initial sync was triggered despite SAPI 401")
+	}
+}
+
+func TestWebUI_UpdateNotificationOncePerSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := config.TokensDir
+	config.TokensDir = tmpDir
+	t.Cleanup(func() { config.TokensDir = origTokensDir })
+
+	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"tag_name":   "v9.9.9",
+			"html_url":   updater.DefaultReleasesPageURL + "/tag/v9.9.9",
+			"draft":      false,
+			"prerelease": false,
+		})
+	}))
+	defer releaseServer.Close()
+
+	client, err := sapi.NewClient(config.AccountConfig{})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	authCfg := config.AuthConfig{Username: "admin", Password: "secretpassword"}
+	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
+
+	checker := updater.NewCheckerWithOptions(
+		releaseServer.URL,
+		filepath.Join(tmpDir, ".last_notified_release"),
+		func() string { return "v2.6.12" },
+		func(latestVer, currentVer, releaseURL string) error { return nil },
+	)
+	checker.CheckOnce(context.Background())
+	uiSrv.SetUpdateChecker(checker)
+
+	handler := uiSrv.Routes()
+
+	formData := url.Values{"username": {"admin"}, "password": {"secretpassword"}}
+	loginReq := httptest.NewRequest("POST", "/login", strings.NewReader(formData.Encode()))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 on login, got %d", loginRec.Code)
+	}
+
+	var sessionCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("expected session cookie %s", sessionCookieName)
+	}
+
+	// First /status in session must set notify_update_session=true.
+	req1 := httptest.NewRequest("GET", "/status", nil)
+	req1.AddCookie(sessionCookie)
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first /status returned %d", rec1.Code)
+	}
+	var st1 map[string]interface{}
+	if err := json.Unmarshal(rec1.Body.Bytes(), &st1); err != nil {
+		t.Fatal(err)
+	}
+	if st1["update_available"] != true || st1["latest_version"] != "v9.9.9" || st1["notify_update_session"] != true {
+		t.Fatalf("unexpected first /status payload: %+v", st1)
+	}
+
+	// Second /status in same session must keep update_available=true but flip notify_update_session=false.
+	req2 := httptest.NewRequest("GET", "/status", nil)
+	req2.AddCookie(sessionCookie)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second /status returned %d", rec2.Code)
+	}
+	var st2 map[string]interface{}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &st2); err != nil {
+		t.Fatal(err)
+	}
+	if st2["update_available"] != true || st2["notify_update_session"] != false {
+		t.Fatalf("unexpected second /status payload: %+v", st2)
+	}
+
+	// /version must also expose release availability fields.
+	verReq := httptest.NewRequest("GET", "/version", nil)
+	verReq.AddCookie(sessionCookie)
+	verRec := httptest.NewRecorder()
+	handler.ServeHTTP(verRec, verReq)
+	if verRec.Code != http.StatusOK {
+		t.Fatalf("/version returned %d", verRec.Code)
+	}
+	var verData map[string]interface{}
+	if err := json.Unmarshal(verRec.Body.Bytes(), &verData); err != nil {
+		t.Fatal(err)
+	}
+	if verData["update_available"] != true || verData["latest_version"] != "v9.9.9" {
+		t.Fatalf("unexpected /version payload: %+v", verData)
 	}
 }
