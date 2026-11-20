@@ -26,6 +26,7 @@ import (
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/notifier"
 	"movistar-webdav-proxy/internal/sapi"
+	"movistar-webdav-proxy/internal/updater"
 	"movistar-webdav-proxy/internal/webdav"
 )
 
@@ -48,9 +49,10 @@ const (
 )
 
 type webSession struct {
-	Username  string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Username        string
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	NotifiedRelease string
 }
 
 type loginPageData struct {
@@ -60,10 +62,11 @@ type loginPageData struct {
 }
 
 type Server struct {
-	client       *sapi.Client
-	webdavServer *webdav.Server
-	notifier     *notifier.TelegramNotifier
-	loginMu      sync.Mutex
+	client        *sapi.Client
+	webdavServer  *webdav.Server
+	notifier      *notifier.TelegramNotifier
+	updateChecker *updater.Checker
+	loginMu       sync.Mutex
 	loginState   map[string]*pendingLogin
 	authCfg      config.AuthConfig
 	rateLimiter  *config.AuthRateLimiter
@@ -98,13 +101,14 @@ func NewServer(client *sapi.Client, webdavServer *webdav.Server) *Server {
 func NewServerWithAuth(client *sapi.Client, webdavServer *webdav.Server, authCfg config.AuthConfig) *Server {
 	tg := notifier.NewTelegramNotifier("", "")
 	s := &Server{
-		client:       client,
-		webdavServer: webdavServer,
-		notifier:     tg,
-		loginState:   make(map[string]*pendingLogin),
-		authCfg:      authCfg,
-		rateLimiter:  config.NewAuthRateLimiter(10, time.Minute),
-		sessions:     make(map[string]*webSession),
+		client:        client,
+		webdavServer:  webdavServer,
+		notifier:      tg,
+		updateChecker: updater.NewChecker(),
+		loginState:    make(map[string]*pendingLogin),
+		authCfg:       authCfg,
+		rateLimiter:   config.NewAuthRateLimiter(10, time.Minute),
+		sessions:      make(map[string]*webSession),
 	}
 
 	if client != nil {
@@ -670,8 +674,54 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#2563eb"/><path d="M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z" fill="white"/></svg>`))
 }
 
+// UpdateChecker returns the background GitHub release checker bound to the WebUI server.
+func (s *Server) UpdateChecker() *updater.Checker {
+	return s.updateChecker
+}
+
+// SetUpdateChecker replaces the release checker (useful for tests).
+func (s *Server) SetUpdateChecker(u *updater.Checker) {
+	if u != nil {
+		s.updateChecker = u
+	}
+}
+
+func (s *Server) shouldNotifySessionForRelease(r *http.Request, latestVer string) bool {
+	if latestVer == "" {
+		return false
+	}
+	if !s.authCfg.IsEnabled() {
+		return true
+	}
+	if r == nil {
+		return false
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	sess, ok := s.sessions[cookie.Value]
+	if !ok || time.Now().After(sess.ExpiresAt) {
+		return false
+	}
+	if sess.NotifiedRelease == latestVer {
+		return false
+	}
+	sess.NotifiedRelease = latestVer
+	return true
+}
+
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]interface{}{"version": config.Version})
+	resp := map[string]interface{}{"version": config.Version}
+	if s.updateChecker != nil {
+		st := s.updateChecker.Status()
+		resp["latest_version"] = st.LatestVersion
+		resp["update_available"] = st.UpdateAvailable
+		resp["release_url"] = st.ReleaseURL
+	}
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -680,12 +730,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.IsRunning() {
 		status = "running"
 	}
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":           status,
 		"phone":            logger.Mask(cfg.Phone),
 		"auth_enabled":     s.authCfg.IsEnabled(),
 		"webdav_host_port": webDAVHostPort(),
-	})
+		"version":          config.Version,
+	}
+	if s.updateChecker != nil {
+		st := s.updateChecker.Status()
+		resp["latest_version"] = st.LatestVersion
+		resp["update_available"] = st.UpdateAvailable
+		resp["release_url"] = st.ReleaseURL
+		resp["notify_update_session"] = st.UpdateAvailable && s.shouldNotifySessionForRelease(r, st.LatestVersion)
+	}
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func webDAVHostPort() string {

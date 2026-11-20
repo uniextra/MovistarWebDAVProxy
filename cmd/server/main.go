@@ -249,6 +249,7 @@ func main() {
 	// 3. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
+	go uiServer.UpdateChecker().Start(ctx, time.Hour)
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))
