@@ -2344,6 +2344,9 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 // modificación del archivo en la nube (p. ej. la original, recibida vía X-OC-Mtime);
 // si es cero, se usa la hora actual.
 func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
+	if existingMediaID != "" && size == 0 {
+		return nil, ErrEmptyOverwrite
+	}
 	if c.officialClient() {
 		return c.uploadOfficial(officialUpload{
 			name: fileName, reader: reader, size: size, folderID: folderID,

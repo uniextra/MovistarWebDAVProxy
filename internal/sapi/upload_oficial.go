@@ -122,6 +122,13 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// ErrEmptyOverwrite: se pidió sobrescribir un archivo con 0 bytes. O2 no lo admite
+// (MED-1049 «Wrong byte uploaded», por la vía de la app y por la web) y, peor, el
+// original queda registrado sin contenido y desaparece (comprobado el 20/11/2026).
+// Por eso se rechaza antes de llamar a O2: para vaciar un archivo hay que subir uno
+// nuevo y retirar el anterior (ver webdav.replaceWithEmpty).
+var ErrEmptyOverwrite = errors.New("O2 no admite sobrescribir un archivo con 0 bytes (el original se perdería); hay que subir uno nuevo")
+
 // UploadFileToFolderCtx es UploadFileToFolder ligada a la petición del cliente: en
 // el perfil desktop, si el cliente se va (p. ej. rclone corta la espera), la subida
 // a O2 se aborta y el elemento nuevo a medias se retira, en lugar de seguir subiendo
@@ -195,6 +202,9 @@ func (c *Client) retireNewItem(id, name, what, why string) {
 }
 
 func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
+	if p.existing != "" && p.size == 0 {
+		return nil, ErrEmptyOverwrite
+	}
 	kind := p.kind
 	if kind == "" {
 		kind = mediaKindForName(p.name)

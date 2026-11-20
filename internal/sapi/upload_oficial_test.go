@@ -716,6 +716,31 @@ func TestOfficialUpload_UnsupportedIsFinalLikeTheApp(t *testing.T) {
 	}
 }
 
+// Sobrescribir con 0 bytes se rechaza sin llamar a O2: O2 respondería MED-1049 y el
+// original desaparecería. Por las dos vías (app y web).
+func TestUpload_EmptyOverwriteRefusedBeforeO2(t *testing.T) {
+	for _, web := range []bool{false, true} {
+		f, srv := newFakeOfficialSAPI(t)
+		c := newOfficialTestClient(t, srv)
+		if web {
+			t.Setenv("SAPI_OFFICIAL_CLIENT", "false")
+		} else {
+			t.Setenv("SAPI_OFFICIAL_CLIENT", "")
+		}
+		_, err := c.UploadFileReplacing(MediaItem{ID: "500", Name: "a.txt"}, "a.txt", bytes.NewReader(nil), 0, 1, "", time.Time{})
+		if !errors.Is(err, ErrEmptyOverwrite) {
+			t.Fatalf("web=%v: se esperaba ErrEmptyOverwrite, llegó %v", web, err)
+		}
+		_, err = c.UploadFileToFolder("a.txt", bytes.NewReader(nil), 0, 1, "", "500", time.Time{})
+		if !errors.Is(err, ErrEmptyOverwrite) {
+			t.Fatalf("web=%v (con ID): se esperaba ErrEmptyOverwrite, llegó %v", web, err)
+		}
+		if f.posts != 0 {
+			t.Fatalf("web=%v: no debe llegar nada a O2 (%d envíos)", web, f.posts)
+		}
+	}
+}
+
 // Un HEIC que O2 no puede procesar: MED-1000 al contenido, y siempre igual. Se
 // reintenta una vez (MED-1000 es también un fallo general de O2) y, si se repite, es
 // un archivo no admitido (415), sin reanudar y retirando lo creado.
