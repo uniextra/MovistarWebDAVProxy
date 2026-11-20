@@ -86,6 +86,23 @@ func RefreshAfterUpload() bool { return envBool("SAPI_REFRESH_AFTER_UPLOAD", tru
 // oficial no lo hace: deja el archivo sin subir. Solo para archivos nuevos.
 func UnsupportedAsFile() bool { return envBool("SAPI_UNSUPPORTED_AS_FILE", false) }
 
+// RealEmptyFiles (WEBDAV_REAL_EMPTY_FILES, por defecto true): los archivos de 0 bytes
+// se suben a la nube como cualquier otro (registro con size 0 y envío vacío), en vez
+// de emularse en SQLite y en el manifiesto .movistar-webdav-proxy/empty-files.json.
+// O2 los guarda y los devuelve como cualquier archivo (comprobado el 19/11/2026); así
+// una copia (Hyper Backup, por ejemplo) se puede recuperar desde un equipo y un proxy
+// nuevos sin depender del manifiesto. La app oficial no sube vacíos, pero porque los
+// ignora, no porque O2 no los admita. Solo donde se habla como la app
+// (OfficialClient): es la subida comprobada. Con false, la emulación de antes.
+func RealEmptyFiles() bool {
+	return OfficialClient() && envBool("WEBDAV_REAL_EMPTY_FILES", true)
+}
+
+// EscapeNames (SAPI_ESCAPE_NAMES, por defecto true): guardar en la nube, cambiando un
+// punto por «%2E», los nombres de archivo que O2 no admite (los que empiezan o
+// terminan en punto y los que terminan en .tmp). Ver internal/sapi/nombres.go.
+func EscapeNames() bool { return envBool("SAPI_ESCAPE_NAMES", true) }
+
 // Latido como la app: system/information cada HeartbeatInterval y el resto de
 // consultas periódicas cada HeartbeatFullInterval.
 func HeartbeatInterval() time.Duration { return envSeconds("SAPI_HEARTBEAT_SEC", 60*time.Second) }

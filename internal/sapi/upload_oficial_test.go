@@ -42,6 +42,7 @@ type fakeOfficialSAPI struct {
 	valBodies  []string
 	med1017    map[string]int    // id → save-metadata que se rechazan con MED-1017
 	reject     map[string]string // tipo (upload/<tipo>) → código con el que O2 rechaza el contenido
+	rejectN    map[string]int    // tipo → rechazos que faltan (sin entrada: siempre)
 }
 
 func newFakeOfficialSAPI(t *testing.T) (*fakeOfficialSAPI, *httptest.Server) {
@@ -49,7 +50,7 @@ func newFakeOfficialSAPI(t *testing.T) (*fakeOfficialSAPI, *httptest.Server) {
 		t: t, nextID: 1597720466,
 		meta: map[string]map[string]interface{}{}, data: map[string][]byte{},
 		cutAfter: map[int]int64{}, validating: map[string]int{}, med1017: map[string]int{},
-		reject: map[string]string{},
+		reject: map[string]string{}, rejectN: map[string]int{},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
@@ -168,7 +169,14 @@ func (f *fakeOfficialSAPI) saveContent(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.data[id] = append(f.data[id], b...)
-	code := f.reject[strings.TrimPrefix(r.URL.Path, "/sapi/upload/")]
+	kind := strings.TrimPrefix(r.URL.Path, "/sapi/upload/")
+	code := f.reject[kind]
+	if n, limited := f.rejectN[kind]; code != "" && limited {
+		if n <= 1 {
+			delete(f.reject, kind)
+		}
+		f.rejectN[kind] = n - 1
+	}
 	f.mu.Unlock()
 	if code != "" {
 		// Como O2 con un .jpg que no es una imagen: recibe todo y rechaza el contenido.
@@ -705,6 +713,79 @@ func TestOfficialUpload_UnsupportedIsFinalLikeTheApp(t *testing.T) {
 				t.Fatalf("debe retirar el elemento creado: %v", f.deleted)
 			}
 		})
+	}
+}
+
+// Sobrescribir con 0 bytes se rechaza sin llamar a O2: O2 respondería MED-1049 y el
+// original desaparecería. Por las dos vías (app y web).
+func TestUpload_EmptyOverwriteRefusedBeforeO2(t *testing.T) {
+	for _, web := range []bool{false, true} {
+		f, srv := newFakeOfficialSAPI(t)
+		c := newOfficialTestClient(t, srv)
+		if web {
+			t.Setenv("SAPI_OFFICIAL_CLIENT", "false")
+		} else {
+			t.Setenv("SAPI_OFFICIAL_CLIENT", "")
+		}
+		_, err := c.UploadFileReplacing(MediaItem{ID: "500", Name: "a.txt"}, "a.txt", bytes.NewReader(nil), 0, 1, "", time.Time{})
+		if !errors.Is(err, ErrEmptyOverwrite) {
+			t.Fatalf("web=%v: se esperaba ErrEmptyOverwrite, llegó %v", web, err)
+		}
+		_, err = c.UploadFileToFolder("a.txt", bytes.NewReader(nil), 0, 1, "", "500", time.Time{})
+		if !errors.Is(err, ErrEmptyOverwrite) {
+			t.Fatalf("web=%v (con ID): se esperaba ErrEmptyOverwrite, llegó %v", web, err)
+		}
+		if f.posts != 0 {
+			t.Fatalf("web=%v: no debe llegar nada a O2 (%d envíos)", web, f.posts)
+		}
+	}
+}
+
+// Un HEIC que O2 no puede procesar: MED-1000 al contenido, y siempre igual. Se
+// reintenta una vez (MED-1000 es también un fallo general de O2) y, si se repite, es
+// un archivo no admitido (415), sin reanudar y retirando lo creado.
+func TestOfficialUpload_DamagedHEICIsUnsupportedAfterOneRetry(t *testing.T) {
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	f.reject["picture"] = "MED-1000"
+	payload := randomPayload(t, 300000)
+	_, err := c.UploadFileToFolder("rota.heic", bytes.NewReader(payload), int64(len(payload)), 1, "", "", time.Time{})
+	if !errors.Is(err, ErrMediaUnsupported) {
+		t.Fatalf("se esperaba ErrMediaUnsupported, llegó %v", err)
+	}
+	if f.posts != 2 || len(f.queries) != 0 {
+		t.Fatalf("debe intentarlo dos veces, sin reanudar: %d envíos, %d consultas de offset", f.posts, len(f.queries))
+	}
+	if len(f.deleted) != 2 {
+		t.Fatalf("debe retirar los dos elementos creados: %v", f.deleted)
+	}
+}
+
+// Si el MED-1000 no se repite (fallo pasajero de O2), el segundo intento sube el HEIC.
+func TestOfficialUpload_HEICTransientMED1000Retried(t *testing.T) {
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	f.reject["picture"], f.rejectN["picture"] = "MED-1000", 1
+	payload := randomPayload(t, 300000)
+	item, err := c.UploadFileToFolder("foto.heic", bytes.NewReader(payload), int64(len(payload)), 1, "", "", time.Time{})
+	if err != nil {
+		t.Fatalf("el segundo intento debía subirlo: %v", err)
+	}
+	if !bytes.Equal(f.data[item.ID], payload) {
+		t.Fatal("contenido distinto")
+	}
+}
+
+// El MED-1000 de otros archivos sigue como antes: un rechazo de O2, sin el reintento
+// propio del HEIC.
+func TestOfficialUpload_MED1000NotHEICUnchanged(t *testing.T) {
+	f, srv := newFakeOfficialSAPI(t)
+	c := newOfficialTestClient(t, srv)
+	f.reject["picture"] = "MED-1000"
+	payload := randomPayload(t, 3000)
+	_, err := c.UploadFileToFolder("foto.jpg", bytes.NewReader(payload), int64(len(payload)), 1, "", "", time.Time{})
+	if err == nil || errors.Is(err, ErrMediaUnsupported) || f.posts != 1 {
+		t.Fatalf("err=%v, envíos=%d", err, f.posts)
 	}
 }
 

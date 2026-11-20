@@ -256,6 +256,7 @@ func (m *MediaItem) UnmarshalJSON(data []byte) error {
 	if m.ModificationDate == "" && aux.Date != "" {
 		m.ModificationDate = aux.Date
 	}
+	m.Name = fromCloudName(m.Name)
 	return nil
 }
 
@@ -1907,10 +1908,13 @@ func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
 // Comprobado con O2 Cloud subiendo y moviendo archivos reales de cada formato:
 //   - audio:   mp3, m4a (AAC y ALAC), wav
 //   - vídeo:   mp4
-//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff, y heic/heif (la app oficial
-//     de Windows los sube con upload/picture; capturado el 18/11/2026)
+//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff y heic (la app oficial de
+//     Windows sube el HEIC con upload/picture; capturado el 18/11/2026)
 //   - genérico (la app no los trata como multimedia): aac, ogg, opus, wma, aiff, flac,
 //     mkv, mov, m4v, 3gp, avi, webm, wmv, mpg, ts, flv, avif, svg y cualquier otro.
+//   - heif también es genérico: O2 rechaza un .heif como imagen al registrarlo, por la
+//     extensión, aunque sea una foto real (MED-1050 en save-metadata), y como genérico
+//     lo guarda intacto (comprobado el 20/11/2026).
 //
 // Si una extensión clasificada como multimedia resultara genérica para SAPI,
 // UpdateMedia recurre a la operación genérica.
@@ -1930,7 +1934,7 @@ func mediaKindForName(name string) string {
 		return "audio"
 	case "mp4":
 		return "video"
-	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif":
+	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic":
 		return "picture"
 	}
 	return "file"
@@ -2122,7 +2126,7 @@ func (c *Client) saveMediaMetadata(kind, mediaID, name string, folderID int64) e
 	u := fmt.Sprintf("%s/upload/%s?action=save-metadata", c.baseURL, kind)
 	data := map[string]interface{}{"id": mediaID}
 	if name != "" {
-		data["name"] = name
+		data["name"] = toCloudName(name)
 	}
 	if folderID != 0 {
 		data["folderid"] = folderID
@@ -2340,6 +2344,9 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 // modificación del archivo en la nube (p. ej. la original, recibida vía X-OC-Mtime);
 // si es cero, se usa la hora actual.
 func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
+	if existingMediaID != "" && size == 0 {
+		return nil, ErrEmptyOverwrite
+	}
 	if c.officialClient() {
 		return c.uploadOfficial(officialUpload{
 			name: fileName, reader: reader, size: size, folderID: folderID,
@@ -2363,7 +2370,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 	}
 
 	metaData := map[string]interface{}{
-		"name":             fileName,
+		"name":             toCloudName(fileName),
 		"size":             size,
 		"modificationdate": modRFC,
 		"creationdate":     nowRFC,
@@ -2415,7 +2422,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			}
 
 			// 2. Part: file
-			partFile, err := mpw.CreateFormFile("file", fileName)
+			partFile, err := mpw.CreateFormFile("file", toCloudName(fileName))
 			if err != nil {
 				writeErr = err
 				return
@@ -2577,6 +2584,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		if cloudName == "" {
 			cloudName = res.Data.Name
 		}
+		cloudName = fromCloudName(cloudName)
 
 		// Corregir sufijo ' (1)' si la nube lo añadió
 		if finalID != "" && cloudName != "" && cloudName != fileName && strings.Contains(cloudName, " (") {

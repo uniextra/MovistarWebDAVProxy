@@ -103,7 +103,7 @@ func (c *Client) CopyFile(mediaID string, parentID int64, name string) (string, 
 	}
 	data := map[string]interface{}{"id": id, "parentid": parentID}
 	if name != "" {
-		data["name"] = name
+		data["name"] = toCloudName(name)
 	}
 	body, _ := json.Marshal(map[string]interface{}{"data": data})
 	req, err := http.NewRequest("POST", fmt.Sprintf("%s/media/file?action=copy", c.baseURL), bytes.NewReader(body))

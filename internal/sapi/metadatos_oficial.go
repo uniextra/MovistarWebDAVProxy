@@ -37,8 +37,10 @@ func (c *Client) officialClient() bool {
 }
 
 // officialContentTypes: los content-type que la app manda (capturados) y que el
-// sistema puede resolver de otra forma (audio/mp4, image/heif…).
+// sistema puede resolver de otra forma (audio/mp4, image/heif…). El .heif va como
+// genérico (ver mediaKindForName) y con application/octet-stream, como se comprobó.
 var officialContentTypes = map[string]string{
+	".heif": "application/octet-stream",
 	".m4a":  "audio/m4a",
 	".heic": "image/heic",
 	".mp4":  "video/mp4",
@@ -75,7 +77,7 @@ func (c *Client) UpdateMediaItem(item MediaItem, newName string, folderID int64)
 		"folderid":         folderID,
 		"id":               item.ID,
 		"modificationdate": officialDate(mod),
-		"name":             newName,
+		"name":             toCloudName(newName),
 	}
 	return c.updateMediaKinds(item.ID, item.Name, newName, func(kind string) error {
 		return c.officialSaveMediaMetadata(kind, data)
