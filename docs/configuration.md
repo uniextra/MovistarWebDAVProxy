@@ -138,6 +138,7 @@ Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con 
 | `SAPI_LOGIN_RETRY_MAX_SEC` | `600` | Tope de esa espera. |
 | `SAPI_LOGIN_GIVEUP_REJECTIONS` | `4` | Rechazos de credenciales necesarios para dar la sesión por caducada (pedir revincular)… |
 | `SAPI_LOGIN_GIVEUP_SEC` | `1800` | …durante al menos estos segundos. Los cortes, 5xx, 403 del WAF y 401 vacíos de CloudFront nunca cuentan. |
+| `SAPI_ESCAPE_NAMES` | `true` | Guardar los nombres de archivo que O2 no admite cambiando un punto por `%2E` en la nube. Ver «Nombres que O2 no admite» más abajo. |
 | `WEBDAV_REAL_EMPTY_FILES` | `true` | Los archivos de 0 bytes se suben a la nube como cualquier otro, en vez de emularse en SQLite y en el manifiesto `.movistar-webdav-proxy/empty-files.json`. Ver «Archivos vacíos» más abajo. `false`: la emulación de antes. |
 | `WEBDAV_EMPTY_MANIFEST_RETRY_SEC` | `120` | Si no se pudo subir el manifiesto de archivos vacíos, se reintenta tras estos segundos. |
 | `WEBDAV_COPY_POLL_SEC` | `10` | Copia en la nube (`COPY`) sin respuesta: cada cuánto se busca si apareció. |
@@ -146,6 +147,8 @@ Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con 
 | `WEBDAV_COPY_WAIT_MAX_SEC` | `600` | …hasta este máximo. Si no aparece, `503` para que el cliente reintente. |
 
 Los valores en segundos admiten decimales (`0.5`). Un valor vacío o no válido usa el de por defecto.
+
+**Nombres que O2 no admite.** O2 rechaza los archivos cuyo nombre empieza por punto (`.env`, `.gitignore`), los que terminan en `.tmp` (en mayúsculas o minúsculas) y quita el punto final de los que terminan en punto. Para poder guardarlos, el proxy escribe ese punto como `%2E` en la nube y lo vuelve a poner al leer: `.env` se guarda como `%2Eenv`, `x.tmp` como `x%2Etmp` y `x.` como `x%2E`. Por WebDAV se ven con su nombre real; en la web o la app de O2, con `%2E`. Las carpetas no lo necesitan. Un archivo subido por otra vía con `%2E` en esas posiciones se verá con el punto. Las sondas de Duplicati (`duplicati-*.tmp`) y los archivos de sistema (`.DS_Store`, `desktop.ini`) se siguen absorbiendo sin subirlos.
 
 **Archivos vacíos.** O2 guarda archivos de 0 bytes como cualquier otro (registro con tamaño 0 y envío vacío); la app oficial no los sube porque los ignora, no porque O2 no los admita. Por eso el proxy los sube de verdad (`WEBDAV_REAL_EMPTY_FILES`): están en la nube y una copia que los usa (Hyper Backup guarda en ellos el estado de la copia) se puede recuperar desde otro equipo y otro proxy sin depender de nada local. Los vacíos de bloqueo de Hyper Backup (`lock_*`, `@reader`…), que viven segundos, siguen solo en el proxy. Al arrancar, los vacíos que seguían emulados (de una versión anterior o del manifiesto) se suben una vez; el manifiesto queda solo con los que no se hayan podido subir.
 

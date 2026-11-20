@@ -256,6 +256,7 @@ func (m *MediaItem) UnmarshalJSON(data []byte) error {
 	if m.ModificationDate == "" && aux.Date != "" {
 		m.ModificationDate = aux.Date
 	}
+	m.Name = fromCloudName(m.Name)
 	return nil
 }
 
@@ -2125,7 +2126,7 @@ func (c *Client) saveMediaMetadata(kind, mediaID, name string, folderID int64) e
 	u := fmt.Sprintf("%s/upload/%s?action=save-metadata", c.baseURL, kind)
 	data := map[string]interface{}{"id": mediaID}
 	if name != "" {
-		data["name"] = name
+		data["name"] = toCloudName(name)
 	}
 	if folderID != 0 {
 		data["folderid"] = folderID
@@ -2366,7 +2367,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 	}
 
 	metaData := map[string]interface{}{
-		"name":             fileName,
+		"name":             toCloudName(fileName),
 		"size":             size,
 		"modificationdate": modRFC,
 		"creationdate":     nowRFC,
@@ -2418,7 +2419,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			}
 
 			// 2. Part: file
-			partFile, err := mpw.CreateFormFile("file", fileName)
+			partFile, err := mpw.CreateFormFile("file", toCloudName(fileName))
 			if err != nil {
 				writeErr = err
 				return
@@ -2580,6 +2581,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		if cloudName == "" {
 			cloudName = res.Data.Name
 		}
+		cloudName = fromCloudName(cloudName)
 
 		// Corregir sufijo ' (1)' si la nube lo añadió
 		if finalID != "" && cloudName != "" && cloudName != fileName && strings.Contains(cloudName, " (") {

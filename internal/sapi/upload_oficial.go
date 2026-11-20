@@ -330,7 +330,7 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 		"contenttype":      contentType,
 		"folderid":         p.folderID,
 		"modificationdate": officialDate(modTime),
-		"name":             p.name,
+		"name":             toCloudName(p.name),
 		"size":             p.size,
 	}
 	if p.existing != "" {

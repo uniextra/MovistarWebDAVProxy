@@ -77,7 +77,7 @@ func (c *Client) UpdateMediaItem(item MediaItem, newName string, folderID int64)
 		"folderid":         folderID,
 		"id":               item.ID,
 		"modificationdate": officialDate(mod),
-		"name":             newName,
+		"name":             toCloudName(newName),
 	}
 	return c.updateMediaKinds(item.ID, item.Name, newName, func(kind string) error {
 		return c.officialSaveMediaMetadata(kind, data)
