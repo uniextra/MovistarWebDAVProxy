@@ -951,15 +951,21 @@ func (l *resilientLockSystem) Confirm(now time.Time, name0, name1 string, condit
 	return release, err
 }
 
-// isExpectedNotFound indica un "no existe" en una consulta: los clientes (rclone,
-// Duplicati...) comprueban si un archivo existe antes de subirlo, y que no exista es
-// lo normal, no un error. En DELETE o MOVE sí se registra.
+// isExpectedNotFound indica un "no existe" que es lo normal, no un error:
+//   - en una consulta: los clientes (rclone, Duplicati...) comprueban si un archivo
+//     existe antes de subirlo;
+//   - en un MKCOL, cuando falta la carpeta padre (409): rclone crea primero la carpeta
+//     más profunda y, si responde 409, crea la de arriba y repite;
+//   - en un DELETE: borrar algo que ya no está deja el mismo resultado, y es lo que
+//     hace rclone tras una subida rechazada (el proxy ya retiró lo creado).
+//
+// En MOVE sí se registra.
 func isExpectedNotFound(method string, err error) bool {
 	if !errors.Is(err, os.ErrNotExist) {
 		return false
 	}
 	switch method {
-	case "PROPFIND", "HEAD", "GET":
+	case "PROPFIND", "HEAD", "GET", "MKCOL", "DELETE":
 		return true
 	}
 	return false

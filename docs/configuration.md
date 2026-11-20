@@ -146,7 +146,7 @@ Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con 
 
 Los valores en segundos admiten decimales (`0.5`). Un valor vacío o no válido usa el de por defecto.
 
-**Archivos que O2 no admite (`MED-1050`).** O2 comprueba que el contenido de las imágenes (`jpg`, `png`, `heic`…), audios (`mp3`, `m4a`, `wav`) y vídeos (`mp4`) corresponda a su extensión. Si no corresponde, rechaza el archivo. La app oficial lo marca como no admitido y no lo reintenta; el proxy hace lo mismo y responde **`415 Unsupported Media Type`** (sin `Retry-After`), para que el cliente lo señale y siga con lo demás en vez de reintentarlo sin fin. Con `SAPI_UNSUPPORTED_AS_FILE=true` se sube como archivo genérico.
+**Archivos que O2 no admite (`MED-1050`).** O2 comprueba que el contenido de las imágenes (`jpg`, `png`, `heic`…) corresponda a su extensión; el de los audios y vídeos no lo comprueba (un `.mp3` o un `.mp4` cualquiera se guarda tal cual). Si una imagen no corresponde, rechaza el archivo. Con un `.heic` dañado O2 no responde `MED-1050` sino `MED-1000`, el mismo código que da cuando falla toda la API; por eso el proxy lo reintenta una vez y, si se repite, lo trata igual. Los `.heif` se suben como archivo genérico, porque O2 no los admite como imagen ni siquiera con una foto real. La app oficial lo marca como no admitido y no lo reintenta; el proxy hace lo mismo y responde **`415 Unsupported Media Type`** (sin `Retry-After`), para que el cliente lo señale y siga con lo demás en vez de reintentarlo sin fin. Con `SAPI_UNSUPPORTED_AS_FILE=true` se sube como archivo genérico.
 ---
 
 ## 🔒 5. Seguridad y Autenticación Detallada

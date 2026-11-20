@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +97,7 @@ type officialUpload struct {
 	ctx        context.Context // la petición del cliente: si se va, la subida se aborta
 	modTime    time.Time
 	kind       string // tipo forzado (upload/<kind>); vacío: el de la extensión
+	heicRetry  bool   // segundo intento tras un MED-1000 en el contenido de un HEIC
 }
 
 func (p officialUpload) context() context.Context {
@@ -241,6 +243,15 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 		if isNew {
 			c.retireNewItem(id, p.name, "creado", "porque O2 rechazó la subida")
 		}
+		if isHEICContentError(err, kind, p.name) {
+			if p.heicRetry {
+				err = fmt.Errorf("%w (upload/%s: MED-1000 repetido con un HEIC)", ErrMediaUnsupported, kind)
+			} else if retry, ok := rewound(p); ok {
+				logger.Log("[SAPI] 🔁 O2 respondió MED-1000 al contenido de '%s'; se reintenta una vez por si fue un fallo general de O2.", p.name)
+				retry.heicRetry = true
+				return c.uploadOfficial(retry)
+			}
+		}
 		if retry, ok := c.unsupportedAsFile(err, kind, p); ok {
 			return c.uploadOfficial(retry)
 		}
@@ -266,6 +277,31 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 	}
 	c.afterOfficialSave(id, p.folderID, res.Status, res.Etag)
 	return item, nil
+}
+
+// isHEICContentError: O2 no responde MED-1050 al contenido de un HEIC que no puede
+// procesar, sino MED-1000 («Unknown exception in media handling»), y lo repite
+// siempre igual (comprobado el 20/11/2026 con contenido falso de 4 B y de 256 KB; un
+// HEIC real sube bien). MED-1000 es también el error de O2 cuando falla toda la API,
+// así que se reintenta una vez y solo si se repite se da por no admitido (415).
+func isHEICContentError(err error, kind, name string) bool {
+	var re *RejectedError
+	return kind == "picture" && strings.EqualFold(filepath.Ext(name), ".heic") &&
+		errors.As(err, &re) && re.Code == "MED-1000"
+}
+
+// rewound devuelve la subida lista para empezar de cero (cuerpo rebobinado y sin el
+// ID del intento anterior), si el cuerpo se puede rebobinar.
+func rewound(p officialUpload) (officialUpload, bool) {
+	seeker, ok := p.reader.(io.ReadSeeker)
+	if !ok {
+		return p, false
+	}
+	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+		return p, false
+	}
+	p.pendingID, p.pendingNew = "", false
+	return p, true
 }
 
 // unsupportedAsFile prepara, si procede, el reintento como archivo genérico de una

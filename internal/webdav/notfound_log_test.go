@@ -9,12 +9,12 @@ import (
 
 func TestIsExpectedNotFound(t *testing.T) {
 	notFound := fmt.Errorf("stat: %w", os.ErrNotExist)
-	for _, m := range []string{"PROPFIND", "HEAD", "GET"} {
+	for _, m := range []string{"PROPFIND", "HEAD", "GET", "MKCOL", "DELETE"} {
 		if !isExpectedNotFound(m, notFound) {
 			t.Errorf("%s con 'no existe' debería silenciarse", m)
 		}
 	}
-	for _, m := range []string{"DELETE", "MOVE", "PUT"} {
+	for _, m := range []string{"MOVE", "PUT"} {
 		if isExpectedNotFound(m, notFound) {
 			t.Errorf("%s con 'no existe' debe registrarse", m)
 		}

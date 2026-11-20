@@ -1907,10 +1907,13 @@ func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
 // Comprobado con O2 Cloud subiendo y moviendo archivos reales de cada formato:
 //   - audio:   mp3, m4a (AAC y ALAC), wav
 //   - vídeo:   mp4
-//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff, y heic/heif (la app oficial
-//     de Windows los sube con upload/picture; capturado el 18/11/2026)
+//   - imagen:  jpg, jpeg, png, gif, webp, bmp, tif, tiff y heic (la app oficial de
+//     Windows sube el HEIC con upload/picture; capturado el 18/11/2026)
 //   - genérico (la app no los trata como multimedia): aac, ogg, opus, wma, aiff, flac,
 //     mkv, mov, m4v, 3gp, avi, webm, wmv, mpg, ts, flv, avif, svg y cualquier otro.
+//   - heif también es genérico: O2 rechaza un .heif como imagen al registrarlo, por la
+//     extensión, aunque sea una foto real (MED-1050 en save-metadata), y como genérico
+//     lo guarda intacto (comprobado el 20/11/2026).
 //
 // Si una extensión clasificada como multimedia resultara genérica para SAPI,
 // UpdateMedia recurre a la operación genérica.
@@ -1930,7 +1933,7 @@ func mediaKindForName(name string) string {
 		return "audio"
 	case "mp4":
 		return "video"
-	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif":
+	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic":
 		return "picture"
 	}
 	return "file"
