@@ -3384,6 +3384,73 @@ func (mfs *MovistarFS) extractSeqIDFromSeqMapping(seqItem sapi.MediaItem) int64 
 	return maxSeq
 }
 
+// Hyper Backup guarda la versión de la copia en el nombre de un vacío de
+// Control/@writer, v1.N.-1.0.0.none.none.cinfo, y la misma N en el nombre de
+// Config/version_info.db.N. N no es el número de copias (tras la 4.ª puede ser 5):
+// al terminar una copia sube version_info.db.N, escribe v1.N…cinfo y borra los de N-1.
+var (
+	hbStateCinfoRe  = regexp.MustCompile(`^v1\.(\d+)\.-1\.0\.0\.none\.none\.cinfo$`)
+	hbVersionInfoRe = regexp.MustCompile(`^version_info\.db\.(\d+)$`)
+)
+
+// hbV1Checked: carpetas @writer cuyo v1.1 ya se comprobó contra Config y es correcto
+// (tarea con una sola copia). Evita listar Config en cada PROPFIND de @writer.
+var hbV1Checked sync.Map // folderID → time.Time
+
+// hbStateSeq devuelve N si name es el .cinfo de estado v1.N.-1.0.0.none.none.cinfo.
+func hbStateSeq(name string) (int64, bool) {
+	m := hbStateCinfoRe.FindStringSubmatch(strings.ToLower(name))
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	return n, err == nil && n > 0
+}
+
+// hbVersionFromNames deduce la versión confirmada de los nombres de Config: la N de
+// version_info.db.N. Si hay varias (una copia cortada después de subir la nueva y
+// antes de borrar la anterior), la menor, que es la última confirmada.
+func hbVersionFromNames(names []string) (int64, bool) {
+	var best int64
+	for _, name := range names {
+		m := hbVersionInfoRe.FindStringSubmatch(strings.ToLower(name))
+		if m == nil {
+			continue
+		}
+		if n, err := strconv.ParseInt(m[1], 10, 64); err == nil && n > 0 && (best == 0 || n < best) {
+			best = n
+		}
+	}
+	return best, best > 0
+}
+
+// hyperBackupVersionFromConfig lee de la nube los nombres de <tarea>.hbk/Config para
+// deducir la versión confirmada (hbVersionFromNames).
+func (mfs *MovistarFS) hyperBackupVersionFromConfig(writerDir string) (int64, bool) {
+	if mfs.client == nil {
+		return 0, false
+	}
+	cfg, _, isFolder, err := mfs.resolvePath(path.Join(path.Dir(path.Dir(writerDir)), "Config"))
+	if err != nil || !isFolder || cfg == nil {
+		return 0, false
+	}
+	items, err := mfs.client.ListAllMediaInFolder(cfg.ID)
+	if err != nil {
+		return 0, false
+	}
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		names = append(names, it.Name)
+	}
+	return hbVersionFromNames(names)
+}
+
+// autoHealHyperBackupWriter repone en Control/@writer los vacíos de estado de Hyper
+// Backup que falten (v1.cformat y el .cinfo de la versión) y corrige el .cinfo v1.1
+// que ponían versiones anteriores del proxy a ciegas. La versión sale, por orden, de
+// seq_mapping, de Config/version_info.db.N o, si no hay nada (tarea nueva), 1. Con un
+// v1.1 equivocado, Hyper Backup responde «The backup data on the cloud is older than
+// the NAS's cache» (ST_CLOUD_NOT_SYNC_OLDER): la nube dice 1 y su caché, N.
 func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64, media []sapi.MediaItem, vFiles []cache.VirtualEmptyFileRecord) []cache.VirtualEmptyFileRecord {
 	clean := path.Clean("/" + dirPath)
 	if !strings.HasSuffix(strings.ToLower(clean), "/control/@writer") {
@@ -3395,44 +3462,55 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 	}
 
 	var seqMappingItem *sapi.MediaItem
-	hasCformat := false
-	hasCinfo := false
-
-	for i := range media {
-		lower := strings.ToLower(media[i].Name)
+	var hasCformat, hasCinfo, otherCinfo bool
+	var stateSeqs []int64
+	look := func(name string) {
+		lower := strings.ToLower(name)
 		switch {
-		case lower == "seq_mapping":
-			seqMappingItem = &media[i]
 		case lower == "v1.cformat":
 			hasCformat = true
 		case strings.HasSuffix(lower, ".cinfo"):
 			hasCinfo = true
+			if n, ok := hbStateSeq(lower); ok {
+				stateSeqs = append(stateSeqs, n)
+			} else {
+				otherCinfo = true // fases de una copia en curso
+			}
 		}
 	}
-	for i := range vFiles {
-		lower := strings.ToLower(vFiles[i].Name)
-		if lower == "v1.cformat" {
-			hasCformat = true
-		} else if strings.HasSuffix(lower, ".cinfo") {
-			hasCinfo = true
+	scan := func(vf []cache.VirtualEmptyFileRecord) {
+		hasCformat, hasCinfo, otherCinfo, stateSeqs = false, false, false, nil
+		for i := range media {
+			if strings.ToLower(media[i].Name) == "seq_mapping" {
+				seqMappingItem = &media[i]
+			}
+			look(media[i].Name)
 		}
+		for i := range vf {
+			look(vf[i].Name)
+		}
+		mfs.cacheMu.RLock()
+		for _, mem := range mfs.uploadCache {
+			if mem.FolderID == folderID {
+				look(mem.Name)
+			}
+		}
+		mfs.cacheMu.RUnlock()
+	}
+	// Solo se corrige un v1.1 si es el único .cinfo (ninguna copia en curso): es el
+	// que ponía el proxy cuando no encontraba el de verdad.
+	suspect := func() bool {
+		if otherCinfo || len(stateSeqs) != 1 || stateSeqs[0] != 1 {
+			return false
+		}
+		if t, ok := hbV1Checked.Load(folderID); ok && time.Since(t.(time.Time)) < 30*time.Minute {
+			return false
+		}
+		return true
 	}
 
-	mfs.cacheMu.RLock()
-	for _, mem := range mfs.uploadCache {
-		if mem.FolderID != folderID {
-			continue
-		}
-		lower := strings.ToLower(mem.Name)
-		if lower == "v1.cformat" {
-			hasCformat = true
-		} else if strings.HasSuffix(lower, ".cinfo") {
-			hasCinfo = true
-		}
-	}
-	mfs.cacheMu.RUnlock()
-
-	if hasCformat && hasCinfo {
+	scan(vFiles)
+	if hasCformat && hasCinfo && !suspect() {
 		return vFiles
 	}
 
@@ -3442,15 +3520,8 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 	// Re-verificar dentro del lock por si otra petición concurrente ya lo reparó
 	if refreshed, err := ms.ListVirtualEmptyFilesInFolder(folderID); err == nil {
 		vFiles = refreshed
-		for i := range vFiles {
-			lower := strings.ToLower(vFiles[i].Name)
-			if lower == "v1.cformat" {
-				hasCformat = true
-			} else if strings.HasSuffix(lower, ".cinfo") {
-				hasCinfo = true
-			}
-		}
-		if hasCformat && hasCinfo {
+		scan(vFiles)
+		if hasCformat && hasCinfo && !suspect() {
 			return vFiles
 		}
 	}
@@ -3462,40 +3533,59 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 	if modTimeStr == "" {
 		modTimeStr = time.Now().UTC().Format("20060102T150405Z")
 	}
+	add := func(name string) bool {
+		if err := ms.UpsertVirtualEmptyFile(folderID, name, modTimeStr); err != nil {
+			return false
+		}
+		vFiles = append(vFiles, cache.VirtualEmptyFileRecord{FolderID: folderID, Name: name, ModTime: modTimeStr})
+		return true
+	}
 
 	healed := false
-	if !hasCformat {
-		if err := ms.UpsertVirtualEmptyFile(folderID, "v1.cformat", modTimeStr); err == nil {
-			vFiles = append(vFiles, cache.VirtualEmptyFileRecord{
-				FolderID: folderID,
-				Name:     "v1.cformat",
-				ModTime:  modTimeStr,
-			})
-			healed = true
-			logger.Log("[WebDAV] 🔧 Auto-reparado fichero de formato Hyper Backup en '%s': 'v1.cformat'", clean)
+	if !hasCformat && add("v1.cformat") {
+		healed = true
+		logger.Log("[WebDAV] 🔧 Auto-reparado fichero de formato Hyper Backup en '%s': 'v1.cformat'", clean)
+	}
+
+	seq, source := int64(0), ""
+	if !hasCinfo || suspect() {
+		if seqMappingItem != nil {
+			seq, source = mfs.extractSeqIDFromSeqMapping(*seqMappingItem), "recuperado de seq_mapping"
+		}
+		if seq <= 1 {
+			if n, ok := mfs.hyperBackupVersionFromConfig(clean); ok {
+				seq, source = n, "deducido de Config/version_info.db.N"
+			}
 		}
 	}
-	if !hasCinfo {
-		maxSeq := int64(1)
-		source := "por defecto al no existir seq_mapping"
-		if seqMappingItem != nil {
-			maxSeq = mfs.extractSeqIDFromSeqMapping(*seqMappingItem)
-			source = "recuperado de seq_mapping"
+	switch {
+	case !hasCinfo:
+		if seq <= 0 {
+			seq, source = 1, "por defecto: sin seq_mapping ni version_info.db en Config"
 		}
-		cinfoName := fmt.Sprintf("v1.%d.-1.0.0.none.none.cinfo", maxSeq)
-		if err := ms.UpsertVirtualEmptyFile(folderID, cinfoName, modTimeStr); err == nil {
-			vFiles = append(vFiles, cache.VirtualEmptyFileRecord{
-				FolderID: folderID,
-				Name:     cinfoName,
-				ModTime:  modTimeStr,
-			})
+		cinfoName := fmt.Sprintf("v1.%d.-1.0.0.none.none.cinfo", seq)
+		if add(cinfoName) {
 			healed = true
-			logger.Log("[WebDAV] 🔧 Auto-reparado fichero de estado Hyper Backup en '%s': '%s' (seq_id=%d %s)", clean, cinfoName, maxSeq, source)
+			logger.Log("[WebDAV] 🔧 Auto-reparado fichero de estado Hyper Backup en '%s': '%s' (seq_id=%d %s)", clean, cinfoName, seq, source)
+		}
+	case suspect() && seq <= 1:
+		hbV1Checked.Store(folderID, time.Now()) // v1.1 correcto: tarea con una sola copia
+	case suspect() && seq > 1:
+		// Se añade el bueno sin borrar el v1.1: Hyper Backup se queda con el mayor y
+		// borra los anteriores al terminar la siguiente copia.
+		cinfoName := fmt.Sprintf("v1.%d.-1.0.0.none.none.cinfo", seq)
+		if add(cinfoName) {
+			healed = true
+			logger.Log("[WebDAV] 🔧 Corregido el estado Hyper Backup en '%s': solo había 'v1.1.-1.0.0.none.none.cinfo'; añadido '%s' (seq_id=%d %s)", clean, cinfoName, seq, source)
 		}
 	}
 
 	if healed && mfs.emptyFileManager != nil {
-		mfs.emptyFileManager.ScheduleSave()
+		if mfs.realEmptyFiles() {
+			mfs.emptyFileManager.startMigration() // se sube a la nube como cualquier vacío
+		} else {
+			mfs.emptyFileManager.ScheduleSave()
+		}
 	}
 	return vFiles
 }
