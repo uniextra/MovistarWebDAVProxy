@@ -58,6 +58,12 @@ type EmptyFileManager struct {
 	// cargado ni subido un manifiesto no puede subir el suyo: lo pisaría con un estado
 	// casi vacío (contenedor nuevo, base local borrada…).
 	bootstrapped atomic.Bool
+	// migrating: hay en marcha una subida a la nube de los vacíos que siguen emulados
+	// (ver startMigration).
+	migrating atomic.Bool
+	// migrateAgain: se pidió otra migración mientras había una en marcha (el manifiesto
+	// se carga más de una vez al arrancar); se repite al terminar.
+	migrateAgain atomic.Bool
 }
 
 func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
@@ -272,6 +278,7 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 	}
 	efm.bootstrapMu.Lock()
 	defer efm.bootstrapMu.Unlock()
+	defer efm.startMigration()
 
 	ms := efm.mfs.MetadataStore()
 	if ms == nil || efm.mfs.client == nil {
@@ -352,6 +359,9 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 		if modTime == "" {
 			modTime = time.Now().UTC().Format("20060102T150405Z")
 		}
+		if m, _ := ms.GetMediaByFolderAndName(parentFolder.ID, baseName); m != nil && m.ID != "" {
+			continue // ya está en la nube como archivo real: no se emula otra vez
+		}
 		if err := ms.UpsertVirtualEmptyFile(parentFolder.ID, baseName, modTime); err == nil {
 			loadedCount++
 		}
@@ -370,6 +380,125 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 		logger.Log("[EmptyFiles] 🧹 Descartados archivos efímeros (locks/estados transitorios) del manifiesto; reescribiendo limpio...")
 		efm.ScheduleSave()
 	}
+}
+
+// startMigration: con los vacíos de verdad (MovistarFS.realEmptyFiles), los que siguen
+// emulados (creados antes de activarlo, o cargados del manifiesto de la nube) se suben
+// a la nube una vez resuelto el manifiesto en este arranque. Va en segundo plano.
+func (efm *EmptyFileManager) startMigration() {
+	if !efm.bootstrapped.Load() || !efm.mfs.realEmptyFiles() {
+		return
+	}
+	if !efm.migrating.CompareAndSwap(false, true) {
+		efm.migrateAgain.Store(true)
+		return
+	}
+	go func() {
+		for {
+			efm.migrateToCloud()
+			efm.migrating.Store(false)
+			if !efm.migrateAgain.Swap(false) || !efm.migrating.CompareAndSwap(false, true) {
+				return
+			}
+		}
+	}()
+}
+
+// migrateToCloud sube como archivos reales de 0 bytes los vacíos emulados que no sean
+// de bloqueo o control. Si en la nube ya hay un archivo con ese nombre (subido de
+// verdad en un arranque anterior), solo se quita el emulado. Los que O2 no admite o
+// fallan se quedan emulados y en el manifiesto, que tras la migración solo contiene
+// esos; se vuelven a intentar en el próximo arranque.
+func (efm *EmptyFileManager) migrateToCloud() {
+	ms := efm.mfs.MetadataStore()
+	if ms == nil || efm.mfs.client == nil {
+		return
+	}
+	files, err := ms.ListAllVirtualEmptyFiles()
+	if err != nil {
+		logger.Log("[EmptyFiles] ⚠️ No se pudieron listar los vacíos emulados para subirlos: %v", err)
+		return
+	}
+	subidos, yaEstaban, fallidos := 0, 0, 0
+	enNube := map[int64]map[string]bool{} // carpeta → nombres que hay en la nube (listado real)
+	for _, f := range files {
+		clean := path.Clean("/" + f.Path)
+		if isEphemeralEmptyFile(clean) || isInternalProxyPath(clean) {
+			continue
+		}
+		switch efm.migrateOne(ms, clean, f.ModTime, enNube) {
+		case migratedUploaded:
+			subidos++
+		case migratedAlreadyReal:
+			yaEstaban++
+		default:
+			fallidos++
+		}
+	}
+	if subidos+yaEstaban+fallidos == 0 {
+		return
+	}
+	logger.Log("[EmptyFiles] ☁️ Vacíos emulados pasados a la nube: %d subidos, %d ya estaban, %d siguen emulados", subidos, yaEstaban, fallidos)
+	efm.ScheduleSave() // el manifiesto queda solo con los que siguen emulados
+}
+
+type migrateResult int
+
+const (
+	migratedFailed migrateResult = iota
+	migratedUploaded
+	migratedAlreadyReal
+)
+
+func (efm *EmptyFileManager) migrateOne(ms *cache.MetadataStore, clean, modTime string, enNube map[int64]map[string]bool) migrateResult {
+	unlock := acquireFolderLock(clean) // como una subida: no se cruza con un PUT, MOVE o DELETE
+	defer unlock()
+	parent, _, isFolder, err := efm.mfs.resolvePathOpts(path.Dir(clean), false)
+	if err != nil || !isFolder || parent == nil || parent.ID <= 0 {
+		return migratedFailed
+	}
+	name := path.Base(clean)
+	if vf, _ := ms.GetVirtualEmptyFile(parent.ID, name); vf == nil {
+		return migratedAlreadyReal // borrado o subido mientras tanto
+	}
+	defer func() {
+		efm.mfs.cacheMu.Lock()
+		delete(efm.mfs.uploadCache, cacheKey(clean))
+		efm.mfs.cacheMu.Unlock()
+		efm.mfs.InvalidateCache(parent.ID)
+	}()
+	// Se mira el listado real de la carpeta en la nube, no solo la base local: con una
+	// base nueva la sincronización inicial puede no haber terminado y se subiría un
+	// duplicado. Un listado por carpeta y migración.
+	nombres, ok := enNube[parent.ID]
+	if !ok {
+		items, err := efm.mfs.client.ListAllMediaInFolder(parent.ID)
+		if err != nil {
+			logger.Log("[EmptyFiles] ⚠️ No se pudo listar la carpeta de '%s' para pasarlo a la nube: %v (sigue emulado)", clean, err)
+			return migratedFailed
+		}
+		nombres = make(map[string]bool, len(items))
+		for _, it := range items {
+			nombres[it.Name] = true
+		}
+		enNube[parent.ID] = nombres
+	}
+	if nombres[name] {
+		logMetaErr("DeleteVirtualEmptyFile", ms.DeleteVirtualEmptyFile(parent.ID, name))
+		return migratedAlreadyReal
+	}
+	mod := time.Now()
+	if t, err := time.Parse("20060102T150405Z", modTime); err == nil {
+		mod = t
+	}
+	item, err := efm.mfs.client.UploadFileToFolder(name, bytes.NewReader(nil), 0, parent.ID, "", "", mod)
+	if err != nil || item == nil {
+		logger.Log("[EmptyFiles] ⚠️ No se pudo subir a la nube el vacío emulado '%s': %v (sigue emulado)", clean, err)
+		return migratedFailed
+	}
+	logMetaErr("UpsertMedia", ms.UpsertMedia(*item))
+	logMetaErr("DeleteVirtualEmptyFile", ms.DeleteVirtualEmptyFile(parent.ID, name))
+	return migratedUploaded
 }
 
 // isEphemeralEmptyFile identifica archivos vacíos transitorios de bloqueo

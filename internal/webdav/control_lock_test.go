@@ -18,6 +18,7 @@ import (
 )
 
 func TestControlLockVirtualEmulation(t *testing.T) {
+	t.Setenv("WEBDAV_REAL_EMPTY_FILES", "false") // emulación de vacíos (como antes)
 	var sapiFolderCreateCount atomic.Int32
 	var sapiFolderDeleteCount atomic.Int32
 	var sapiUploadCount atomic.Int32
@@ -215,6 +216,7 @@ func TestHyperBackupWriterStateIsPersistent(t *testing.T) {
 }
 
 func TestAutoHealHyperBackupWriterCinfo(t *testing.T) {
+	t.Setenv("WEBDAV_REAL_EMPTY_FILES", "false") // emulación de vacíos (como antes)
 	tmpDir := t.TempDir()
 	seqDBPath := filepath.Join(tmpDir, "seq_mapping.db")
 

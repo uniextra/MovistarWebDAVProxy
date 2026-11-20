@@ -138,6 +138,7 @@ Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con 
 | `SAPI_LOGIN_RETRY_MAX_SEC` | `600` | Tope de esa espera. |
 | `SAPI_LOGIN_GIVEUP_REJECTIONS` | `4` | Rechazos de credenciales necesarios para dar la sesión por caducada (pedir revincular)… |
 | `SAPI_LOGIN_GIVEUP_SEC` | `1800` | …durante al menos estos segundos. Los cortes, 5xx, 403 del WAF y 401 vacíos de CloudFront nunca cuentan. |
+| `WEBDAV_REAL_EMPTY_FILES` | `true` | Los archivos de 0 bytes se suben a la nube como cualquier otro, en vez de emularse en SQLite y en el manifiesto `.movistar-webdav-proxy/empty-files.json`. Ver «Archivos vacíos» más abajo. `false`: la emulación de antes. |
 | `WEBDAV_EMPTY_MANIFEST_RETRY_SEC` | `120` | Si no se pudo subir el manifiesto de archivos vacíos, se reintenta tras estos segundos. |
 | `WEBDAV_COPY_POLL_SEC` | `10` | Copia en la nube (`COPY`) sin respuesta: cada cuánto se busca si apareció. |
 | `WEBDAV_COPY_WAIT_BASE_SEC` | `120` | Espera mínima por esa copia… |
@@ -145,6 +146,8 @@ Todas estas opciones se leen en `internal/config/opciones.go`. Las marcadas con 
 | `WEBDAV_COPY_WAIT_MAX_SEC` | `600` | …hasta este máximo. Si no aparece, `503` para que el cliente reintente. |
 
 Los valores en segundos admiten decimales (`0.5`). Un valor vacío o no válido usa el de por defecto.
+
+**Archivos vacíos.** O2 guarda archivos de 0 bytes como cualquier otro (registro con tamaño 0 y envío vacío); la app oficial no los sube porque los ignora, no porque O2 no los admita. Por eso el proxy los sube de verdad (`WEBDAV_REAL_EMPTY_FILES`): están en la nube y una copia que los usa (Hyper Backup guarda en ellos el estado de la copia) se puede recuperar desde otro equipo y otro proxy sin depender de nada local. Los vacíos de bloqueo de Hyper Backup (`lock_*`, `@reader`…), que viven segundos, siguen solo en el proxy. Al arrancar, los vacíos que seguían emulados (de una versión anterior o del manifiesto) se suben una vez; el manifiesto queda solo con los que no se hayan podido subir.
 
 **Archivos que O2 no admite (`MED-1050`).** O2 comprueba que el contenido de las imágenes (`jpg`, `png`, `heic`…) corresponda a su extensión; el de los audios y vídeos no lo comprueba (un `.mp3` o un `.mp4` cualquiera se guarda tal cual). Si una imagen no corresponde, rechaza el archivo. Con un `.heic` dañado O2 no responde `MED-1050` sino `MED-1000`, el mismo código que da cuando falla toda la API; por eso el proxy lo reintenta una vez y, si se repite, lo trata igual. Los `.heif` se suben como archivo genérico, porque O2 no los admite como imagen ni siquiera con una foto real. La app oficial lo marca como no admitido y no lo reintenta; el proxy hace lo mismo y responde **`415 Unsupported Media Type`** (sin `Retry-After`), para que el cliente lo señale y siga con lo demás en vez de reintentarlo sin fin. Con `SAPI_UNSUPPORTED_AS_FILE=true` se sube como archivo genérico.
 ---

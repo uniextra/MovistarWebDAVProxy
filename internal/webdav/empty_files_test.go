@@ -26,7 +26,11 @@ var lastUploadDataID string
 
 func setupTestWebDAVServerWithDB(t *testing.T) (*Server, *cache.MetadataStore, string, func()) {
 	t.Helper()
+	// Estas pruebas son de la emulación de vacíos (SQLite + manifiesto); los vacíos
+	// reales en la nube se prueban en empty_files_real_test.go.
+	t.Setenv("WEBDAV_REAL_EMPTY_FILES", "false")
 
+	var ms *cache.MetadataStore // la «nube» del simulador lista lo que hay en la base
 	var uploadsCount atomic.Int32
 	var manifestData []byte
 
@@ -122,6 +126,14 @@ func setupTestWebDAVServerWithDB(t *testing.T) (*Server, *cache.MetadataStore, s
 			b, _ := io.ReadAll(r.Body)
 			_ = json.Unmarshal(b, &q)
 			media := make([]map[string]interface{}, 0)
+			if fid := r.URL.Query().Get("folderid"); fid != "" && ms != nil {
+				var folderID int64
+				_, _ = fmt.Sscan(fid, &folderID)
+				items, _ := ms.ListMediaInFolder(folderID)
+				for _, it := range items {
+					media = append(media, map[string]interface{}{"id": it.ID, "name": it.Name, "size": it.Size, "folderid": it.FolderID})
+				}
+			}
 			for _, id := range q.Data.IDs {
 				media = append(media, map[string]interface{}{
 					"id": id, "name": "file.txt", "size": 10, "folderid": 100,
@@ -166,7 +178,7 @@ func setupTestWebDAVServerWithDB(t *testing.T) (*Server, *cache.MetadataStore, s
 		t.Fatalf("MkdirTemp failed: %v", err)
 	}
 	dbPath := filepath.Join(tmpDir, "test_metadata.db")
-	ms, err := cache.NewMetadataStore(dbPath)
+	ms, err = cache.NewMetadataStore(dbPath)
 	if err != nil {
 		mockSAPI.Close()
 		_ = os.RemoveAll(tmpDir)

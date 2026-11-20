@@ -635,6 +635,12 @@ func (mfs *MovistarFS) SetMetadataStore(ms *cache.MetadataStore) {
 	}
 }
 
+// realEmptyFiles: los archivos de 0 bytes se suben de verdad a la nube
+// (config.RealEmptyFiles), salvo en el modo web, que no usa la subida de la app.
+func (mfs *MovistarFS) realEmptyFiles() bool {
+	return config.RealEmptyFiles() && mfs != nil && mfs.client != nil && !mfs.client.WebMode()
+}
+
 // BootstrapEmptyFiles carga desde la nube el manifiesto de archivos vacíos emulados hacia SQLite.
 func (mfs *MovistarFS) BootstrapEmptyFiles() {
 	if mfs == nil || mfs.emptyFileManager == nil {
@@ -2619,10 +2625,35 @@ func (w *WebDAVFileWriter) upload(body io.Reader, size int64, mimeType string) (
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if id := w.sapiExistingID(); id != "" && size == 0 {
+		return w.replaceWithEmpty(ctx, id, body, mimeType)
+	}
 	if id := w.sapiExistingID(); id != "" && w.existingItem != nil && w.existingItem.ID == id {
 		return w.mfs.client.UploadFileReplacingCtx(ctx, *w.existingItem, w.name, body, size, w.parentFolderID, mimeType, w.modTime)
 	}
 	return w.mfs.client.UploadFileToFolderCtx(ctx, w.name, body, size, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
+}
+
+// replaceWithEmpty vacía un archivo que tenía contenido. O2 no admite sobrescribir un
+// archivo con 0 bytes: responde MED-1049 «Wrong byte uploaded» al envío vacío
+// (comprobado el 20/11/2026), aunque sí crea archivos nuevos de 0 bytes. Se sube uno
+// nuevo vacío y, cuando está, se manda el anterior a la papelera, como hace la app al
+// cambiar la extensión de un archivo.
+func (w *WebDAVFileWriter) replaceWithEmpty(ctx context.Context, oldID string, body io.Reader, mimeType string) (*sapi.MediaItem, error) {
+	media, err := w.mfs.client.UploadFileToFolderCtx(ctx, w.name, body, 0, w.parentFolderID, mimeType, "", w.modTime)
+	if err != nil {
+		return nil, err
+	}
+	derr := w.mfs.client.DeleteFile(oldID, w.name)
+	if derr != nil {
+		logger.Log("[WebDAV] ⚠️ '%s' se vació subiendo uno nuevo (ID %s), pero el anterior (ID %s) no se pudo mandar a la papelera: %v", w.name, media.ID, oldID, derr)
+	} else {
+		logger.Log("[WebDAV] 🗑 '%s' vaciado: nuevo de 0 bytes (ID %s); el anterior (ID %s), a la papelera.", w.name, media.ID, oldID)
+	}
+	if ms := w.mfs.MetadataStore(); ms != nil && derr == nil {
+		logMetaErr("DeleteMedia", ms.DeleteMedia(oldID))
+	}
+	return media, nil
 }
 
 // sapiExistingID devuelve el ID real de SAPI que se puede sobrescribir. Los IDs
@@ -2861,8 +2892,10 @@ func (w *WebDAVFileWriter) Close() error {
 	// de modo que la subida y la actualización de caché no se crucen con ellos.
 	w.ensurePathLock()
 
-	// Emular archivos de 0 bytes (o en carpetas virtuales heredadas) en SQLite y memoria sin subir a Telefónica SAPI
-	if w.size == 0 || w.parentFolderID < 0 {
+	// Se emulan en SQLite y memoria, sin subir a la nube: los archivos en carpetas
+	// virtuales heredadas, los vacíos de bloqueo y control (viven segundos) y, si no se
+	// suben los vacíos de verdad (realEmptyFiles), todos los de 0 bytes.
+	if w.parentFolderID < 0 || (w.size == 0 && (isControlOrLockFile(w.path) || !w.mfs.realEmptyFiles())) {
 		w.cleanupTemp()
 		now := time.Now()
 		modTime := now
@@ -2973,7 +3006,10 @@ func (w *WebDAVFileWriter) Close() error {
 			_, _ = w.tmpFile.Seek(0, io.SeekStart)
 			reader = w.tmpFile
 		} else {
-			bufBytes := w.buf.Bytes()
+			var bufBytes []byte
+			if w.buf != nil {
+				bufBytes = w.buf.Bytes() // nil: archivo de 0 bytes sin ninguna escritura
+			}
 			reader = bytes.NewReader(bufBytes)
 			if w.size <= 256*1024 {
 				cachedContent = bufBytes
