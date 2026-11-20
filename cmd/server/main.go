@@ -195,9 +195,21 @@ func main() {
 		fs.SetSyncInterval(syncInterval)
 	}
 
+	// El perfil desktop renueva la sesión al arrancar (OfficialStartup). La sincronización
+	// inicial espera a que termine: si no, tras un rato apagado sale con la sesión guardada,
+	// ya caducada, a la vez que la renovación, y se lleva un 401 (20/11/2026).
+	startupDone := make(chan struct{})
+	if !client.OfficialHeartbeatEnabled() {
+		close(startupDone)
+	}
+
 	// 2. Sincronización inicial de metadatos en segundo plano si hay credenciales activas
 	if metaStore != nil && !client.IsSessionExpired() && (client.WebMode() || cfg.RefreshToken != "" || cfg.DeviceID != "" || cfg.JSessionID != "") {
 		go func() {
+			select {
+			case <-startupDone:
+			case <-time.After(startupSyncWait):
+			}
 			logger.Log("[Metadata] 🔄 Iniciando sincronización de metadatos en segundo plano...")
 			if _, syncErr := metaStore.SyncChanges(client, false); syncErr != nil {
 				logger.Log("[Metadata] ⚠️ Error en sincronización inicial de metadatos: %v", syncErr)
@@ -218,6 +230,7 @@ func main() {
 		// Perfil desktop: arranque y latido como el cliente oficial de Windows.
 		go func() {
 			client.OfficialStartup()
+			close(startupDone)
 			runOfficialHeartbeat(ctx, client, webdavServer.IsRunning)
 		}()
 	} else {
@@ -448,6 +461,10 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 	}
 }
 
+// startupSyncWait: lo más que espera la sincronización inicial a que termine el
+// arranque como el cliente oficial (que normalmente tarda menos de un segundo).
+const startupSyncWait = 30 * time.Second
+
 func runDeltaSync(ctx context.Context, client *sapi.Client, isRunning func() bool, getMetaStore func() *cache.MetadataStore, getFS func() *webdav.MovistarFS, interval time.Duration) {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -490,6 +507,9 @@ func runDeltaSync(ctx context.Context, client *sapi.Client, isRunning func() boo
 						if getFS != nil {
 							if fs := getFS(); fs != nil {
 								fs.RecordSyncTime(time.Now())
+								// Si la sincronización del arranque falló, los vacíos no se
+								// cargaron (BootstrapLoad necesita los metadatos): se hace ahora.
+								fs.BootstrapEmptyFilesIfPending()
 								if changed > 0 {
 									fs.InvalidateCache(0)
 								}
