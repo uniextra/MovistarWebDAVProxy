@@ -7,18 +7,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Transferencias en curso del proxy, para el panel: subidas a la nube y descargas
 // (GET) servidas a los clientes. Las descargas de un mismo archivo se agrupan (un
-// cliente puede leerlo por rangos) y, al terminar, siguen visibles un rato marcadas
-// como inactivas: el cliente suele tener lo leído en su búfer.
+// cliente puede leerlo por rangos). Solo se muestra lo que se está pidiendo: al
+// terminar la petición, o si lleva 30 s sin mover datos, deja de verse.
 
 // TransferInfo es una transferencia tal como la muestra el panel.
 type TransferInfo struct {
 	Kind        string  `json:"kind"` // upload | download
 	Path        string  `json:"path"`
+	Display     string  `json:"display,omitempty"` // nombre legible (descifrado) si se conoce
 	Size        int64   `json:"size"`
 	Bytes       int64   `json:"bytes"` // subidas: enviados; descargas: posición alcanzada en el archivo
 	Percentage  int     `json:"percentage"`
@@ -54,6 +56,28 @@ type TransferTracker struct {
 // NewTransferTracker crea un registro; las descargas terminadas se muestran keep más.
 func NewTransferTracker(keep time.Duration) *TransferTracker {
 	return &TransferTracker{items: map[string]*transfer{}, keep: keep, now: time.Now}
+}
+
+// displayName convierte una ruta en su nombre legible (p. ej. descifrando rclone
+// crypt). Vacío si no se sabe.
+var displayName atomic.Value // func(string) string
+
+// SetDisplayName fija cómo mostrar las rutas en el panel.
+func SetDisplayName(f func(string) string) { displayName.Store(f) }
+
+func display(p string) string {
+	if f, ok := displayName.Load().(func(string) string); ok && f != nil {
+		return f(p)
+	}
+	return ""
+}
+
+// logName es la ruta para los registros: descifrada si se puede, si no tal cual.
+func logName(p string) string {
+	if d := display("/" + strings.TrimLeft(p, "/")); d != "" {
+		return d
+	}
+	return p
 }
 
 // Transfers registra las transferencias de este proceso.
@@ -122,7 +146,7 @@ func (h *TransferHandle) Reset() {
 	h.t.mu.Unlock()
 }
 
-// Done cierra la petición. Las subidas desaparecen; las descargas quedan inactivas.
+// Done cierra la petición; sin peticiones en curso, la transferencia desaparece.
 func (h *TransferHandle) Done() {
 	if h == nil {
 		return
@@ -135,12 +159,12 @@ func (h *TransferHandle) Done() {
 	}
 	tr.active--
 	tr.lastActive = h.t.now()
-	if tr.active <= 0 && tr.kind == "upload" {
+	if tr.active <= 0 {
 		delete(h.t.items, h.key)
 	}
 }
 
-// Snapshot devuelve las transferencias activas y las descargas recientes.
+// Snapshot devuelve las transferencias que están moviendo datos.
 func (t *TransferTracker) Snapshot() []TransferInfo {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -148,11 +172,16 @@ func (t *TransferTracker) Snapshot() []TransferInfo {
 	out := []TransferInfo{}
 	for key, tr := range t.items {
 		idleFor := now.Sub(tr.lastActive)
-		if tr.active <= 0 && idleFor > t.keep {
+		if tr.active <= 0 {
 			delete(t.items, key)
 			continue
 		}
-		info := TransferInfo{Kind: tr.kind, Path: tr.path, Size: tr.size, Bytes: tr.position}
+		// Una descarga abierta que no se está leyendo (el cliente tira de su búfer)
+		// no es una transferencia en curso.
+		if tr.kind == "download" && idleFor >= 30*time.Second {
+			continue
+		}
+		info := TransferInfo{Kind: tr.kind, Path: tr.path, Display: display(tr.path), Size: tr.size, Bytes: tr.position}
 		if tr.size > 0 {
 			info.Percentage = int(tr.position * 100 / tr.size)
 			if info.Percentage > 100 {
@@ -175,9 +204,6 @@ func (t *TransferTracker) Snapshot() []TransferInfo {
 		if tr.kind == "upload" && info.Speed > 0 && tr.size > tr.position {
 			eta := int64(float64(tr.size-tr.position) / info.Speed)
 			info.ETA = &eta
-		}
-		if tr.active <= 0 || idleFor >= 30*time.Second {
-			info.Idle, info.IdleSeconds = true, int64(idleFor.Seconds())
 		}
 		out = append(out, info)
 	}
@@ -202,6 +228,7 @@ type countingReader struct {
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.h.Add(int64(n))
+	uploadBandwidth.wait(n) // límite común a todas las subidas
 	return n, err
 }
 
@@ -220,9 +247,82 @@ func (c *countingReadSeeker) Seek(offset int64, whence int) (int64, error) {
 	return pos, err
 }
 
+// Rutas en bruto cuyas subidas ya muestra la pasarela del WebDAV público (con su
+// nombre en claro y su tamaño real): sus trozos cifrados no se listan aparte.
+var coveredUploads struct {
+	sync.Mutex
+	m map[string]int
+}
+
+// CoverUploads oculta en el panel las subidas en bruto que empiecen por prefix
+// hasta llamar a la función devuelta.
+func CoverUploads(prefix string) func() {
+	prefix = "/" + strings.Trim(prefix, "/")
+	coveredUploads.Lock()
+	if coveredUploads.m == nil {
+		coveredUploads.m = map[string]int{}
+	}
+	coveredUploads.m[prefix]++
+	coveredUploads.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			coveredUploads.Lock()
+			if coveredUploads.m[prefix]--; coveredUploads.m[prefix] <= 0 {
+				delete(coveredUploads.m, prefix)
+			}
+			coveredUploads.Unlock()
+		})
+	}
+}
+
+func uploadCovered(p string) bool {
+	p = "/" + strings.Trim(p, "/")
+	coveredUploads.Lock()
+	defer coveredUploads.Unlock()
+	for prefix := range coveredUploads.m {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// startUploadMark registra una subida o una espera en cola, salvo que ya la muestre
+// la pasarela (nil: los métodos de TransferHandle no hacen nada).
+func startUploadMark(kind, path string, size int64) *TransferHandle {
+	if uploadCovered(path) {
+		return nil
+	}
+	return Transfers.Start(kind, path, size, 0)
+}
+
+// publicUploadBody cuenta lo que llega del cliente en una subida por la pasarela.
+type publicUploadBody struct {
+	io.ReadCloser
+	h *TransferHandle
+}
+
+func (b *publicUploadBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.h.Add(int64(n))
+	return n, err
+}
+
+// TrackPublicUpload muestra en el panel una subida que llega por la pasarela del
+// WebDAV público desde el primer momento, con su ruta en claro y su tamaño, y cuenta
+// lo recibido del cliente. Llamar a la función devuelta al terminar.
+func TrackPublicUpload(path string, size int64, body io.ReadCloser) (io.ReadCloser, func()) {
+	h := Transfers.Start("upload", path, size, 0)
+	if body == nil {
+		return body, h.Done
+	}
+	return &publicUploadBody{ReadCloser: body, h: h}, h.Done
+}
+
 // trackUpload envuelve el cuerpo de una subida a la nube para contar su avance.
 func trackUpload(path string, size int64, r io.Reader) (io.Reader, *TransferHandle) {
-	h := Transfers.Start("upload", path, size, 0)
+	h := startUploadMark("upload", path, size)
 	if rs, ok := r.(io.ReadSeeker); ok {
 		return &countingReadSeeker{countingReader: countingReader{r: rs, h: h}, s: rs}, h
 	}
@@ -256,7 +356,11 @@ func (t *transferWriter) WriteHeader(code int) {
 			} else if cl := t.Header().Get("Content-Length"); cl != "" {
 				size, _ = strconv.ParseInt(cl, 10, 64)
 			}
-			t.h = Transfers.Start("download", t.path, size, offset)
+			// Si la lectura llega por la pasarela, ya la muestra ella (archivo en claro
+			// y entero); sus trozos cifrados no se listan aparte.
+			if !uploadCovered(t.path) {
+				t.h = Transfers.Start("download", t.path, size, offset)
+			}
 		}
 	}
 	t.ResponseWriter.WriteHeader(code)
@@ -278,3 +382,11 @@ func (t *transferWriter) Flush() {
 }
 
 func (t *transferWriter) done() { t.h.Done() }
+
+// TrackPublicDownload muestra en el panel una lectura que llega por la pasarela del
+// WebDAV público, con su ruta en claro y el tamaño y la posición que dé la
+// respuesta (Content-Range o Content-Length). Llamar a la función devuelta al terminar.
+func TrackPublicDownload(w http.ResponseWriter, path string) (http.ResponseWriter, func()) {
+	tw := &transferWriter{ResponseWriter: w, path: path}
+	return tw, tw.done
+}

@@ -280,8 +280,11 @@ type Client struct {
 	// web, si no es nil, sustituye la autenticación del cliente de escritorio por
 	// la sesión de la web (ver EnableWebSession).
 	web WebSession
-	// freshURLs guarda, por ID, la última URL de descarga renovada en modo web.
+	// freshURLs guarda, por ID, la última URL de descarga pedida (freshURL).
 	freshURLs sync.Map
+	// urlLookupFailed guarda, por ID, cuándo falló la última consulta (no se repite
+	// antes de descargar durante un minuto: se usa la URL conocida).
+	urlLookupFailed sync.Map
 
 	sapiSem        chan struct{}
 	pacingMu       sync.Mutex
@@ -528,7 +531,30 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	if strings.HasSuffix(parsed.Path, "/system/information") && auth.IsDesktopProfile() {
 		return rawURL
 	}
+	// Una URL que ya trae validationkey (p. ej. la URL firmada de descarga de un
+	// archivo) se envía tal cual: cambiar la clave o reordenar la query invalida la
+	// firma y la descarga responde 403.
+	if parsed.Query().Has("validationkey") {
+		return rawURL
+	}
+	if parsed.RawQuery == "" {
+		parsed.RawQuery = "validationkey=" + url.QueryEscape(vk)
+	} else {
+		parsed.RawQuery += "&validationkey=" + url.QueryEscape(vk)
+	}
+	return parsed.String()
+}
 
+// replaceValidationKey pone la validationkey actual en una URL de la API que ya la
+// llevaba (reintento tras renovar la sesión).
+func (c *Client) replaceValidationKey(rawURL string) string {
+	c.mu.RLock()
+	vk := c.cfg.ValidationKey
+	c.mu.RUnlock()
+	parsed, err := url.Parse(rawURL)
+	if vk == "" || err != nil {
+		return rawURL
+	}
 	q := parsed.Query()
 	q.Set("validationkey", vk)
 	parsed.RawQuery = q.Encode()
@@ -1258,7 +1284,7 @@ func (c *Client) retryRequestWithCurrentConfig(req *http.Request) (*http.Respons
 	if cfg.JSessionID != "" || cfg.ValidationKey != "" {
 		newReq.Header.Set("Cookie", sessionCookieHeader(cfg.JSessionID, cfg.ValidationKey))
 	}
-	newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
+	newReq.URL, _ = url.Parse(c.replaceValidationKey(newReq.URL.String()))
 	resp, err := c.httpClient.Do(newReq)
 	if err != nil {
 		return nil, err
@@ -1590,6 +1616,10 @@ func (c *Client) ListAllMediaInFolder(folderID int64) ([]MediaItem, error) {
 		}
 		for i := range res.Data.Media {
 			res.Data.Media[i].FolderID = folderID
+			// La URL del listado está recién firmada: sirve para descargar sin pedirla otra vez.
+			if res.Data.Media[i].ID != "" && res.Data.Media[i].URL != "" {
+				c.storeFreshURL(res.Data.Media[i].ID, res.Data.Media[i].URL)
+			}
 		}
 		allFiles = append(allFiles, res.Data.Media...)
 		if len(res.Data.Media) < limit {
@@ -1605,10 +1635,53 @@ func (c *Client) ListAllMediaInFolder(folderID int64) ([]MediaItem, error) {
 // descarga. Devuelve (nil, nil) si SAPI responde correctamente pero todavía no lo
 // conoce (p. ej. justo después de subirlo, mientras se indexa).
 func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
+	items, err := c.getMediaByIDs([]string{mediaID})
+	if err != nil {
+		c.urlLookupFailed.Store(mediaID, time.Now())
+		return nil, err
+	}
+	c.urlLookupFailed.Delete(mediaID)
+	for i := range items {
+		if items[i].ID == mediaID {
+			// Toda consulta por ID trae una URL de descarga recién firmada.
+			if items[i].URL != "" {
+				c.storeFreshURL(mediaID, items[i].URL)
+			}
+			return &items[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// RenewDownloadURLs pide las URL de descarga de varios archivos de una vez (de 50
+// en 50, como la web) y las recuerda como recién pedidas.
+func (c *Client) RenewDownloadURLs(ids []string) error {
+	for len(ids) > 0 {
+		n := len(ids)
+		if n > 50 {
+			n = 50
+		}
+		items, err := c.getMediaByIDs(ids[:n])
+		if err != nil {
+			return err
+		}
+		for _, it := range items {
+			if it.ID != "" && it.URL != "" {
+				c.storeFreshURL(it.ID, it.URL)
+			}
+		}
+		ids = ids[n:]
+	}
+	return nil
+}
+
+// getMediaByIDs consulta varios archivos en una sola llamada (la web pide así las
+// URL de descarga).
+func (c *Client) getMediaByIDs(ids []string) ([]MediaItem, error) {
 	u := fmt.Sprintf("%s/media?action=get&origin=omh,dropbox", c.baseURL)
 	payload := map[string]interface{}{
 		"data": map[string]interface{}{
-			"ids":    []string{mediaID},
+			"ids":    ids,
 			"fields": []string{"name", "size", "url", "etag", "folderid", "modificationdate"},
 		},
 	}
@@ -1627,7 +1700,7 @@ func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("get media failed (HTTP %d, id=%s): %s", resp.StatusCode, mediaID, string(b))
+		return nil, fmt.Errorf("get media failed (HTTP %d, ids=%v): %s", resp.StatusCode, ids, string(b))
 	}
 
 	var res struct {
@@ -1636,18 +1709,13 @@ func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
 		} `json:"data"`
 		Error interface{} `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&res); err != nil {
-		return nil, fmt.Errorf("decode get media error (id=%s): %w", mediaID, err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&res); err != nil {
+		return nil, fmt.Errorf("decode get media error (ids=%v): %w", ids, err)
 	}
 	if res.Error != nil {
-		return nil, fmt.Errorf("API error in get media (id=%s): %v", mediaID, res.Error)
+		return nil, fmt.Errorf("API error in get media (ids=%v): %v", ids, res.Error)
 	}
-	for i := range res.Data.Media {
-		if res.Data.Media[i].ID == mediaID {
-			return &res.Data.Media[i], nil
-		}
-	}
-	return nil, nil
+	return res.Data.Media, nil
 }
 
 func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) {
@@ -2396,58 +2464,47 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			_, _ = seeker.Seek(0, io.SeekStart)
 		}
 
-		pr, pw := io.Pipe()
-		mpw := multipart.NewWriter(pw)
-
-		go func() {
-			var writeErr error
-			defer func() {
-				if writeErr != nil {
-					_ = pw.CloseWithError(writeErr)
-				} else {
-					_ = mpw.Close()
-					_ = pw.Close()
-				}
-			}()
-
-			// 1. Part: data
-			partData, err := mpw.CreateFormField("data")
-			if err != nil {
-				writeErr = err
-				return
-			}
-			if _, err := partData.Write(metaBytes); err != nil {
-				writeErr = err
-				return
-			}
-
-			// 2. Part: file
-			partFile, err := mpw.CreateFormFile("file", toCloudName(fileName))
-			if err != nil {
-				writeErr = err
-				return
-			}
-			if _, err := io.Copy(partFile, reader); err != nil {
-				writeErr = err
-				return
-			}
-		}()
-
-		req, err := http.NewRequest("POST", uploadEndpoint, pr)
+		// Siempre en flujo «chunked», sin Content-Length: así Movistar rechaza al
+		// instante (MED-1048) lo que pasa del tamaño que permite a la cuenta. Con
+		// Content-Length lee el principio y se queda callado (subida colgada; medido
+		// el 19/11/2026), y no hay forma de detectar el límite.
+		body, length, ctype, closeBody := uploadBody(metaBytes, toCloudName(fileName), reader, -1)
+		// Si Movistar deja de leer la subida (se queda callado), se corta a los
+		// uploadStallTimeout y cuenta como rechazo por tamaño.
+		ctx, cancel := context.WithCancel(context.Background())
+		watched := newStallReader(body, uploadStallTimeout, cancel)
+		req, err := http.NewRequestWithContext(ctx, "POST", uploadEndpoint, watched)
 		if err != nil {
-			_ = pr.Close()
+			watched.stop()
+			cancel()
+			closeBody()
 			return nil, err
 		}
-		req.Header.Set("Content-Type", mpw.FormDataContentType())
+		if length >= 0 {
+			req.ContentLength = length
+		}
+		req.Header.Set("Content-Type", ctype)
 
 		resp, err := c.DoRequest(req)
-		_ = pr.Close()
+		stalled := watched.stop()
+		closeBody()
+		if stalled {
+			cancel()
+			logger.Log("[SAPI] ⚠️ Movistar dejó de leer la subida de '%s' (%.2f MB) durante %s: se corta (el cliente la reintenta).", fileName, float64(size)/(1024*1024), uploadStallTimeout)
+			noteUploadStall(size, time.Now())
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, fmt.Errorf("upload stalled: Movistar dejó de leer durante %s", uploadStallTimeout)
+		}
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
+		cancel()
 		bStr := string(b)
 
 		// MED-1017 check: Media is being validated asynchronously (~4-10s)
@@ -2555,6 +2612,11 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
+		if res.Error != nil && res.Error.Code == "MED-1048" && UploadRejected != nil {
+			// Movistar lo usa también para rechazar subidas por encima del tamaño que
+			// permite a la cuenta (p. ej. 100 MiB tras mucho volumen).
+			UploadRejected(size)
+		}
 		if res.Error != nil && (res.Error.Code == "MED-1048" || res.Error.Code == "PAPI-0000") {
 			if attempt < maxRetries && canRetry {
 				c.httpClient.CloseIdleConnections()
@@ -2591,6 +2653,9 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			_ = c.UpdateMedia(finalID, cloudName, fileName, folderID)
 		}
 
+		if UploadAccepted != nil {
+			UploadAccepted(size)
+		}
 		return &MediaItem{
 			ID:               finalID,
 			Name:             fileName,
@@ -2613,11 +2678,18 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 	if item.ID == "" || strings.HasPrefix(item.ID, "virtual:") {
 		return c.downloadRange(item, offset)
 	}
-	// Las URL de descarga van firmadas y caducan (tanto en modo normal como en modo web).
-	// Se usa la última URL renovada de ese archivo y, si la descarga falla, se pide una
-	// URL nueva por ID y se reintenta una vez (salvo si el WAF ya está en pausa).
-	if u, ok := c.freshURLs.Load(item.ID); ok {
-		item.URL = u.(string)
+	// Las URL de descarga van firmadas y caducan, y las del listado (guardadas en la
+	// base local) pueden tener horas. Como la web (getDownloadItemURL → getMediaById),
+	// antes de descargar se pide la URL de ese archivo; se reutiliza solo para las
+	// lecturas por rangos que sigan (DOWNLOAD_URL_MAX_AGE). Si aun así falla, se pide
+	// otra y se reintenta una vez (salvo si el WAF ya está en pausa).
+	listed := item.URL // la del listado, por si la recién pedida no sirve
+	if u, ok := c.FreshDownloadURL(item.ID); ok {
+		item.URL = u
+	} else if !c.urlLookupFailedRecently(item.ID) {
+		if fresh, ferr := c.GetMediaByID(item.ID); ferr == nil && fresh != nil && fresh.URL != "" {
+			item.URL = fresh.URL
+		}
 	}
 	rc, err := c.downloadRange(item, offset)
 	if err == nil {
@@ -2628,13 +2700,57 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 	}
 	fresh, ferr := c.GetMediaByID(item.ID)
 	if ferr != nil || fresh == nil || fresh.URL == "" || fresh.URL == item.URL {
+		if listed != "" && listed != item.URL {
+			logger.Log("[SAPI] 🔄 Descarga de '%s' (byte %d) fallida con la URL pedida (%v); se prueba la del listado.", item.Name, offset, err)
+			item.URL = listed
+			if rc, lerr := c.downloadRange(item, offset); lerr == nil {
+				return rc, nil
+			}
+		}
 		logger.Log("[SAPI] ⚠️ Descarga de '%s' (byte %d) fallida: %v; sin URL nueva disponible.", item.Name, offset, err)
 		return nil, err
 	}
 	logger.Log("[SAPI] 🔄 Descarga de '%s' (byte %d) fallida (%v); reintentando con URL de descarga renovada.", item.Name, offset, err)
-	c.freshURLs.Store(item.ID, fresh.URL)
+	c.storeFreshURL(item.ID, fresh.URL)
 	item.URL = fresh.URL
 	return c.downloadRange(item, offset)
+}
+
+// freshURL es una URL de descarga y cuándo se pidió.
+type freshURL struct {
+	url string
+	at  time.Time
+}
+
+// freshURLMaxAge es cuánto se reutiliza una URL de descarga pedida
+// (DOWNLOAD_URL_MAX_AGE, por defecto 1h): duran unas horas.
+func freshURLMaxAge() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("DOWNLOAD_URL_MAX_AGE"))); err == nil && d > 0 {
+		return d
+	}
+	return time.Hour
+}
+
+func (c *Client) urlLookupFailedRecently(id string) bool {
+	v, ok := c.urlLookupFailed.Load(id)
+	return ok && time.Since(v.(time.Time)) < time.Minute
+}
+
+func (c *Client) storeFreshURL(id, u string) {
+	c.freshURLs.Store(id, freshURL{url: u, at: time.Now()})
+}
+
+// FreshDownloadURL devuelve la URL de descarga de id si se pidió hace poco.
+func (c *Client) FreshDownloadURL(id string) (string, bool) {
+	v, ok := c.freshURLs.Load(id)
+	if !ok {
+		return "", false
+	}
+	f := v.(freshURL)
+	if time.Since(f.at) > freshURLMaxAge() {
+		return "", false
+	}
+	return f.url, true
 }
 
 func (c *Client) downloadRange(item MediaItem, offset int64) (io.ReadCloser, error) {
@@ -2768,4 +2884,169 @@ func isDefiniteBinaryFile(name string) bool {
 	default:
 		return false
 	}
+}
+
+// MediaDiagnostics devuelve, sin interpretar, lo que SAPI dice de un archivo (la
+// consulta por ID de la web con todos los campos útiles) y su estado de validación.
+// Solo lectura, para diagnosticar archivos sin URL de descarga.
+func (c *Client) MediaDiagnostics(mediaID string) (map[string]interface{}, error) {
+	out := map[string]interface{}{"id": mediaID}
+	u := fmt.Sprintf("%s/media?action=get&origin=omh,dropbox", c.baseURL)
+	payload, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{
+		"ids":    []string{mediaID},
+		"fields": []string{"name", "size", "url", "viewurl", "etag", "folderid", "creationdate", "modificationdate", "status", "mediatype", "contenttype", "videometadata", "thumbnails", "origin", "exported", "shared"},
+	}})
+	req, err := http.NewRequest("POST", u, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	resp, err := c.DoRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	out["get_http"] = resp.StatusCode
+	var raw interface{}
+	if json.Unmarshal(b, &raw) == nil {
+		out["get"] = raw
+	} else {
+		out["get"] = string(b)
+	}
+	if st, err := c.MediaValidationStatus(mediaID); err != nil {
+		out["validation_error"] = err.Error()
+	} else {
+		out["validation_status"] = st
+	}
+	return out, nil
+}
+
+// UploadRejected y UploadAccepted, si se fijan, reciben el tamaño de cada subida
+// rechazada con MED-1048 o aceptada (ajuste automático del tamaño de trozo).
+var (
+	UploadRejected func(size int64)
+	UploadAccepted func(size int64)
+)
+
+// uploadBody arma el formulario de una subida (campo «data» con los metadatos y el
+// archivo). Con size >= 0 devuelve su longitud exacta para enviarla con
+// Content-Length (cabeceras + archivo + cierre, con el archivo en flujo detrás); con
+// size < 0 lo genera sobre una tubería (longitud -1, «chunked»). UploadFileToFolder
+// usa siempre «chunked» (ver allí por qué).
+func uploadBody(metaBytes []byte, fileName string, reader io.Reader, size int64) (io.Reader, int64, string, func()) {
+	if size >= 0 {
+		var head bytes.Buffer
+		mpw := multipart.NewWriter(&head)
+		if pd, err := mpw.CreateFormField("data"); err == nil {
+			_, _ = pd.Write(metaBytes)
+		}
+		_, _ = mpw.CreateFormFile("file", fileName)
+		headBytes := append([]byte(nil), head.Bytes()...)
+		head.Reset()
+		_ = mpw.Close() // escribe solo el cierre: «\r\n--límite--\r\n»
+		tail := append([]byte(nil), head.Bytes()...)
+		length := int64(len(headBytes)) + size + int64(len(tail))
+		body := io.MultiReader(bytes.NewReader(headBytes), io.LimitReader(reader, size), bytes.NewReader(tail))
+		return body, length, mpw.FormDataContentType(), func() {}
+	}
+	pr, pw := io.Pipe()
+	mpw := multipart.NewWriter(pw)
+	go func() {
+		var writeErr error
+		defer func() {
+			if writeErr != nil {
+				_ = pw.CloseWithError(writeErr)
+			} else {
+				_ = mpw.Close()
+				_ = pw.Close()
+			}
+		}()
+		partData, err := mpw.CreateFormField("data")
+		if err != nil {
+			writeErr = err
+			return
+		}
+		if _, err := partData.Write(metaBytes); err != nil {
+			writeErr = err
+			return
+		}
+		partFile, err := mpw.CreateFormFile("file", fileName)
+		if err != nil {
+			writeErr = err
+			return
+		}
+		if _, err := io.Copy(partFile, reader); err != nil {
+			writeErr = err
+			return
+		}
+	}()
+	return pr, -1, mpw.FormDataContentType(), func() { _ = pr.Close() }
+}
+
+// uploadStallTimeout es cuánto puede pasar Movistar sin leer una subida antes de
+// cortarla (con datos listos para enviar: si es el cliente el que no manda, no cuenta).
+var uploadStallTimeout = 60 * time.Second
+
+// stallReader vigila que quien lee el cuerpo (la conexión con Movistar) siga
+// leyendo. Si pasa timeout sin pedir más datos y no hay ninguna lectura esperando al
+// origen, llama a onStall (cancela la petición).
+type stallReader struct {
+	r       io.Reader
+	mu      sync.Mutex
+	last    time.Time
+	reading bool
+	ended   bool // cuerpo enviado entero: lo que tarde la respuesta no cuenta
+	stalled bool
+	done    chan struct{}
+	once    sync.Once
+}
+
+func newStallReader(r io.Reader, timeout time.Duration, onStall func()) *stallReader {
+	s := &stallReader{r: r, last: time.Now(), done: make(chan struct{})}
+	go func() {
+		t := time.NewTicker(timeout / 6)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.done:
+				return
+			case <-t.C:
+				s.mu.Lock()
+				idle := !s.reading && !s.ended && time.Since(s.last) > timeout
+				if idle {
+					s.stalled = true
+				}
+				s.mu.Unlock()
+				if idle {
+					onStall()
+					return
+				}
+			}
+		}
+	}()
+	return s
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	s.reading = true
+	s.mu.Unlock()
+	n, err := s.r.Read(p)
+	s.mu.Lock()
+	s.reading = false
+	s.last = time.Now()
+	if err != nil {
+		s.ended = true
+	}
+	s.mu.Unlock()
+	return n, err
+}
+
+// stop termina la vigilancia y dice si la subida se cortó por quedarse parada.
+func (s *stallReader) stop() bool {
+	s.once.Do(func() { close(s.done) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stalled
 }

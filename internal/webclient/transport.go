@@ -28,6 +28,13 @@ func (t *Transport) base() http.RoundTripper {
 	return http.DefaultTransport
 }
 
+// CloseIdleConnections cierra las conexiones abiertas del transporte directo.
+func (t *Transport) CloseIdleConnections() {
+	if c, ok := t.base().(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
+
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	portal, _ := url.Parse(PortalURL)
 	switch {

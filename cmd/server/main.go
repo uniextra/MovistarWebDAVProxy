@@ -61,6 +61,8 @@ func main() {
 	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
 		notifier.Default.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
 	}
+	// La configuración propia del proxy (modo web, guardada desde el panel) manda.
+	notifier.LoadStored()
 
 	if config.WebSessionEnabled() {
 		// El modo de autenticación se anuncia al iniciar la sesión web.
@@ -73,12 +75,12 @@ func main() {
 	} else {
 		logger.Log("[!] ⚠️ No se encontraron credenciales. Abre el panel web para vincular.")
 		_ = notifier.Alert(
-			"",	// se mandará siempre, sino poner faltan_credenciales para recibir 1 a la hora
+			"", // se mandará siempre, sino poner faltan_credenciales para recibir 1 a la hora
 			"", "Sin credenciales configuradas, cuenta no vinculada",
 			"El Proxy WebDAV ha arrancado pero no hay ninguna cuenta vinculada. Accede al panel web para vincular tu cuenta de Movistar/O2 Cloud y activar el acceso.",
 			"Arranque sin sesión activa, en espera de vinculación",
 		)
-		
+
 		// PDTE No debería iniciarse servicios para evitar bloqueos, aborar arranque os.Exit(1) ????  o bien luego aplicar SetRunning(false) para pararlo??
 	}
 
@@ -101,7 +103,6 @@ func main() {
 			logger.Log("[Auth] 🔧 DESKTOP_USER_AGENT usando valor por defecto: %s", desktopUA)
 		}
 	}
-
 
 	// log Huella TLS (uTLS)
 	client, err := sapi.NewClient(cfg)
@@ -175,6 +176,7 @@ func main() {
 
 	maxDown, maxUp := config.TransferLimits(client.WebMode())
 	webdav.SetTransferLimits(maxDown, maxUp)
+	webui.LoadUploadBandwidth()
 	if client.WebMode() && strings.TrimSpace(os.Getenv("SAPI_MAX_CONCURRENT")) == "" {
 		// En modo web las llamadas a la API ya las limita el navegador; aquí solo hay
 		// que dejar sitio a cada transferencia para que una subida no frene las lecturas.
@@ -258,14 +260,33 @@ func main() {
 		}
 	}()
 
-	
 	// 3. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
+	go watchHealth(ctx, webSess)
+	watchUploadSizeLimit()
+	// Contenido de los archivos diminutos (fichas del chunker...), una vez y en segundo
+	// plano cuando la base local esté sincronizada.
+	go func() {
+		for ctx.Err() == nil {
+			if fs := webdavServer.FS(); fs != nil {
+				if ms := fs.MetadataStore(); ms != nil && ms.HasInitialSync() {
+					fs.PrefillTinyContent(ctx)
+					return
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+		}
+	}()
 	go uiServer.UpdateChecker().Start(ctx, time.Hour)
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))
+		uiServer.SetWebRelogin(webSess.ReloginView().Handler("/web-relogin/"))
 		acct := &accountState{}
 		go runWebHousekeeping(ctx, client, webSess.LoggedIn, acct)
 		uiServer.SetWebSessionStatus(func() map[string]interface{} { return acct.status(webSess.Status()) })

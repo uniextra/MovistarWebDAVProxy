@@ -9,8 +9,8 @@ import (
 
 func TestDecoupledConcurrencyLimits(t *testing.T) {
 	// 1. Verificar capacidades de semáforos alineados a 1 (estricta serie como cliente oficial)
-	if cap(uploadSem) != 1 {
-		t.Fatalf("expected uploadSem cap 1, got %d", cap(uploadSem))
+	if uploads.capacityNow() != 1 {
+		t.Fatalf("expected upload gate capacity 1, got %d", uploads.capacityNow())
 	}
 	if cap(downloadSem) != 1 {
 		t.Fatalf("expected downloadSem cap 1, got %d", cap(downloadSem))

@@ -44,3 +44,25 @@ func TestRenewBefore(t *testing.T) {
 		t.Errorf("valor inválido: %v, esperado 1h", d)
 	}
 }
+
+// Si la sesión deja de valer antes de su caducidad (Movistar la invalida en el
+// servidor), se renueva con la PLC en el acto, sin esperar a la caducidad.
+func TestRenewDue_EarlyInvalidation(t *testing.T) {
+	now := time.Date(2026, 11, 16, 8, 15, 0, 0, time.UTC)
+	exp := now.Add(23 * time.Hour) // la cookie aún «vale» casi un día
+	if renewDue(now, exp, time.Time{}, true, true, time.Hour) {
+		t.Error("con sesión válida y lejos de caducar no toca renovar")
+	}
+	if !renewDue(now, exp, time.Time{}, true, false, time.Hour) {
+		t.Error("sin sesión (401) y con PLC debe renovar ya")
+	}
+	if renewDue(now, exp, time.Time{}, false, false, time.Hour) {
+		t.Error("sin PLC no se puede renovar")
+	}
+	if renewDue(now, exp, now.Add(-2*time.Minute), true, false, time.Hour) {
+		t.Error("tras un intento reciente hay que esperar")
+	}
+	if !renewDue(now, time.Time{}, time.Time{}, true, false, time.Hour) {
+		t.Error("sin cookie de sesión y con PLC debe renovar")
+	}
+}

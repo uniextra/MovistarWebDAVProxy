@@ -205,6 +205,14 @@ func (s *MetadataStore) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_virtual_empty_folder ON virtual_empty_files (folder_id);
+
+	-- Contenido de archivos diminutos (p. ej. las fichas de 54 B del chunker de
+	-- rclone), por ID y etag: listar en frío no tiene que descargarlos uno a uno.
+	CREATE TABLE IF NOT EXISTS tiny_content (
+		id TEXT PRIMARY KEY,
+		etag TEXT NOT NULL,
+		content BLOB NOT NULL
+	);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -898,6 +906,11 @@ func (s *MetadataStore) UpsertMediaBatch(items []sapi.MediaItem) error {
 		); err != nil {
 			return fmt.Errorf("exec upsert media %s: %w", item.ID, err)
 		}
+		// Contenido diminuto guardado de otra versión (o de una subida, que llega sin
+		// etag): ya no vale.
+		if _, err := tx.Exec("DELETE FROM tiny_content WHERE id = ? AND (? = '' OR etag != ?)", item.ID, item.ETag, item.ETag); err != nil {
+			return fmt.Errorf("invalidate tiny content %s: %w", item.ID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -915,7 +928,37 @@ func (s *MetadataStore) DeleteMedia(id string) error {
 	defer s.writeMu.Unlock()
 
 	_, err := s.db.Exec("DELETE FROM media WHERE id = ?", id)
+	_, _ = s.db.Exec("DELETE FROM tiny_content WHERE id = ?", id)
 	return err
+}
+
+// TinyContentMax es el tamaño máximo de los archivos cuyo contenido se guarda.
+const TinyContentMax = 4096
+
+// GetTinyContent devuelve el contenido guardado de un archivo diminuto si sigue
+// siendo la misma versión (mismo etag y tamaño).
+func (s *MetadataStore) GetTinyContent(id, etag string, size int64) ([]byte, bool) {
+	if s == nil || s.db == nil || id == "" || etag == "" || size <= 0 || size > TinyContentMax {
+		return nil, false
+	}
+	var b []byte
+	if err := s.db.QueryRow("SELECT content FROM tiny_content WHERE id = ? AND etag = ?", id, etag).Scan(&b); err != nil {
+		return nil, false
+	}
+	if int64(len(b)) != size {
+		return nil, false
+	}
+	return b, true
+}
+
+// PutTinyContent guarda el contenido de un archivo diminuto ya leído entero.
+func (s *MetadataStore) PutTinyContent(id, etag string, content []byte) {
+	if s == nil || s.db == nil || id == "" || etag == "" || len(content) == 0 || len(content) > TinyContentMax {
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, _ = s.db.Exec("INSERT INTO tiny_content (id, etag, content) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET etag = excluded.etag, content = excluded.content", id, etag, content)
 }
 
 // DeleteMediaByFolderAndName deletes a media item by its folder ID and name (case-insensitive).
@@ -1444,4 +1487,37 @@ func (s *MetadataStore) filterMissing(ids []int64, table string) []int64 {
 		}
 	}
 	return out
+}
+
+// ListTinyMissing devuelve hasta limit archivos diminutos (1..TinyContentMax bytes,
+// con etag) cuyo contenido aún no está guardado.
+func (s *MetadataStore) ListTinyMissing(limit int) ([]sapi.MediaItem, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT m.id, m.name, m.size, m.url, m.etag, m.folder_id FROM media m
+		LEFT JOIN tiny_content t ON t.id = m.id AND t.etag = m.etag
+		WHERE m.size > 0 AND m.size <= ? AND m.etag != '' AND t.id IS NULL
+		LIMIT ?`, TinyContentMax, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []sapi.MediaItem
+	for rows.Next() {
+		var it sapi.MediaItem
+		if err := rows.Scan(&it.ID, &it.Name, &it.Size, &it.URL, &it.ETag, &it.FolderID); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// CountFolders devuelve cuántas carpetas de la cuenta conoce la caché (Movistar
+// limita el total; ver el comando /carpetas del bot).
+func (s *MetadataStore) CountFolders() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM folders").Scan(&n)
+	return n, err
 }
