@@ -1,6 +1,7 @@
 # Movistar / O2 Cloud WebDAV Proxy ☁️🔐
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
+[![Docker Pulls](https://img.shields.io/docker/pulls/uniextra/movistar-webdav-proxy?logo=docker&label=Docker%20Pulls)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/uniextra)
 [![Image Size](https://img.shields.io/badge/Image%20Size-~20%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![RAM Usage](https://img.shields.io/badge/RAM%20Usage-~6.5%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
