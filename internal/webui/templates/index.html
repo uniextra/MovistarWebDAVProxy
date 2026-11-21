@@ -268,13 +268,10 @@
             </div>
             
             <div class="p-6 space-y-5 text-sm">
-                <!-- Selector dentro de modal -->
+                <!-- Proveedor: el elegido en la tarjeta «Dispositivo & Cuenta» (no se elige otra vez aquí) -->
                 <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
-                    <span class="text-slate-700 font-semibold">Proveedor seleccionado:</span>
-                    <div class="flex space-x-2">
-                        <button type="button" onclick="setProvider('movistar'); refreshOAuthLink();" id="modal-prov-movistar" class="px-3 py-1 rounded-lg font-semibold border border-blue-500 bg-blue-50 text-blue-700 transition">Movistar</button>
-                        <button type="button" onclick="setProvider('o2'); refreshOAuthLink();" id="modal-prov-o2" class="px-3 py-1 rounded-lg font-semibold border border-slate-200 bg-white text-slate-600 transition">O2 Cloud</button>
-                    </div>
+                    <span class="text-slate-700 font-semibold">Proveedor:</span>
+                    <span id="modal-prov-name" class="px-3 py-1 rounded-lg font-semibold border border-blue-500 bg-blue-50 text-blue-700">Movistar Cloud</span>
                 </div>
 
                 <!-- Paso 1 -->
@@ -397,8 +394,7 @@
             const step2Desc = document.getElementById('step2-desc');
             const btnM = document.getElementById('prov-btn-movistar');
             const btnO = document.getElementById('prov-btn-o2');
-            const mBtnM = document.getElementById('modal-prov-movistar');
-            const mBtnO = document.getElementById('modal-prov-o2');
+            const mName = document.getElementById('modal-prov-name');
 
             if (currentProvider === 'o2') {
                 if (badge) {
@@ -413,8 +409,10 @@
                 }
                 if (btnO) btnO.className = 'py-2 px-3 rounded-xl border border-sky-500 bg-sky-50 text-sky-700 font-semibold text-xs flex items-center justify-center space-x-1.5 transition shadow-sm';
                 if (btnM) btnM.className = 'py-2 px-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 font-semibold text-xs flex items-center justify-center space-x-1.5 transition hover:bg-slate-100';
-                if (mBtnO) mBtnO.className = 'px-3 py-1 rounded-lg font-semibold border border-sky-500 bg-sky-50 text-sky-700 transition';
-                if (mBtnM) mBtnM.className = 'px-3 py-1 rounded-lg font-semibold border border-slate-200 bg-white text-slate-600 transition';
+                if (mName) {
+                    mName.textContent = 'O2 Cloud';
+                    mName.className = 'px-3 py-1 rounded-lg font-semibold border border-sky-500 bg-sky-50 text-sky-700';
+                }
             } else {
                 if (badge) {
                     badge.textContent = 'Movistar';
@@ -428,8 +426,10 @@
                 }
                 if (btnM) btnM.className = 'py-2 px-3 rounded-xl border border-blue-500 bg-blue-50 text-blue-700 font-semibold text-xs flex items-center justify-center space-x-1.5 transition shadow-sm';
                 if (btnO) btnO.className = 'py-2 px-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 font-semibold text-xs flex items-center justify-center space-x-1.5 transition hover:bg-slate-100';
-                if (mBtnM) mBtnM.className = 'px-3 py-1 rounded-lg font-semibold border border-blue-500 bg-blue-50 text-blue-700 transition';
-                if (mBtnO) mBtnO.className = 'px-3 py-1 rounded-lg font-semibold border border-slate-200 bg-white text-slate-600 transition';
+                if (mName) {
+                    mName.textContent = 'Movistar Cloud';
+                    mName.className = 'px-3 py-1 rounded-lg font-semibold border border-blue-500 bg-blue-50 text-blue-700';
+                }
             }
         }
 
@@ -766,23 +766,6 @@
         async function stopProxy() {
             await fetch('/stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
             checkStatus();
-        }
-
-        async function refreshOAuthLink() {
-            const phone = phoneInput.value.trim();
-            if (!phone) return;
-            try {
-                const res = await fetch('/start_login', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone, provider: currentProvider})
-                });
-                const data = await res.json();
-                if (data.status === 'ok' && data.auth_url) {
-                    currentAuthURL = data.auth_url;
-                    oauthLinkBtn.href = data.auth_url;
-                }
-            } catch (err) {}
         }
 
         async function openOAuthModal() {
