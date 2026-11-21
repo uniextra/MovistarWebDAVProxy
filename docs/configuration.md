@@ -54,6 +54,13 @@ Esta guía reúne toda la referencia técnica del proxy: variables de entorno co
 | `SYNC_INTERVAL_SEC` | `300` en `desktop`, `60` en `browser` | Intervalo de sincronización incremental de metadatos (mínimo `15` segundos). En el perfil `desktop` es la cadencia del cliente oficial (consulta los cambios cada 5 minutos). |
 | `WEBDAV_STREAM_UPLOAD` | `true` (perfil `desktop`) | Sube a la nube mientras el archivo aún llega del cliente, como el cliente oficial: la respuesta llega justo después del último byte, sin esperas largas que agoten el tiempo del cliente (rclone corta a los 5 min). La subida al host de subidas no ocupa el hueco de `SAPI_MAX_CONCURRENT`, así que varias subidas a la vez no se bloquean entre sí. Sin la variable, activado donde el proxy habla como la app (perfil `desktop`, ver `SAPI_OFFICIAL_CLIENT`); con `SAPI_OFFICIAL_CLIENT=false`, como antes. |
 | `WEBDAV_CASE_INSENSITIVE` | `false` (perfil `desktop`) | La nube distingue mayúsculas («Foto.jpg» y «foto.jpg» son dos archivos) y el proxy también: busca nombres exactos (si no, rclone podía dar por subido un archivo que no lo estaba o borrar el origen en un cambio solo de mayúsculas). Con `true`, si no hay un archivo con el nombre exacto se usa el que solo difiere en mayúsculas, útil con el Explorador de Windows o el Finder; no lo actives con rclone ni restic. Sin la variable, exactos donde el proxy habla como la app (perfil `desktop`) y, con `SAPI_OFFICIAL_CLIENT=false`, sin distinguir, como antes. |
+| `WEBDAV_UPLOAD_SPOOL` | `true` | Copia local de cada subida mientras se envía a la nube. Con ella, un fallo se reintenta sin el cliente y, en el perfil `desktop`, un envío cortado continúa desde el disco sobre el mismo ID. Con `false` no se escribe nada en disco: la subida va en flujo directo y, si falla, el `PUT` responde `503` para que el cliente la repita (útil en equipos pequeños; Hyper Backup necesita la copia local). |
+| `WEBDAV_QUEUE_RAM_MB` | solo los búferes en curso | RAM total para las subidas que esperan hueco (todas las vías comparten la misma cola); se ajusta a la memoria libre del equipo. Con la cola llena, el proxy deja de leer del cliente hasta que haya hueco (contrapresión). Las subidas con la cabecera `X-Upload-Priority: bulk` ceden el hueco a las demás. |
+| `WEBDAV_QUEUE_DISK_MB` | sin límite (con copia local), `0` (sin ella) | Disco para las subidas en cola que no caben en RAM. Con copia local, un cuerpo que no puede subir en flujo va entero al disco y nunca se hace esperar al cliente (interbloqueo restic → rclone). |
+| `WEBDAV_UPLOAD_BWLIMIT` | *(sin límite)* | Límite de subida a la nube para todas las vías (`20M`, `500K`, `off`), también ajustable en caliente desde el panel. |
+| `WEBDAV_SMALLFILE_CACHE_MB` | `32` | Tope de memoria para el contenido de archivos pequeños ya leídos. Además, el contenido de los archivos diminutos (p. ej. las fichas del `chunker` de rclone) se guarda en la base SQLite local, así que un listado en frío no los vuelve a pedir uno a uno a la nube. |
+| `TLS_PREFER_CHACHA` | según el procesador (`browser`); `false` (`desktop`) | Pone ChaCha20-Poly1305 delante de AES-GCM en el `ClientHello`, como hace Chrome en equipos sin AES por hardware (p. ej. Raspberry Pi 4, donde AES por software es ~5 veces más lento y el TLS se comía la CPU). En el perfil `desktop` se mantiene intacta la huella del cliente oficial salvo con `TLS_PREFER_CHACHA=true`. |
+| `TLS_PREFER_CHACHA` | según el procesador | Pone ChaCha20-Poly1305 delante de AES-GCM en el `ClientHello` (como Chrome en equipos sin AES por hardware, p. ej. Raspberry Pi 4). `true`/`false` lo fuerza. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado de subidas en curso. |
 | `SAPI_MAX_CONCURRENT` | `1` *(ver nota)* | Llamadas concurrentes máximas a SAPI. En [Modo Web](web-mode.md) toma por defecto `WEBDAV_MAX_DOWNLOADS + WEBDAV_MAX_UPLOADS + 2`. |
 | `SAPI_PACING_MS` | `100` | Pausa mínima en milisegundos entre peticiones secuenciales a SAPI. |
@@ -82,6 +89,12 @@ Con `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` configurados en tu `docker-compose
 * ⚠️ **Cuenta no vinculada o sesión web pendiente:** Si arranca sin tokens guardados (o en Modo Web sin sesión iniciada), avisa inmediatamente para que accedas al panel y completes el inicio de sesión.
 * ❌ **Fallos críticos de inicialización:** Notifica antes de detenerse si falla la inicialización del cliente SAPI o el arranque de Chromium en Modo Web.
 * ⚠️ **Sesión caducada:** Avisa cuando la sesión de Movistar / O2 Cloud expira y requiere revinculación (protegida con control antispam de **1 hora** por tipo de alerta para evitar mensajes repetitivos).
+* ⚠️ **Sesión web perdida y recuperada:** en Modo Web, si la sesión deja de valer más de 2 minutos (y cuando vuelve).
+* ✂️ **Rechazo por tamaño (`MED-1048`):** Movistar limita a veces el tamaño por subida de una cuenta tras mucho volumen. El aviso indica el tamaño rechazado y, si lo hay, el mayor aceptado, para ajustar el `chunk_size` del `chunker` de rclone por debajo del límite.
+* 📁 **Límite de carpetas de la cuenta (`FOL-1035`)** y **ráfagas de errores de escritura** (10 en 10 minutos).
+* ✅ **Fin o corte de la copia de un cliente**, si el cliente informa de ella (ver la sección 9).
+
+Los mensajes van en HTML con el texto escapado. Las peticiones a Telegram usan un transporte propio solo HTTP/1.1 y un envío con fallo de red se reintenta una vez: con HTTP/2 todos los envíos compartían una conexión y, si moría sin notarse (corte de red), los avisos y su reintento caducaban en ella.
 
 ---
 
@@ -216,3 +229,65 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
    * Movistar Cloud recorta silenciosamente los nombres que superan los **255 caracteres**. Para evitar pérdidas o ficheros ilegibles (especialmente con `rclone crypt`), el proxy rechaza con `HTTP 400` cualquier operación `PUT`, `MKCOL`, `MOVE` o `COPY` cuyo nombre de destino exceda los 255 caracteres.
 4. **🔤 Caracteres reservados en nombres de archivo:**
    * Evita caracteres incompatibles con URLs o APIs REST (`\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en nombres de archivos y directorios.
+
+---
+
+## 🔌 9. Conexiones e informe de copias
+
+### Conexiones muertas
+
+Todas las conexiones salientes usan `TCP_USER_TIMEOUT` de 60 s (Linux): si la red del equipo se cae o cambia, una conexión con Movistar sin respuesta se cierra en un minuto en vez de dejar colgadas varios minutos las subidas y llamadas que esperaban.
+
+### Informe de copias desde el cliente
+
+El proxy solo ve archivos sueltos: no sabe cuánto le queda a una copia que lanza un cliente con rclone. Si el cliente le manda cada pocos segundos el resumen de rclone (`core/stats`), el proxy puede:
+
+* mostrar en el panel, en «Actividad en curso», el progreso total del envío (transferido / total, velocidad y tiempo restante), no solo el archivo en curso;
+* avisar por Telegram cuando la copia termina o deja de informar 10 minutos (equipo apagado, ventana cerrada…), con un bloque por carpeta enviada: tamaño, duración, velocidad media y número de errores, con las subidas que fallaron en el proxy desglosadas dentro de su carpeta, y el total si hay varias.
+
+**Cómo informar:** `POST /.nube-estado` en el puerto WebDAV, con las credenciales del WebDAV y un JSON:
+
+| Campo | Tipo | Descripción |
+| :--- | :--- | :--- |
+| `id` | texto (obligatorio, ≤ 100) | Identificador del envío; el mismo durante toda la copia. |
+| `dest` | texto | Carpeta de destino tal como se ve en el WebDAV (p. ej. `Fotos/2024`). Si un envío copia varias carpetas una tras otra, se cambia `dest` y se mantiene `id`: cada carpeta sale en su propio bloque. |
+| `bytes` | número | Bytes copiados (`bytes` de `core/stats`). |
+| `total_bytes` | número | Total conocido hasta ahora (`totalBytes`). |
+| `speed` | número | Bytes/s (`speed`). |
+| `eta` | número o `null` | Segundos restantes (`eta`). |
+| `errors` | número | Errores de rclone (`errors`). |
+| `done` | booleano | `true` al terminar: cierra el envío y manda el resumen. |
+
+Responde `204`; sin credenciales, `401`. El desglose de subidas fallidas se hace por la ruta: funciona cuando el proxy ve los nombres tal cual (sin cifrado de nombres en el cliente).
+
+**Ejemplo con rclone, `curl` y `jq`:**
+
+```sh
+#!/bin/sh
+# Copia con rclone e informa al proxy de su progreso.
+PROXY=http://IP_DE_TU_SERVIDOR:5050
+AUTH=usuario:contraseña          # las del WebDAV
+ORIGEN=/ruta/de/origen
+DEST="Fotos/2024"                # carpeta de destino en el WebDAV
+ID="$(hostname)-$(date +%s)"
+
+informa() {
+    curl -s -u "$AUTH" -H 'Content-Type: application/json' \
+         -d "$1" "$PROXY/.nube-estado" >/dev/null
+}
+
+rclone copy "$ORIGEN" "movistar:$DEST" \
+    --rc --rc-addr 127.0.0.1:5572 --rc-no-auth &
+PID=$!
+while kill -0 "$PID" 2>/dev/null; do
+    sleep 3
+    STATS=$(rclone rc --url http://127.0.0.1:5572 core/stats 2>/dev/null) || continue
+    informa "$(echo "$STATS" | jq -c --arg id "$ID" --arg dest "$DEST" \
+        '{id:$id, dest:$dest, bytes:.bytes, total_bytes:.totalBytes,
+          speed:.speed, eta:.eta, errors:.errors}')"
+done
+wait "$PID"
+informa "{\"id\":\"$ID\",\"done\":true}"
+```
+
+Recomendado en el `rclone copy` del cliente para que un corte no deje archivos sin subir: `--retries 10 --retries-sleep 30s --low-level-retries 20`. Al volver a lanzar la misma copia, rclone salta lo ya subido.

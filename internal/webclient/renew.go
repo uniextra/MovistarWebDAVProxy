@@ -24,7 +24,12 @@ const (
 
 	defaultRenewBefore = time.Hour
 	renewRetryAfter    = 10 * time.Minute
-	renewWait          = 30 * time.Second
+	renewWait          = 60 * time.Second // una máquina pequeña tarda más en cargar la web
+	// renewMaxFails: tras estos fallos seguidos se avisa de que hay que volver a entrar.
+	// La PLC no se borra nunca sola: un corte de internet o Movistar caído un rato no
+	// la invalida, y se sigue reintentando cada renewRetryAfter. Si de verdad dejó de
+	// valer, se entra desde /web-relogin/ (sin borrar nada) o /web-login/.
+	renewMaxFails = 3
 )
 
 var errNoRemember = errors.New(`no hay cookie de "No cerrar sesión" (PLC): inicia sesión con e-mail y contraseña marcándola`)
@@ -47,6 +52,17 @@ func shouldRenew(now, expires, lastTry time.Time, remember bool, before time.Dur
 		return false
 	}
 	return expires.Sub(now) < before
+}
+
+// renewDue decide si renovar ahora. Además de antes de la caducidad, en cuanto la
+// sesión deja de valer (401) aunque la cookie JSESSIONID aún no haya caducado:
+// Movistar puede invalidarla antes de tiempo en el servidor, y la PLC sirve igual
+// para reentrar. Sin esto el proxy se quedaba en «no iniciada» hasta un login manual.
+func renewDue(now, expires, lastTry time.Time, remember, loggedIn bool, before time.Duration) bool {
+	if !loggedIn && remember {
+		expires = now
+	}
+	return shouldRenew(now, expires, lastTry, remember, before)
 }
 
 // sessionCookies lee la caducidad de JSESSIONID y si existe la PLC.
@@ -94,11 +110,7 @@ func (s *Session) renewLoop() {
 		s.stateMu.RLock()
 		lastTry := s.lastRenewTry
 		s.stateMu.RUnlock()
-		// También sin sesión: si caducó, la PLC sirve igual para reentrar.
-		if !s.LoggedIn() && remember && expires.IsZero() {
-			expires = time.Now()
-		}
-		if !shouldRenew(time.Now(), expires, lastTry, remember, renewBefore()) {
+		if !renewDue(time.Now(), expires, lastTry, remember, s.LoggedIn(), renewBefore()) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -154,12 +166,19 @@ func (s *Session) Renew(ctx context.Context) error {
 			continue
 		}
 		s.stateMu.Lock()
-		s.expires, s.lastRenewAt = expires, time.Now()
+		s.expires, s.lastRenewAt, s.renewFails = expires, time.Now(), 0
 		s.stateMu.Unlock()
 		s.setLoggedIn(true)
 		logger.Log("[WebSession] ✔ Sesión web renovada sin iniciar sesión; caduca %s.", expires.Local().Format("02/01 15:04"))
 		return nil
 	}
 	s.setLoggedIn(false)
-	return errors.New("la web no reentró con la PLC (¿caducada o invalidada?): hay que iniciar sesión desde el panel")
+	s.stateMu.Lock()
+	s.renewFails++
+	fails := s.renewFails
+	s.stateMu.Unlock()
+	if fails < renewMaxFails {
+		return fmt.Errorf("la web no reentró con la PLC (intento %d); se reintenta en %s sin borrar nada", fails, renewRetryAfter)
+	}
+	return fmt.Errorf("la web no reentró con la PLC tras %d intentos seguidos; se sigue reintentando cada %s. Si la sesión dejó de valer, vuelve a entrar desde el panel en /web-relogin/", fails, renewRetryAfter)
 }

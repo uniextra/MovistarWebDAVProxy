@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,11 +23,17 @@ type TelegramNotifier struct {
 	client   *http.Client
 	mu       sync.Mutex
 
-	lastNotificationAt   time.Time
+	lastNotificationAt time.Time
 	//lastSessionExpiredAt time.Time
-	lastAlerts         map[string]time.Time // <--- CAMBIADO (antes lastSessionExpiredAt)
-	lastError            string
+	lastAlerts map[string]time.Time // <--- CAMBIADO (antes lastSessionExpiredAt)
+	lastError  string
 }
+
+// sendRetryDelay: espera antes de reintentar un envío que falló por la red.
+var sendRetryDelay = 3 * time.Second
+
+// apiBase es la API de Telegram (variable para los tests).
+var apiBase = "https://api.telegram.org"
 
 // Default es la instancia global compartida por toda la aplicación.
 var Default *TelegramNotifier
@@ -35,7 +42,7 @@ func init() {
 	Default = &TelegramNotifier{
 		botToken:   strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		chatID:     strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")),
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     newClient(10 * time.Second),
 		lastAlerts: make(map[string]time.Time),
 	}
 }
@@ -63,12 +70,11 @@ func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
 	Default = &TelegramNotifier{
 		botToken:   token,
 		chatID:     chat,
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     newClient(10 * time.Second),
 		lastAlerts: make(map[string]time.Time),
 	}
 	return Default
 }
-
 
 func (t *TelegramNotifier) IsConfigured() bool {
 	t.mu.Lock()
@@ -88,7 +94,7 @@ func (t *TelegramNotifier) UpdateCredentials(botToken, chatID string) {
 	if chat == "" {
 		chat = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
 	}
-	
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.botToken = token
@@ -120,7 +126,23 @@ func sanitizeTransportError(err error, token string) string {
 	return msg
 }
 
-func (t *TelegramNotifier) SendMessage(text string) error {
+// SendMessage envía texto tal cual (sin formato).
+func (t *TelegramNotifier) SendMessage(text string) error { return t.send(text, false) }
+
+// sendHTML envía con formato HTML de Telegram: el texto dinámico tiene que ir
+// escapado (html.EscapeString), si no Telegram rechaza el mensaje.
+func (t *TelegramNotifier) sendHTML(text string) error { return t.send(text, true) }
+
+// sendHTMLWith es sendHTML con campos extra en la petición (p. ej. reply_markup).
+func (t *TelegramNotifier) sendHTMLWith(text string, extra map[string]interface{}) error {
+	return t.sendExtra(text, true, extra)
+}
+
+func (t *TelegramNotifier) send(text string, asHTML bool) error {
+	return t.sendExtra(text, asHTML, nil)
+}
+
+func (t *TelegramNotifier) sendExtra(text string, asHTML bool, extra map[string]interface{}) error {
 	t.mu.Lock()
 	token := t.botToken
 	chatID := t.chatID
@@ -137,20 +159,35 @@ func (t *TelegramNotifier) SendMessage(text string) error {
 			"is_disabled": true,
 		},
 	}
+	if asHTML {
+		payload["parse_mode"] = "HTML"
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
 
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("error preparando petición a Telegram")
+	apiURL := fmt.Sprintf("%s/bot%s/sendMessage", apiBase, token)
+	post := func() (*http.Response, error) {
+		req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return t.client.Do(req)
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := t.client.Do(req)
+	resp, err := post()
+	if err != nil {
+		// Un fallo de red suele ser una conexión que quedó en la red anterior: se
+		// reintenta una vez con conexiones nuevas.
+		transport.CloseIdleConnections()
+		time.Sleep(sendRetryDelay)
+		resp, err = post()
+	}
 	if err != nil {
 		safeErr := sanitizeTransportError(err, token)
 		t.mu.Lock()
@@ -200,14 +237,14 @@ func (t *TelegramNotifier) SendSessionExpiredAlert(provider, phone, details stri
 	}
 
 	msg := fmt.Sprintf(
-		"⚠️ *Sesión de %s caducada*\n\n"+
-			"El Proxy WebDAV no puede acceder a tus archivos porque la sesión para la línea *%s* ha expirado.\n\n"+
+		"⚠️ <b>Sesión de %s caducada</b>\n\n"+
+			"El Proxy WebDAV no puede acceder a tus archivos porque la sesión para la línea <b>%s</b> ha expirado.\n\n"+
 			"Detalle: %s\n"+
 			"Hora: %s\n\n"+
 			"Por favor, abre el panel Web para revincular tu dispositivo.",
-		providerName, logger.Mask(phone), details, time.Now().Format("2006-01-02 15:04:05"),
+		html.EscapeString(providerName), html.EscapeString(logger.Mask(phone)), html.EscapeString(details), time.Now().Format("2006-01-02 15:04:05"),
 	)
-	return t.SendMessage(msg)
+	return t.sendHTML(msg)
 }
 
 func (t *TelegramNotifier) SendTestAlert(provider string) error {
@@ -217,13 +254,12 @@ func (t *TelegramNotifier) SendTestAlert(provider string) error {
 	}
 
 	msg := fmt.Sprintf(
-		"🔔 *Notificaciones WebDAV de %s activas*\n\n"+
+		"🔔 <b>Notificaciones WebDAV de %s activas</b>\n\n"+
 			"El Gateway WebDAV está conectado con Telegram y listo para avisarte ante cualquier evento o expiración de sesión.",
-		providerName,
+		html.EscapeString(providerName),
 	)
-	return t.SendMessage(msg)
+	return t.sendHTML(msg)
 }
-
 
 // Para que se use de forma global
 // Send envía un mensaje directo usando el notificador global.
@@ -261,19 +297,18 @@ func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, details
 	if strings.TrimSpace(icon) == "" {
 		icon = "⚠️"
 	}
-	
+
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s *%s*\n\n", icon, title))
-	sb.WriteString(fmt.Sprintf("%s\n\n", description))
+	sb.WriteString(fmt.Sprintf("%s <b>%s</b>\n\n", icon, html.EscapeString(title)))
+	sb.WriteString(fmt.Sprintf("%s\n\n", html.EscapeString(description)))
 
 	if details != "" {
-		sb.WriteString(fmt.Sprintf("Detalle: %s\n", details))
+		sb.WriteString(fmt.Sprintf("Detalle: %s\n", html.EscapeString(details)))
 	}
 	sb.WriteString(fmt.Sprintf("Hora: %s", time.Now().Format("2006-01-02 15:04:05")))
 
-	return t.SendMessage(sb.String())
+	return t.sendHTML(sb.String())
 }
-
 
 // Credentials devuelve el token y chatID activos actualmente en memoria.
 func (t *TelegramNotifier) Credentials() (string, string) {
@@ -282,3 +317,10 @@ func (t *TelegramNotifier) Credentials() (string, string) {
 	return t.botToken, t.chatID
 }
 
+// SendTestWith manda el mensaje de prueba con unas credenciales concretas sin
+// cambiar las activas (probar no debe dejar puesto lo que no se ha guardado).
+func SendTestWith(botToken, chatID, provider string) error {
+	t := &TelegramNotifier{botToken: strings.TrimSpace(botToken), chatID: strings.TrimSpace(chatID),
+		client: newClient(10 * time.Second), lastAlerts: map[string]time.Time{}}
+	return t.SendTestAlert(provider)
+}

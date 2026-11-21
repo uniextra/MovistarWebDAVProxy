@@ -2,6 +2,51 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [Sin publicar]
+
+### 🌐 Sesión web (`internal/webclient`)
+- **`/web-relogin/`:** nuevo inicio de sesión en un contexto aislado del navegador, sin cerrar el actual ni cortar las transferencias. La sesión nueva se comprueba con SAPI antes de adoptarla.
+- **La `PLC` («No cerrar sesión») nunca se borra tras renovaciones fallidas:** se reintenta cada 10 minutos.
+- **Chromium:**
+  - un solo relanzamiento a la vez (antes podían quedar procesos huérfanos);
+  - plazo en las llamadas desde la pestaña;
+  - modo ahorrador;
+  - User-Agent normal en vez de `HeadlessChrome`.
+
+### 🚀 Subidas y red (comunes a los dos modos)
+- **Cola común de subidas para todas las vías:**
+  - prioridad para las normales sobre las masivas (`X-Upload-Priority: bulk`);
+  - RAM ajustada a la memoria libre (`WEBDAV_QUEUE_RAM_MB`) y disco opcional (`WEBDAV_QUEUE_DISK_MB`);
+  - contrapresión hacia el cliente cuando está llena.
+  - Con copia local, el flujo solo arranca si el turno está libre al momento, así que se mantiene el arreglo del interbloqueo restic → rclone.
+- **`WEBDAV_UPLOAD_SPOOL`** (`true` por defecto en todos los modos): con `false`, subida en flujo directo sin nada en disco, y un fallo responde `503` para que el cliente la repita.
+- **Límite de subida en caliente** (`WEBDAV_UPLOAD_BWLIMIT` o el panel).
+- **Caché SQLite** del contenido de los archivos diminutos, para listados en frío rápidos, y caché de archivos pequeños con tope (`WEBDAV_SMALLFILE_CACHE_MB`).
+- **`TCP_USER_TIMEOUT` de 60 s** en todas las conexiones salientes (Linux).
+- **ChaCha20-Poly1305 delante de AES-GCM** en procesadores sin AES por hardware, como Chrome (`TLS_PREFER_CHACHA`). En el perfil `desktop` solo se aplica con `TLS_PREFER_CHACHA=true`, para no tocar la huella del cliente oficial.
+
+### 📤 Subida web multipart (`internal/sapi`)
+- **Envío `chunked`:** con `Content-Length`, Movistar se queda callado ante un archivo que pasa del límite de la cuenta; sin él, responde `MED-1048` al instante.
+- **Subidas paradas:** se cortan si Movistar deja de leer 60 s.
+- **Nombres de más de 255 caracteres:** se rechazan con `400`.
+
+### 🔔 Telegram (`internal/notifier`, `cmd/server/alerts.go`)
+- **Transporte propio solo HTTP/1.1 y reintento de los envíos con fallo de red:** con HTTP/2 todos los envíos compartían una conexión y, si moría sin notarse (corte de red), los avisos y su reintento caducaban en ella.
+- **Mensajes en HTML con escapado** y configuración desde el panel también en modo web.
+- **Alertas nuevas:**
+  - sesión web perdida y recuperada;
+  - rechazo por tamaño (`MED-1048`) con el límite detectado;
+  - límite de carpetas (`FOL-1035`);
+  - ráfagas de errores de escritura;
+  - fin o corte de la copia de un cliente.
+
+### 📊 Panel e informe de copias
+- **Actividad en curso en tiempo real** (Server-Sent Events): subidas, lecturas y cola.
+- **Informe de copias desde el cliente (`POST /.nube-estado`):**
+  - un cliente rclone manda su `core/stats` y el panel muestra el progreso total;
+  - al terminar o cortarse, Telegram recibe un bloque por carpeta enviada con los fallos desglosados;
+  - documentado con un ejemplo en [docs/configuration.md](docs/configuration.md#-9-conexiones-e-informe-de-copias).
+
 ## [v2.6.8] - 2026-11-16
 
 ### 🛠️ Resiliencia en Subidas Largas de Hyper Backup (`HTTP 401` tras 1h)

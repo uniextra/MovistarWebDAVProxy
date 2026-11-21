@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,13 +32,15 @@ import (
 )
 
 var (
-	uploadSem           = make(chan struct{}, 1) // 1 subida simultánea (estricta serie como cliente oficial)
+	uploads             = newUploadGate(1)       // huecos de subida (1 = estricta serie como cliente oficial)
 	downloadSem         = make(chan struct{}, 1) // 1 descarga simultánea (estricta serie como cliente oficial)
 	globalTransferSem   = make(chan struct{}, 1) // Techo conjunto 1:1 para evitar ráfagas hacia SAPI/CloudFront
 	uploadBufferSem     = make(chan struct{}, 1) // Límite de ingestión PUT local alineado a 1
 	folderLocks         sync.Map
 	ErrUploadTooLarge   = errors.New("file exceeds maximum allowed upload size")
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
+	// errStreamUploadFailed: la subida en flujo sin copia local falló; el cliente debe repetirla.
+	errStreamUploadFailed = errors.New("stream upload failed without local copy: retry the request")
 )
 
 // ErrUploadUnsupported: O2 no admite el archivo con el tipo que indica su extensión
@@ -48,7 +51,8 @@ var ErrUploadUnsupported = errors.New("O2 Cloud does not support this file type/
 // Por defecto es 1 y 1 (como el cliente oficial de escritorio). En modo web las
 // descargas van con URL firmada a CloudFront y la API la llama el navegador, así
 // que se puede abrir más. Debe llamarse al arrancar, antes de servir peticiones.
-func SetTransferLimits(downloads, uploads int) {
+func SetTransferLimits(downloads, maxUploads int) {
+	uploads := maxUploads
 	if downloads < 1 {
 		downloads = 1
 	}
@@ -56,10 +60,10 @@ func SetTransferLimits(downloads, uploads int) {
 		uploads = 1
 	}
 	downloadSem = make(chan struct{}, downloads)
-	uploadSem = make(chan struct{}, uploads)
+	uploadGateSet(uploads)
 	uploadBufferSem = make(chan struct{}, uploads)
 	// El tope conjunto ya no frena a unas con otras: una subida masiva no debe
-	// bloquear las lecturas.
+	// impedir la reproducción.
 	globalTransferSem = make(chan struct{}, downloads+uploads)
 }
 
@@ -79,6 +83,12 @@ type uploadGuard struct {
 	expected int64 // Content-Length anunciado (-1 si no se sabe)
 	broken   atomic.Bool
 	tooLarge atomic.Bool
+	// streamFailed: la subida en flujo falló sin copia local para reintentar
+	// (WEBDAV_UPLOAD_SPOOL=false); el PUT responde 503 para que el cliente la repita.
+	streamFailed atomic.Bool
+	// bulk: subida masiva (cabecera X-Upload-Priority: bulk); cede los huecos a las
+	// subidas normales.
+	bulk bool
 	// unsupported: O2 rechazó el archivo por su contenido (MED-1050) → 415.
 	unsupported atomic.Bool
 	// retryLater: el cuerpo llegó entero pero O2 no aceptó la subida (sesión,
@@ -159,6 +169,23 @@ func GetUploadRAMBufferMaxBytes() int {
 		}
 	}
 	return 32 * 1024 * 1024 // 32 MB por defecto (cubre el 99% de bloques de Duplicati y restic en RAM sin tocar disco)
+}
+
+// uploadSpoolEnabled indica si las subidas en flujo guardan además una copia
+// completa en un temporal (RAM o disco) para reintentarlas sin el cliente. Con
+// WEBDAV_UPLOAD_SPOOL=false no se guarda: cada subida ocupa solo el búfer del flujo
+// y, si falla, el PUT responde 503 y el cliente la repite.
+// uploadSpoolEnabled: copia local de cada subida mientras se manda a la nube
+// (WEBDAV_UPLOAD_SPOOL, por defecto true en todos los modos). Con ella, un fallo se
+// reintenta sin el cliente y, en el perfil desktop, un envío cortado continúa desde el
+// disco sobre el mismo ID. Con false no se escribe nada en disco: la subida va en
+// flujo directo y, si falla, el PUT responde 503 para que el cliente la repita
+// (pensado para equipos pequeños; Hyper Backup necesita la copia local).
+func uploadSpoolEnabled() bool {
+	if v := strings.TrimSpace(os.Getenv("WEBDAV_UPLOAD_SPOOL")); v != "" {
+		return strings.EqualFold(v, "true")
+	}
+	return true
 }
 
 func getUploadTempDir() string {
@@ -260,6 +287,16 @@ func isTolerantDelete(rawPath string, err error) bool {
 	return false
 }
 
+// waitFolderLock espera a que termine la operación en curso sobre cleanPath, si la
+// hay (p. ej. su creación), sin quedarse con el bloqueo.
+func waitFolderLock(cleanPath string) {
+	if val, ok := folderLocks.Load(cleanPath); ok {
+		mu := val.(*sync.Mutex)
+		mu.Lock()
+		mu.Unlock() //nolint:staticcheck // solo se espera a que se libere
+	}
+}
+
 func acquireFolderLock(cleanPath string) func() {
 	val, _ := folderLocks.LoadOrStore(cleanPath, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
@@ -331,6 +368,7 @@ type MovistarFS struct {
 	client            *sapi.Client
 	metaStore         *cache.MetadataStore
 	uploadCache       map[string]*MemoryFile
+	lastCacheSweep    time.Time // última limpieza de uploadCache (trimSmallFileCacheLocked)
 	createdFolders    map[string]*CreatedFolder
 	deletedTombstones map[string]time.Time
 	folderCache       map[int64]*cachedFolders
@@ -1608,6 +1646,11 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		return nil
 	}
 
+	// Si otra petición está creando ahora la carpeta madre (p. ej. varios MKCOL a la
+	// vez al empezar una carpeta nueva), se espera a que termine en vez de responder
+	// que no existe. Se espera antes de tomar el bloqueo propio para no anidarlos.
+	waitFolderLock(path.Dir(cleanPath))
+
 	unlock := acquireFolderLock(cleanPath)
 	defer unlock()
 
@@ -1636,7 +1679,7 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 	for _, s := range subs {
 		// Solo con el nombre exacto: O2 admite carpetas que difieren en mayúsculas.
 		if isSameEntryName(s.Name, folderName) {
-			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar/O2 Cloud (ID: %d). Reutilizando.", folderName, s.ID)
+			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar/O2 Cloud (ID: %d). Reutilizando.", logName(cleanPath), s.ID)
 			mfs.cacheMu.Lock()
 			delete(mfs.uploadCache, pathKey)
 			mfs.createdFolders[pathKey] = &CreatedFolder{Info: s, Time: time.Now()}
@@ -1645,14 +1688,14 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		}
 	}
 
-	logger.Log("[WebDAV] 📁 Creando carpeta: '%s' en ID %d...", folderName, parentFolder.ID)
+	logger.Log("[WebDAV] 📁 Creando carpeta: '%s' en ID %d...", logName(cleanPath), parentFolder.ID)
 	created, err := mfs.client.CreateFolder(folderName, parentFolder.ID)
 	if err != nil {
 		logger.Log("[WebDAV] ❌ Error creando carpeta '%s': %v", folderName, err)
 		return err
 	}
 
-	logger.Log("[WebDAV] ✔ Carpeta creada: '%s' (ID: %d)", folderName, created.ID)
+	logger.Log("[WebDAV] ✔ Carpeta creada: '%s' (ID: %d)", logName(cleanPath), created.ID)
 	if ms := mfs.MetadataStore(); ms != nil {
 		logMetaErr("UpsertFolder", ms.UpsertFolder(*created))
 		logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(parentFolder.ID, time.Now().UTC().Format("20060102T150405Z")))
@@ -1807,6 +1850,21 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}), nil
 	}
 
+	// Archivos diminutos (fichas del chunker...) ya leídos alguna vez: desde la base
+	// local, sin pedirlos a la nube (un listado en frío los lee todos).
+	if ms := mfs.MetadataStore(); ms != nil {
+		if b, ok := ms.GetTinyContent(mediaInfo.ID, mediaInfo.ETag, mediaInfo.Size); ok {
+			return NewWebDAVMemoryReader(cleanPath, &MemoryFile{
+				ID:       mediaInfo.ID,
+				Name:     mediaInfo.Name,
+				FolderID: mediaInfo.FolderID,
+				Content:  b,
+				Size:     mediaInfo.Size,
+				ModTime:  parseTime(mediaInfo.ModificationDate),
+				CachedAt: time.Now(),
+			}), nil
+		}
+	}
 	r := NewWebDAVFileReader(mfs, cleanPath, *mediaInfo)
 	if mfs.client != nil && mfs.client.UploadSettling(mediaInfo.ID) {
 		id, name := mediaInfo.ID, mediaInfo.Name
@@ -2100,7 +2158,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		return err
 	}
 
-	logger.Log("[WebDAV] 🔄 Renombrando: '%s' -> '%s'...", oldClean, newClean)
+	logger.Log("[WebDAV] 🔄 Renombrando: '%s' -> '%s'...", logName(oldClean), logName(newClean))
 
 	if isF && oldFolder != nil {
 		err := mfs.client.UpdateFolderItem(*oldFolder, newBaseName, parentFolder.ID)
@@ -2598,10 +2656,19 @@ type WebDAVFileWriter struct {
 	streamPW       *io.PipeWriter
 	streamDone     chan streamUploadResult
 	streamFailed   bool
+	streamOnly     bool // subida en flujo sin copia local (WEBDAV_UPLOAD_SPOOL=false)
+	slotHeld       bool // ya tiene hueco de subida (tomado al empezar el flujo)
+	globalHeld     bool // ya tiene también el hueco global de transferencias
+	queued         bool // sin hueco libre: se guarda en la cola (RAM y, si no cabe, disco)
+	queueRAM       int64
+	queueDisk      int64
+	queuedMark     *TransferHandle
 	// pending: subida en flujo cortada a medias; el reintento desde disco continúa
 	// sobre ese ID (perfil desktop, como la app oficial) en lugar de crear otro.
 	pending *sapi.UploadInterruptedError
 }
+
+func (w *WebDAVFileWriter) isBulk() bool { return w.guard != nil && w.guard.bulk }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
 	return &WebDAVFileWriter{
@@ -2676,49 +2743,44 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 	return w.existingID
 }
 
-// streamUploadsEnabled indica si se sube en flujo directo (por defecto sí; con
+// streamUploads indica si se sube en flujo directo (por defecto sí; con
 // WEBDAV_STREAM_UPLOAD=false, no): el contenido se reenvía a O2 mientras llega, como
 // la app oficial, y el cliente recibe la respuesta poco después del último byte. Sin
 // flujo, el cuerpo se recibe entero (RAM o spool) y el cliente espera en silencio a
 // que el proxy lo suba: en archivos grandes, más que el tiempo de espera de rclone
 // (5 min). El envío en flujo no retiene el hueco de la API (ver sapi.DoRequest), y
-// nunca se espera turno ni hueco de RAM antes de leer un cuerpo (tryAcquireUploadTurn,
+// nunca se espera turno ni hueco de RAM antes de leer un cuerpo (cola de subidas,
 // Write), así que varias subidas a la vez no se bloquean entre sí.
 func (mfs *MovistarFS) streamUploads() bool { return config.StreamUploads() }
 
-// tryAcquireUploadTurn intenta coger, sin esperar, el turno de subida a SAPI
-// (uploadSem + globalTransferSem). Devuelve false si alguno está ocupado.
-func tryAcquireUploadTurn() bool {
-	select {
-	case uploadSem <- struct{}{}:
-	default:
-		return false
-	}
-	select {
-	case globalTransferSem <- struct{}{}:
-		return true
-	default:
-		<-uploadSem
-		return false
-	}
+// canStream indica si la subida puede ir en flujo directo: tamaño anunciado,
+// carpeta real y no es un archivo de control.
+// Desde v2.4.4 los archivos de control con contenido también se suben (auto-healing
+// de Control/@writer), así que ya no se excluyen.
+func (w *WebDAVFileWriter) canStream() bool {
+	return w.guard != nil && w.guard.expected > 0 && w.parentFolderID >= 0
 }
 
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
-	if !w.mfs.streamUploads() {
+	if !w.canStream() || w.streamDone != nil {
 		return
 	}
-	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 {
-		return
-	}
-	// Solo se sube en flujo si el turno de subida está libre AHORA. Si otro fichero
-	// lo tiene, esperar aquí bloquearía la lectura de este cuerpo (el io.Pipe no
-	// avanza) y, con clientes que multiplexan varias subidas en una conexión
-	// (restic -> rclone por HTTP/2), el que tiene el turno puede estar esperando
-	// precisamente datos que van detrás de este cuerpo: interbloqueo hasta que el
-	// cliente corta por timeout. En ese caso el cuerpo se guarda entero en el
-	// spool y se sube en Close() cuando llegue el turno.
-	if !tryAcquireUploadTurn() {
-		return
+	if w.tmpFile != nil && !w.slotHeld {
+		// Con copia local, solo en flujo si el turno está libre AHORA: esperarlo
+		// pararía la lectura del cuerpo (el io.Pipe no avanza) y un cliente que
+		// multiplexa subidas puede necesitar que avance para soltar el turno
+		// (interbloqueo). Si está ocupado, el cuerpo va entero al disco y se sube al
+		// cerrar.
+		if !uploads.tryAcquire(w.isBulk()) {
+			return
+		}
+		select {
+		case globalTransferSem <- struct{}{}:
+		default:
+			uploads.release()
+			return
+		}
+		w.slotHeld, w.globalHeld = true, true
 	}
 	w.ensurePathLock()
 	pr, pw := io.Pipe()
@@ -2726,19 +2788,34 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 	w.streamDone = make(chan streamUploadResult, 1)
 	expectedSize := w.guard.expected
 	sizeMB := float64(expectedSize) / (1024 * 1024)
-	logger.Log("[WebDAV] ⬆ Subiendo en flujo directo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
+	logger.Log("[WebDAV] ⬆ Subiendo en flujo directo: '%s' (%.2f MB) a Movistar/O2 Cloud...", logName(w.path), sizeMB)
 	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
 
 	go func() {
-		// el turno ya se cogió en tryAcquireUploadTurn
+		if !w.slotHeld {
+			queued := startUploadMark("queued", w.path, expectedSize)
+			uploads.acquire(w.isBulk())
+			queued.Done()
+		}
+		if !w.globalHeld {
+			globalTransferSem <- struct{}{}
+		}
 		defer func() {
 			<-globalTransferSem
-			<-uploadSem
+			uploads.release()
 		}()
 		body, tr := trackUpload(w.path, expectedSize, pr)
 		media, err := w.upload(body, expectedSize, mimeType)
 		tr.Done()
-		_ = pr.Close()
+		if err != nil {
+			// Se registra aquí porque, si la subida a la nube se corta antes de que el
+			// cliente termine de enviar, Close() solo ve el cuerpo incompleto y el
+			// motivo real se perdía. El cliente recibe este error al escribir.
+			logger.Log("[WebDAV] ⚠️ Subida en flujo a la nube interrumpida para '%s' (%.2f MB): %v", w.name, sizeMB, err)
+			_ = pr.CloseWithError(err)
+		} else {
+			_ = pr.Close()
+		}
 		w.streamDone <- streamUploadResult{media: media, err: err}
 	}()
 
@@ -2774,7 +2851,116 @@ func (w *WebDAVFileWriter) releaseBufferSem() {
 	}
 }
 
+// writeQueued guarda en la cola un trozo de una subida que espera hueco: en cuanto
+// hay hueco libre pasa a subirse en flujo; si no, va a RAM mientras quepa en el
+// presupuesto y si no a disco; con ambos llenos espera (el cliente ve velocidad 0).
+func (w *WebDAVFileWriter) writeQueued(p []byte) (int, error) {
+	for {
+		if uploads.tryAcquire(w.isBulk()) {
+			if err := w.promoteToStream(); err != nil {
+				return 0, err
+			}
+			w.size += int64(len(p))
+			if _, err := w.streamPW.Write(p); err != nil {
+				w.streamFailed = true
+				w.guard.streamFailed.Store(true)
+				return 0, err
+			}
+			return len(p), nil
+		}
+		if w.tmpFile == nil && reserveQueueRAM(int64(len(p))) {
+			w.queueRAM += int64(len(p))
+			w.size += int64(len(p))
+			return w.buf.Write(p)
+		}
+		if reserveQueueDisk(int64(len(p))) {
+			if w.tmpFile == nil {
+				if err := w.spoolToDisk(); err != nil {
+					releaseQueueDisk(int64(len(p)))
+					return 0, err
+				}
+			}
+			w.queueDisk += int64(len(p))
+			n, err := w.tmpFile.Write(p)
+			w.size += int64(n)
+			if err != nil {
+				w.failed = true
+			}
+			return n, err
+		}
+		time.Sleep(200 * time.Millisecond) // cola llena: el cliente espera
+	}
+}
+
+// promoteToStream pasa una subida de la cola a subida en flujo al quedar un hueco
+// libre (ya tomado): lo guardado se envía primero y el resto va directo.
+func (w *WebDAVFileWriter) promoteToStream() error {
+	var initial []byte
+	if w.tmpFile == nil && w.buf != nil {
+		initial = append([]byte(nil), w.buf.Bytes()...)
+	}
+	w.buf = nil
+	w.releaseQueueRAM()
+	w.queued = false
+	w.streamOnly = true
+	w.slotHeld = true
+	if w.queuedMark != nil {
+		w.queuedMark.Done()
+		w.queuedMark = nil
+	}
+	w.startStreamUpload(initial)
+	if w.tmpFile != nil {
+		_, _ = w.tmpFile.Seek(0, io.SeekStart)
+		if _, err := io.Copy(w.streamPW, w.tmpFile); err != nil {
+			w.streamFailed = true
+			w.guard.streamFailed.Store(true)
+			return err
+		}
+		w.cleanupTemp()
+	}
+	return nil
+}
+
+// spoolToDisk pasa a un temporal en disco lo que la cola tenía en RAM y libera su
+// parte del presupuesto.
+func (w *WebDAVFileWriter) spoolToDisk() error {
+	tmp, err := os.CreateTemp(getUploadTempDir(), "webdav_queue_*")
+	if err != nil {
+		w.failed = true
+		logger.Log("[WebDAV] ❌ No se pudo crear el temporal de la cola en '%s': %v", getUploadTempDir(), err)
+		return err
+	}
+	if w.buf != nil && w.buf.Len() > 0 {
+		if _, err := tmp.Write(w.buf.Bytes()); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			w.failed = true
+			return err
+		}
+	}
+	w.tmpFile = tmp
+	if w.buf != nil {
+		moved := int64(w.buf.Len())
+		queuedDisk.Add(moved)
+		w.queueDisk += moved
+	}
+	w.buf = nil
+	w.releaseQueueRAM()
+	return nil
+}
+
+func (w *WebDAVFileWriter) releaseQueueRAM() {
+	releaseQueueRAM(w.queueRAM)
+	w.queueRAM = 0
+}
+
+func (w *WebDAVFileWriter) releaseQueueDisk() {
+	releaseQueueDisk(w.queueDisk)
+	w.queueDisk = 0
+}
+
 func (w *WebDAVFileWriter) cleanupTemp() {
+	w.releaseQueueDisk()
 	if w.tmpFile != nil {
 		name := w.tmpFile.Name()
 		_ = w.tmpFile.Close()
@@ -2787,20 +2973,11 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	if w.failed {
 		return 0, ErrUploadTooLarge
 	}
-	if !w.semAcquired && !w.spoolOnly {
-		// No esperar nunca aquí: mientras se espera no se lee el cuerpo del cliente,
-		// y quien tiene el hueco puede depender de que este cuerpo avance (ver
-		// startStreamUpload). Si el hueco de RAM está ocupado, este cuerpo va al
-		// spool en disco. Los ficheros de control se emulan en memoria y son
-		// pequeños: siguen en RAM aunque no haya hueco.
-		select {
-		case uploadBufferSem <- struct{}{}:
-			w.semAcquired = true
-		default:
-			if !(w.parentFolderID < 0 || isControlOrLockFile(w.path)) {
-				w.spoolOnly = true
-			}
-		}
+	// La ingestión simultánea solo se limita a las subidas masivas: las demás nunca
+	// esperan detrás de ellas.
+	if !w.semAcquired && w.isBulk() {
+		uploadBufferSem <- struct{}{}
+		w.semAcquired = true
 	}
 
 	maxBytes := GetMaxUploadBytes()
@@ -2814,7 +2991,53 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	}
 
 	rambufMax := GetUploadRAMBufferMaxBytes()
-	if w.tmpFile == nil && (w.spoolOnly || w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
+	// Sin copia local, la subida a la nube no se abre hasta tener rambufMax bytes en
+	// memoria (32 MB por defecto): si el cliente tarda en empezar a enviar (p. ej. un
+	// origen lento al abrir el archivo), el servidor de subida no ve una conexión sin
+	// datos y no la corta con 408 al arrancar.
+	overRAM := w.buf != nil && w.buf.Len()+len(p) > rambufMax
+	if !w.streamOnly && !w.queued && w.tmpFile == nil && overRAM && !uploadSpoolEnabled() && w.canStream() {
+		if uploads.tryAcquire(w.isBulk()) {
+			// Hay hueco: lo recibido hasta ahora va al flujo y el resto directo, sin
+			// copia local.
+			var initialBytes []byte
+			if w.buf.Len() > 0 {
+				initialBytes = append([]byte(nil), w.buf.Bytes()...)
+			}
+			w.buf = nil
+			w.releaseQueueRAM()
+			w.streamOnly = true
+			w.slotHeld = true
+			w.startStreamUpload(initialBytes)
+		} else {
+			// Sin hueco libre: se encola. Lo recibido sigue en RAM con la reserva que ya
+			// tiene (cada escritura la reservó al llegar; reservarla otra vez la contaba
+			// dos veces y no se liberaba nunca); lo que llegue después va a RAM o disco
+			// según el presupuesto, o el cliente espera.
+			w.queued = true
+			w.queuedMark = startUploadMark("queued", w.path, w.guard.expected)
+			logger.Log("[WebDAV] ⏳ Sin hueco de subida libre: '%s' queda en cola", w.name)
+		}
+	}
+	if w.queued {
+		return w.writeQueued(p)
+	}
+	if w.streamOnly {
+		w.size += int64(len(p))
+		if w.streamFailed || w.streamPW == nil {
+			w.guard.streamFailed.Store(true)
+			return 0, errStreamUploadFailed
+		}
+		if _, err := w.streamPW.Write(p); err != nil {
+			w.streamFailed = true
+			w.guard.streamFailed.Store(true)
+			return 0, err
+		}
+		return len(p), nil
+	}
+	// Con copia local, o si la subida no puede ir en flujo (sin tamaño anunciado,
+	// archivos de control), lo que no cabe en RAM va a un temporal.
+	if w.tmpFile == nil && !w.queued && (w.spoolOnly || uploadSpoolEnabled() || !w.canStream()) && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
 		tmpDir := getUploadTempDir()
 		tmp, err := os.CreateTemp(tmpDir, "webdav_upload_*")
 		if err != nil {
@@ -2835,6 +3058,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 			}
 		}
 		w.buf = nil
+		w.releaseQueueRAM()
 		w.startStreamUpload(initialBytes)
 	}
 
@@ -2856,6 +3080,26 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 		}
 		return n, nil
 	}
+	// La RAM de las subidas tiene tope (WEBDAV_QUEUE_RAM_MB, común a todas): si no
+	// cabe, sin copia local se encola (y de ahí a flujo o disco); con copia local,
+	// al temporal en disco.
+	if !reserveQueueRAM(int64(len(p))) {
+		if !uploadSpoolEnabled() && w.canStream() {
+			w.queued = true
+			w.queuedMark = startUploadMark("queued", w.path, w.guard.expected)
+			w.size -= int64(len(p)) // writeQueued lo vuelve a sumar
+			return w.writeQueued(p)
+		}
+		if err := w.spoolToDisk(); err != nil {
+			return 0, err
+		}
+		n, err = w.tmpFile.Write(p)
+		if err != nil {
+			w.failed = true
+		}
+		return n, err
+	}
+	w.queueRAM += int64(len(p))
 	n, err = w.buf.Write(p)
 	if err != nil {
 		w.failed = true
@@ -2877,6 +3121,13 @@ func (w *WebDAVFileWriter) Close() error {
 	w.closed = true
 	defer w.releaseBufferSem()
 	defer w.releasePathLock()
+	defer w.releaseQueueRAM()
+	defer func() {
+		if w.queuedMark != nil {
+			w.queuedMark.Done()
+			w.queuedMark = nil
+		}
+	}()
 
 	if w.failed {
 		w.abortStream(ErrUploadTooLarge)
@@ -2892,7 +3143,7 @@ func (w *WebDAVFileWriter) Close() error {
 		return ErrUploadIncomplete
 	}
 
-	if w.tmpFile == nil && w.buf == nil {
+	if w.tmpFile == nil && w.buf == nil && !w.streamOnly {
 		w.abortStream(errors.New("upload buffer corrupted"))
 		w.cleanupTemp()
 		return errors.New("upload buffer corrupted or closed after failure")
@@ -2995,6 +3246,14 @@ func (w *WebDAVFileWriter) Close() error {
 		} else if errors.Is(res.err, sapi.ErrMediaUnsupported) && !config.UnsupportedAsFile() {
 			w.cleanupTemp()
 			return w.rejectUnsupported()
+		} else if w.streamOnly {
+			// Sin copia local no hay con qué reintentar: que lo repita el cliente.
+			w.guard.streamFailed.Store(true)
+			logger.Log("[WebDAV] ❌ Subida en flujo fallida para '%s' (sin copia local, el cliente la repetirá): %v", w.name, res.err)
+			if res.err == nil {
+				res.err = errStreamUploadFailed
+			}
+			return res.err
 		} else {
 			var ie *sapi.UploadInterruptedError
 			if errors.As(res.err, &ie) && ie.MediaID != "" {
@@ -3005,9 +3264,14 @@ func (w *WebDAVFileWriter) Close() error {
 	}
 
 	if media == nil {
-		logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
+		logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", logName(w.path), sizeMB)
 
-		uploadSem <- struct{}{}
+		if w.queued {
+			logger.Log("[WebDAV] ⏳ '%s' esperando hueco de subida en la cola...", w.name)
+		}
+		uploads.acquire(w.isBulk())
+		w.queuedMark.Done()
+		w.queuedMark = nil
 		globalTransferSem <- struct{}{}
 
 		var reader io.Reader
@@ -3043,7 +3307,8 @@ func (w *WebDAVFileWriter) Close() error {
 		w.pending = nil
 		tr.Done()
 		<-globalTransferSem
-		<-uploadSem
+		uploads.release()
+		w.releaseQueueRAM()
 		if err != nil {
 			if errors.Is(err, sapi.ErrFileTooLarge) {
 				if w.guard != nil {
@@ -3061,7 +3326,7 @@ func (w *WebDAVFileWriter) Close() error {
 		}
 	}
 
-	logger.Log("[WebDAV] ✔ Subida completada: '%s' (%.2f MB, ID: %s)", w.name, sizeMB, media.ID)
+	logger.Log("[WebDAV] ✔ Subida completada: '%s' (%.2f MB, ID: %s)", logName(w.path), sizeMB, media.ID)
 
 	w.mfs.cacheMu.Lock()
 	now := time.Now()
@@ -3189,9 +3454,9 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 		}
 		sizeMB := float64(r.item.Size) / (1024 * 1024)
 		if pos > 0 {
-			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", pos, r.item.Name, sizeMB)
+			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", pos, logName(r.path), sizeMB)
 		} else {
-			logger.Log("[WebDAV] ⬇ Descargando: '%s' (%.2f MB) desde Movistar Cloud...", r.item.Name, sizeMB)
+			logger.Log("[WebDAV] ⬇ Descargando: '%s' (%.2f MB) desde Movistar Cloud...", logName(r.path), sizeMB)
 		}
 		downloadSem <- struct{}{}
 		globalTransferSem <- struct{}{}
@@ -3228,6 +3493,9 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 			if r.pos == r.item.Size && int64(r.cacheBuf.Len()) == r.item.Size {
 				data := append([]byte(nil), r.cacheBuf.Bytes()...)
 				r.cacheBuf = nil
+				if ms := r.mfs.MetadataStore(); ms != nil && len(data) <= cache.TinyContentMax {
+					ms.PutTinyContent(r.item.ID, r.item.ETag, data)
+				}
 				now := time.Now()
 				r.mfs.cacheMu.Lock()
 				readKey := cacheKey(r.path)
@@ -3243,11 +3511,7 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 						URL:      r.item.URL,
 					}
 				}
-				for pth, mem := range r.mfs.uploadCache {
-					if now.Sub(mem.CachedAt) > 15*time.Minute {
-						delete(r.mfs.uploadCache, pth)
-					}
-				}
+				r.mfs.trimSmallFileCacheLocked(now)
 				r.mfs.cacheMu.Unlock()
 			}
 		}
@@ -3826,3 +4090,120 @@ var (
 	_ webdav.FileSystem   = (*MovistarFS)(nil)
 	_ webdav.ContentTyper = (*VirtualFileInfo)(nil)
 )
+
+// smallFileCacheBudget es el tope de memoria del contenido de archivos pequeños que
+// se guarda tras leerlos (WEBDAV_SMALLFILE_CACHE_MB, por defecto 32 MB): sin tope, un
+// escaneo de un servidor multimedia (miles de subtítulos y .nfo en 15 min) acumulaba cientos de MB.
+func smallFileCacheBudget() int64 {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WEBDAV_SMALLFILE_CACHE_MB"))); err == nil && v >= 0 {
+		return int64(v) << 20
+	}
+	return 32 << 20
+}
+
+// trimSmallFileCacheLocked quita lo caducado (15 min) como mucho cada 30 s y, si el
+// contenido guardado pasa del tope, descarta el de lo más antiguo (se volverá a
+// descargar si hace falta). Con cacheMu tomado.
+func (mfs *MovistarFS) trimSmallFileCacheLocked(now time.Time) {
+	var total int64
+	sweep := now.Sub(mfs.lastCacheSweep) > 30*time.Second
+	if sweep {
+		mfs.lastCacheSweep = now
+	}
+	for pth, mem := range mfs.uploadCache {
+		if sweep && now.Sub(mem.CachedAt) > 15*time.Minute {
+			delete(mfs.uploadCache, pth)
+			continue
+		}
+		total += int64(len(mem.Content))
+	}
+	budget := smallFileCacheBudget()
+	if total <= budget {
+		return
+	}
+	type entry struct {
+		mem *MemoryFile
+		at  time.Time
+	}
+	var withContent []entry
+	for _, mem := range mfs.uploadCache {
+		// Solo lo que ya está en la nube (con ID): se puede volver a descargar.
+		if len(mem.Content) > 0 && mem.ID != "" && !strings.HasPrefix(mem.ID, "virtual:") {
+			withContent = append(withContent, entry{mem, mem.CachedAt})
+		}
+	}
+	sort.Slice(withContent, func(i, j int) bool { return withContent[i].at.Before(withContent[j].at) })
+	for _, e := range withContent {
+		if total <= budget {
+			break
+		}
+		total -= int64(len(e.mem.Content))
+		e.mem.Content = nil
+	}
+}
+
+// PrefillTinyContent guarda en segundo plano, una sola vez, el contenido de los
+// archivos diminutos (fichas del chunker...) que aún no se tienen: así un listado en
+// frío (tras reiniciar el montaje) no los descarga uno a uno. URL de 50 en 50 y dos
+// descargas a la vez, para no competir con subidas ni reproducciones.
+func (mfs *MovistarFS) PrefillTinyContent(ctx context.Context) {
+	ms := mfs.MetadataStore()
+	if ms == nil || mfs.client == nil {
+		return
+	}
+	total := 0
+	for ctx.Err() == nil {
+		items, err := ms.ListTinyMissing(200)
+		if err != nil || len(items) == 0 {
+			break
+		}
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.ID)
+		}
+		if err := mfs.client.RenewDownloadURLs(ids); err != nil {
+			logger.Log("[WebDAV] ⚠️ Relleno de archivos diminutos interrumpido: %v", err)
+			return
+		}
+		jobs := make(chan sapi.MediaItem)
+		var wg sync.WaitGroup
+		var failed atomic.Int64
+		for w := 0; w < 2; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for it := range jobs {
+					rc, err := mfs.client.DownloadFileStream(it)
+					if err != nil {
+						failed.Add(1)
+						continue
+					}
+					b, err := io.ReadAll(io.LimitReader(rc, cache.TinyContentMax+1))
+					_ = rc.Close()
+					if err != nil || int64(len(b)) != it.Size {
+						failed.Add(1)
+						continue
+					}
+					ms.PutTinyContent(it.ID, it.ETag, b)
+				}
+			}()
+		}
+		for _, it := range items {
+			if ctx.Err() != nil {
+				break
+			}
+			jobs <- it
+		}
+		close(jobs)
+		wg.Wait()
+		total += len(items) - int(failed.Load())
+		if int(failed.Load()) == len(items) {
+			// Nada se pudo descargar en esta tanda: no insistir en bucle.
+			logger.Log("[WebDAV] ⚠️ Relleno de archivos diminutos detenido: ninguna descarga de la tanda funcionó")
+			return
+		}
+	}
+	if total > 0 {
+		logger.Log("[WebDAV] 📦 Guardado el contenido de %d archivos diminutos (listados en frío sin descargarlos)", total)
+	}
+}

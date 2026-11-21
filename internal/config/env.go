@@ -495,3 +495,13 @@ func DeleteAccountConfig(phone string) error {
 	}
 	return nil
 }
+
+// EncryptSecret cifra un secreto para guardarlo en disco con TOKENS_ENCRYPTION_KEY
+// (si no está definida, se guarda tal cual). DecryptSecret lo recupera.
+func EncryptSecret(plain string) (string, error) { return encryptValueIfNeeded(plain) }
+
+// DecryptSecret recupera un secreto guardado con EncryptSecret.
+func DecryptSecret(val string) string { return decryptValueIfNeeded(val) }
+
+// SecretsEncrypted indica si los secretos en disco van cifrados (TOKENS_ENCRYPTION_KEY).
+func SecretsEncrypted() bool { _, ok := getEncryptionKey(); return ok }

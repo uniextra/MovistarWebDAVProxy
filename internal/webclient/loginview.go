@@ -6,10 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 )
 
@@ -20,6 +23,8 @@ type LoginView struct {
 	tab      func() (context.Context, error) // pestaña chromedp actual
 	LoggedIn func() bool                     // opcional: estado de la sesión para mostrarlo en la página
 	mu       sync.Mutex                      // serializa la entrada para no mezclar eventos
+	// alwaysLogin: la pestaña ya se abre en el inicio de sesión (inicio aparte); no se la lleva a /login.
+	alwaysLogin bool
 }
 
 // NewLoginView crea la vista sobre una pestaña fija.
@@ -137,8 +142,33 @@ func (v *LoginView) serveStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (v *LoginView) serveIndex(w http.ResponseWriter, r *http.Request) {
+	v.openLoginPage()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(loginHTML))
+}
+
+// openLoginPage lleva la pestaña a la página de inicio de sesión si no hay sesión
+// y no se está ya en ella (o en el login de Telefónica). La portada de la web, sin
+// sesión válida, puede quedarse cargando (logo girando) sin enseñar el login: no
+// basta con navegar, también guarda estado en el almacenamiento del sitio, así que
+// se borra todo lo de la web. Solo aquí, cuando el usuario abre la vista para
+// entrar: la renovación automática nunca borra la PLC.
+func (v *LoginView) openLoginPage() {
+	if v.alwaysLogin || v.LoggedIn == nil || v.LoggedIn() {
+		return
+	}
+	tab, err := v.tab()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(tab, 20*time.Second)
+	defer cancel()
+	href, err := chromedp.Run(ctx, chromedp.Evaluate[string]("location.href"))
+	if err != nil || strings.Contains(href, "/login") || strings.Contains(href, "t3.movistar.es") || strings.Contains(href, "telefonica.es") {
+		return
+	}
+	_, _ = chromedp.Call(ctx, storage.ClearDataForOrigin, storage.ClearDataForOriginParams{Origin: PortalURL, StorageTypes: "all"})
+	_ = chromedp.Do(ctx, chromedp.Navigate(PortalURL+"/login"))
 }
 
 const loginHTML = `<!doctype html>

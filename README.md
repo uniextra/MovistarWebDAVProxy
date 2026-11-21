@@ -40,6 +40,12 @@ Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones
 * 🚦 **Control de Concurrencia y Resiliencia WAF:** Gestiona subidas y descargas paralelas (`2` subidas / `4` descargas por defecto), huella TLS adaptada y protección frente a colisiones de nombres o bloqueos de CloudFront.
 * 🔔 **Alertas de Telegram desde el Arranque (v2.5.6):** Notificaciones automáticas desde el primer segundo si configuras `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (aviso de inicio, cuenta sin vincular, caducidad de sesión o fallos críticos), sin necesidad de abrir antes el panel web.
 * 🌐 **Modo Web Opcional:** Alternativa basada en la sesión web oficial (`micloud.movistar.es`) con renovación automática cada 24 h si el flujo OAuth del cliente de escritorio falla. Ver [docs/web-mode.md](docs/web-mode.md).
+* 🍓 **Ligero también en equipos pequeños:**
+  * cola de subidas común con contrapresión y prioridades;
+  * subida directa opcional sin nada en disco (`WEBDAV_UPLOAD_SPOOL=false`);
+  * TLS con ChaCha20 en procesadores sin AES por hardware;
+  * conexiones muertas cerradas en un minuto (`TCP_USER_TIMEOUT`).
+* 📊 **Informe de copias desde el cliente:** un script con rclone puede informar de su progreso para verlo en el panel y recibir un resumen por Telegram al terminar ([cómo usarlo](docs/configuration.md#-9-conexiones-e-informe-de-copias)).
 * 🧹 **Filtro de Basura del SO y Panel de Transferencias:** Absorbe automáticamente archivos ocultos del sistema (`.DS_Store`, `desktop.ini`, `thumbs.db`) y muestra velocidad, progreso y logs en tiempo real desde la interfaz web.
 
 ---
@@ -197,7 +203,7 @@ Al incluir `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en tu `docker-compose.yml`,
 * [🔧 Configuración Avanzada, Seguridad, Proxies Inversos y Variables de Entorno](docs/configuration.md)
 * [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone (>4 GB y Cifrado)](docs/backup-clients.md)
 * [💻 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)
-* [🌐 Modo Web: Sesión del Navegador y Renovación Automática](docs/web-mode.md)
+* [🌐 Modo Web: sesión del navegador, renovación automática y subida web](docs/web-mode.md)
 
 ---
 

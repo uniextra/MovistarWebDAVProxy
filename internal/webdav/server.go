@@ -28,6 +28,9 @@ import (
 )
 
 var (
+	// Cuotas que ya traiga la respuesta (p. ej. el rclone interno, que sin datos
+	// anuncia 1 PiB libre): se sustituyen por las de la cuenta.
+	anyQuotaRegex   = regexp.MustCompile(`(?is)<[dD]:quota-(available|used)-bytes>[^<]*</[dD]:quota-(available|used)-bytes>`)
 	emptyQuotaRegex = regexp.MustCompile(`(?i)<[dD]:quota-(available|used)-bytes(\s*/>|>\s*</[dD]:quota-(available|used)-bytes>)`)
 	empty404Regex   = regexp.MustCompile(`(?i)<[dD]:propstat>\s*<[dD]:prop>\s*</[dD]:prop>\s*<[dD]:status>HTTP/1\.1 404 Not Found</[dD]:status>\s*</[dD]:propstat>`)
 	re200Upper      = regexp.MustCompile(`(?i)</D:prop>\s*<D:status>HTTP/1\.1 200 OK</D:status>`)
@@ -144,6 +147,7 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig, metaStore
 		Logger: func(r *http.Request, err error) {
 			if err != nil && !errors.Is(err, ErrUploadTooLarge) && !errors.Is(err, ErrUploadUnsupported) && !isExpectedNotFound(r.Method, err) {
 				logger.Log("[WebDAV] ❌ Error en %s %s: %v", r.Method, r.URL.Path, err)
+				noteRequestError(r.Method, err, time.Now())
 			}
 		},
 	}
@@ -313,10 +317,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if isPropfind {
 			logger.Log("[WebDAV] ⚡ %s -> %s %s [Depth: %s] => %d (%d responses, %d bytes, %v)",
-				clientIP, method, urlPath, depth, code, lw.propfindResponses, lw.bytesWritten, dur)
+				clientIP, method, logName(urlPath), depth, code, lw.propfindResponses, lw.bytesWritten, dur)
 		} else {
 			logger.Log("[WebDAV] ⚡ %s -> %s %s => %d (%d bytes, %v)",
-				clientIP, method, urlPath, code, lw.bytesWritten, dur)
+				clientIP, method, logName(urlPath), code, lw.bytesWritten, dur)
+		}
+
+		// Una subida fallida se apunta en la copia del cliente a la que pertenece (si
+		// alguna informa por ClientCopyPath), para desglosarla en su aviso.
+		if method == "PUT" && code >= 400 && code != http.StatusUnauthorized {
+			RecordUploadFailure(urlPath, fmt.Sprintf("%d %s", code, http.StatusText(code)))
 		}
 
 		if code == http.StatusNotFound && (method == "PROPFIND" || method == "GET") && logger.IsDebugEnabled() {
@@ -414,6 +424,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Eliminar la cabecera Authorization tras validarla para que x/net/webdav la procese limpiamente
 	r.Header.Del("Authorization")
 
+	// Informe de una copia que hace un cliente con rclone (no es una ruta de la nube).
+	if r.URL.Path == ClientCopyPath {
+		handleClientCopyReport(lw, r)
+		return
+	}
+
 	// Interceptar sondas de prueba de Duplicati (duplicati-access-privileges-test.tmp)
 	// para absorberlas completamente en memoria sin enviar extensiones .tmp a Telefónica SAPI
 	if s.handleDuplicatiProbe(lw, r, urlPath) {
@@ -454,6 +470,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Vigilar que el cuerpo llegue entero (ver uploadGuard en fs.go).
 		guard := &uploadGuard{expected: r.ContentLength}
+		// Subidas masivas (p. ej. un script de migración con rclone --header-upload
+		// "X-Upload-Priority: bulk"): ceden los huecos a las demás.
+		guard.bulk = strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Upload-Priority")), "bulk")
 		if r.Body != nil {
 			r.Body = &guardedBody{rc: r.Body, guard: guard}
 		}
@@ -697,6 +716,11 @@ func (p *putStatusInterceptor) WriteHeader(statusCode int) {
 		h.Set("X-Content-Type-Options", "nosniff")
 		statusCode = http.StatusUnsupportedMediaType
 		unsupportedMsg = "O2 Cloud no admite este archivo: su contenido no corresponde a la extensión (MED-1050). Reintentarlo no lo arreglará.\n"
+	} else if p.guard != nil && p.guard.streamFailed.Load() && statusCode >= 400 {
+		// Subida en flujo sin copia local fallida: 503 para que el cliente (rclone)
+		// la trate como transitoria y la repita, en vez del 405 genérico.
+		p.Header().Set("Retry-After", "5")
+		statusCode = http.StatusServiceUnavailable
 	} else if p.guard != nil && p.guard.retryLater.Load() && statusCode == http.StatusMethodNotAllowed {
 		h := p.ResponseWriter.Header()
 		h.Set("Retry-After", "30")
@@ -730,6 +754,17 @@ func (p *putStatusInterceptor) Write(b []byte) (int, error) {
 	return p.ResponseWriter.Write(b)
 }
 
+// WithAccountQuota envuelve la respuesta de un PROPFIND servido por otro (la
+// pasarela del WebDAV público) para que lleve la cuota real de la cuenta, como las
+// del WebDAV en bruto. Llamar a la función devuelta al terminar.
+func (s *Server) WithAccountQuota(w http.ResponseWriter) (http.ResponseWriter, func()) {
+	if s == nil || s.fs == nil {
+		return w, func() {}
+	}
+	rw := &responseInterceptor{ResponseWriter: w, body: &bytes.Buffer{}, fs: s.fs}
+	return rw, rw.flush
+}
+
 type responseInterceptor struct {
 	http.ResponseWriter
 	body        *bytes.Buffer
@@ -758,13 +793,11 @@ func (r *responseInterceptor) flush() {
 	if strings.Contains(rawXML, "<D:multistatus") || strings.Contains(rawXML, "<d:multistatus") {
 		space := r.fs.GetStorageSpace()
 		usedBytes := space.UsedBytes
-		var availBytes int64 = 10 * 1024 * 1024 * 1024 * 1024 // 10 TB virtual para cuentas Unlimited
+		// Cuentas ilimitadas: siempre 10 TiB libres virtuales (no se resta lo usado,
+		// que puede superar esa cifra).
+		var availBytes int64 = 10 * 1024 * 1024 * 1024 * 1024
 		if !space.NoLimit && space.FreeBytes > 0 {
 			availBytes = space.FreeBytes
-		} else if space.NoLimit {
-			if availBytes > usedBytes {
-				availBytes -= usedBytes
-			}
 		}
 
 		prefix := "D"
@@ -779,6 +812,7 @@ func (r *responseInterceptor) flush() {
 		quotaXML := fmt.Sprintf("<%[1]s:quota-available-bytes>%[2]d</%[1]s:quota-available-bytes><%[1]s:quota-used-bytes>%[3]d</%[1]s:quota-used-bytes>", prefix, availBytes, usedBytes)
 
 		// 1. Limpiar cualquier tag vacío de cuota
+		rawXML = anyQuotaRegex.ReplaceAllString(rawXML, "")
 		rawXML = emptyQuotaRegex.ReplaceAllString(rawXML, "")
 
 		// 2. Limpiar cualquier <D:propstat> 404 que haya quedado con <D:prop></D:prop> vacío
@@ -839,7 +873,7 @@ var implicitLockWait = 10 * time.Second
 func (l *resilientLockSystem) Create(now time.Time, details webdav.LockDetails) (string, error) {
 	tok, err := l.inner.Create(now, details)
 	// Dos peticiones simultáneas sobre la misma ruta (p. ej. dos subidas que crean a
-	// la vez la misma carpeta nueva) chocan con el bloqueo implícito de la
+	// la vez la carpeta de una temporada nueva) chocan con el bloqueo implícito de la
 	// otra: la segunda espera a que acabe la primera en vez de fallar con 423. Los
 	// bloqueos explícitos de un cliente (LOCK, con propietario y caducidad) no esperan.
 	implicit := details.OwnerXML == "" && details.Duration < 0
@@ -965,7 +999,11 @@ func isExpectedNotFound(method string, err error) bool {
 		return false
 	}
 	switch method {
-	case "PROPFIND", "HEAD", "GET", "MKCOL", "DELETE":
+	case "PROPFIND", "HEAD", "GET", "DELETE":
+		return true
+	case "MKCOL":
+		// MKCOL sin carpeta madre responde 409 y el cliente (p. ej. rclone) crea
+		// entonces la madre y lo repite: es parte del protocolo, no un error.
 		return true
 	}
 	return false

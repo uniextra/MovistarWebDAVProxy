@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=256m      # en RAM: con tope (sin él, Docker deja la mitad de la memoria)
     shm_size: 256m          # Chromium usa /dev/shm
     security_opt:
       - no-new-privileges:true
