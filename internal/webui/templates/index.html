@@ -15,13 +15,39 @@
             if (dark) document.documentElement.classList.add('dark');
         })();
     </script>
-    <!-- 1. Carga externa controlada con CORS y sin Referer -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous" referrerpolicy="no-referrer">
     <script src="https://cdn.tailwindcss.com"  referrerpolicy="no-referrer"></script>
-    <!-- 2. Estilos locales limpios (sin @import externo) -->  
+    <!-- Fuentes + Estilos locales -->  
     <style>
+        /* inter - latin como google fonts en vez de font-weight: 400 700;  woff2 Chrome 36+, Opera 23+, Firefox 39+, Safari 12+, iOS 10+ */
+        @font-face {
+        font-display: swap;
+        font-family: 'Inter';
+        font-style: normal;
+        font-weight: 400;
+        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
+        }
+        @font-face {
+        font-display: swap;
+        font-family: 'Inter';
+        font-style: normal;
+        font-weight: 500;
+        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
+        }
+        @font-face {
+        font-display: swap;
+        font-family: 'Inter';
+        font-style: normal;
+        font-weight: 600;
+        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
+        }
+        @font-face {
+        font-display: swap;
+        font-family: 'Inter';
+        font-style: normal;
+        font-weight: 700;
+        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
+        }
+
         body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
         .log-line { font-family: 'ui-monospace', 'SFMono-Regular', monospace; }
         .terminal-box::-webkit-scrollbar { width: 8px; }

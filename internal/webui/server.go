@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -36,6 +36,9 @@ var indexHTML []byte
 //go:embed templates/login.html
 var loginHTML []byte
 
+//go:embed static
+var staticFiles embed.FS
+
 var loginTmpl = template.Must(template.New("login").Parse(string(loginHTML)))
 
 const (
@@ -45,7 +48,7 @@ const (
 	sessionCookieName  = "mc_webui_session"
 	defaultSessionTTL  = 24 * time.Hour
 	rememberSessionTTL = 30 * 24 * time.Hour
-	panelCSP           = "default-src 'self'; base-uri 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	panelCSP           = "default-src 'self'; base-uri 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
 )
 
 type webSession struct {
@@ -67,13 +70,13 @@ type Server struct {
 	notifier      *notifier.TelegramNotifier
 	updateChecker *updater.Checker
 	loginMu       sync.Mutex
-	loginState   map[string]*pendingLogin
-	authCfg      config.AuthConfig
-	rateLimiter  *config.AuthRateLimiter
-	sessionMu    sync.RWMutex
-	sessions     map[string]*webSession
-	webLogin     http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
-	webStatus    func() map[string]interface{}
+	loginState    map[string]*pendingLogin
+	authCfg       config.AuthConfig
+	rateLimiter   *config.AuthRateLimiter
+	sessionMu     sync.RWMutex
+	sessions      map[string]*webSession
+	webLogin      http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
+	webStatus     func() map[string]interface{}
 }
 
 // SetWebSessionStatus publica en /web_session el estado de la sesión web (modo web).
@@ -163,6 +166,13 @@ func (s *Server) Routes() http.Handler {
 	}
 	mux.HandleFunc("/web_session", s.handleWebSession)
 	mux.HandleFunc("/transfers", s.handleTransfers)
+	//mux.Handle("/static/", http.FileServer(http.FS(staticFiles)))
+	staticHandler := http.FileServer(http.FS(staticFiles))
+	mux.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Guarda los archivos estáticos en caché durante 1 año (31536000 segundos)		no hay que separar por tipo, al tener sólo woff2
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		staticHandler.ServeHTTP(w, r)
+	}))
 
 	return s.securityMiddleware(mux)
 }
@@ -176,8 +186,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		// Mejoras
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), bluetooth=()")
 
 		// /health siempre accesible sin autenticación para healthchecks de Docker
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
@@ -192,7 +201,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		
+
 		// Rutas públicas de autenticación web
 		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
 			next.ServeHTTP(w, r)
@@ -1200,8 +1209,7 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 			chatID = envChat
 		}
 	}
-	
-	
+
 	if botToken == "" || chatID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
