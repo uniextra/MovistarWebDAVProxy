@@ -153,8 +153,8 @@ func main() {
 			logger.Log("[!] ⚠️ Sesión web no iniciada. Abre el panel en /web-login/ para iniciar sesión en Movistar Cloud.")
 			startupWarnings = append(startupWarnings, "Sesión web pendiente de iniciar en /web-login/")
 			_ = notifier.Alert(
-				"⛔",
-				"", "Sesión web no iniciada (Modo Web)",
+				"",
+				"⛔", "Sesión web no iniciada (Modo Web)",
 				"Accede al panel web en /web-login/ para iniciar sesión en Movistar/O2 Cloud.",
 				"Arranque sin sesión activa, en espera de vinculación",
 			)
