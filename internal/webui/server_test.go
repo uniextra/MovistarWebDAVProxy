@@ -1124,3 +1124,65 @@ func TestWebUI_UpdateNotificationOncePerSession(t *testing.T) {
 		t.Fatalf("unexpected /version payload: %+v", verData)
 	}
 }
+
+
+func TestStaticFilesPublicAccessAndDirectoryListing(t *testing.T) {
+	// Forzamos autenticación activada en el panel
+	authCfg := config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	}
+	srv := NewServerWithAuth(nil, nil, authCfg)
+	handler := srv.Routes()
+
+	t.Run("Fuente accesible sin sesión iniciada", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/static/fonts/inter-v20-latin-400-700.woff2", nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("esperado 200 OK para la fuente sin sesión, obtenido %d", rec.Code)
+		}
+		if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "max-age=31536000") {
+			t.Errorf("cabecera Cache-Control inesperada: %q", cc)
+		}
+		if rec.Body.Len() == 0 {
+			t.Error("el cuerpo de la fuente está vacío")
+		}
+
+		// validación de cabeceras de seguridad y MIME
+		if ct := rec.Header().Get("Content-Type"); ct != "font/woff2" {
+			t.Errorf("Content-Type esperado 'font/woff2', obtenido %q", ct)
+		}
+		if corp := rec.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
+			t.Errorf("Cross-Origin-Resource-Policy esperado 'same-origin', obtenido %q", corp)
+		}
+	})
+
+	t.Run("Listado de directorios bloqueado con 404", func(t *testing.T) {
+		paths := []string{"/static/", "/static/fonts/"}
+		for _, p := range paths {
+			req := httptest.NewRequest(http.MethodGet, p, nil)
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("ruta %s: esperado 404 Not Found, obtenido %d", p, rec.Code)
+			}
+		}
+	})
+
+	t.Run("Path traversal sigue protegido por autenticación", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/static/../status", nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		// ServeMux limpia la ruta a /status (301) o el middleware exige auth (401)
+		if rec.Code == http.StatusOK {
+			t.Fatalf("fallo de seguridad: /static/../status devolvió 200 sin autenticación")
+		}
+	})
+}

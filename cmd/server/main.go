@@ -36,6 +36,7 @@ func main() {
 
 	davAuth := config.LoadWebDAVAuthConfig()
 	uiAuth := config.LoadWebUIAuthConfig()
+	var startupWarnings []string
 
 	if davAuth.AuthDisabled {
 		logger.Log("=====================================================")
@@ -44,6 +45,12 @@ func main() {
 	} else if !davAuth.HasCredentials() {
 		if davAuth.RequireAuth {
 			logger.Log("[FATAL] ❌ REQUIRE_AUTH=true pero no se han configurado WEBDAV_USER y WEBDAV_PASSWORD. Abortando arranque.")
+			_ = notifier.Alert(
+				"",
+				"❌", "Sin autenticación configurada",
+				"No se pudo inicializar el cliente de conexión con Movistar/O2 Cloud usando la configuración actual. \nREQUIRE_AUTH=true pero no se han configurado WEBDAV_USER y WEBDAV_PASSWORD. Modifica el archivo de configuración y reinicia el contenedor.",
+				"Abortando arranque",
+			)
 			os.Exit(1)
 		}
 		logger.Log("=====================================================")
@@ -74,9 +81,11 @@ func main() {
 		logger.Log("[WebDAV] 🌐 Modo Autenticación: Sesión Web (Fallback)")
 	} else {
 		logger.Log("[!] ⚠️ No se encontraron credenciales. Abre el panel web para vincular.")
+		startupWarnings = append(startupWarnings, "Cuenta de Movistar/O2 Cloud sin vincular")
+		// Se mantiene por dejarlo bien claro al usuario
 		_ = notifier.Alert(
 			"", // se mandará siempre, sino poner faltan_credenciales para recibir 1 a la hora
-			"", "Sin credenciales configuradas, cuenta no vinculada",
+			"⛔", "Sin credenciales configuradas, cuenta no vinculada",
 			"El Proxy WebDAV ha arrancado pero no hay ninguna cuenta vinculada. Accede al panel web para vincular tu cuenta de Movistar/O2 Cloud y activar el acceso.",
 			"Arranque sin sesión activa, en espera de vinculación",
 		)
@@ -144,9 +153,10 @@ func main() {
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		if !webSess.CheckLogin(checkCtx) {
 			logger.Log("[!] ⚠️ Sesión web no iniciada. Abre el panel en /web-login/ para iniciar sesión en Movistar Cloud.")
+			startupWarnings = append(startupWarnings, "Sesión web pendiente de iniciar en /web-login/")
 			_ = notifier.Alert(
 				"",
-				"", "Sesión web no iniciada (Modo Web)",
+				"⛔", "Sesión web no iniciada (Modo Web)",
 				"Accede al panel web en /web-login/ para iniciar sesión en Movistar/O2 Cloud.",
 				"Arranque sin sesión activa, en espera de vinculación",
 			)
@@ -168,6 +178,7 @@ func main() {
 		metaStore, msErr = cache.NewMetadataStore(dbPath)
 		if msErr != nil {
 			logger.Log("[WARN] Error inicializando SQLite MetadataStore en %s: %v", maskDBPath(dbPath), msErr)
+			startupWarnings = append(startupWarnings, "Error inicializando base de datos SQLite")
 		} else {
 			logger.Log("[Metadata] 🗄️ SQLite MetadataStore inicializado en %s", maskDBPath(dbPath))
 			defer metaStore.Close()
@@ -189,6 +200,7 @@ func main() {
 	if !client.HasCredentials() {
 		webdavServer.SetRunning(false)
 		logger.Log("[WebDAV] ⏸️ Proxy WebDAV pausado: esperando vinculación de cuenta en el panel web.")
+		startupWarnings = append(startupWarnings, "Proxy WebDAV pausado: esperando vinculación de cuenta en el panel web")
 	}
 
 	syncInterval := config.GetSyncInterval()
@@ -257,10 +269,11 @@ func main() {
 		logger.Log("[WebDAV] ✔ Servidor WebDAV escuchando en :%s", webdavPort)
 		if err := davHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Log("[FATAL] Error en servidor WebDAV: %v", err)
+			_ = notifier.Alert("", "🛑", "Servidor WebDAV detenido", "El servidor WebDAV se detuvo inesperadamente.", err.Error())
 		}
 	}()
 
-	// 3. Servidor Web UI
+	// 4. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
 	go watchHealth(ctx, webSess)
@@ -308,14 +321,27 @@ func main() {
 		logger.Log("[WebUI] ✔ Panel de Control escuchando en :%s", webPort)
 		if err := uiHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Log("[FATAL] Error en servidor Web UI: %v", err)
+			_ = notifier.Alert("", "🛑", "Servidor WebUI detenido", "El panel de control WebUI se detuvo inesperadamente.", err.Error())
 		}
 	}()
 
+	// Aviso inicial, revisamos si hay avisos.	PDTE completar con getLocalIP() aunque debería tener variable config mejor WEBUI_URL
+	avisoInicialIcon := "🚀"
+	avisoInicialTitle := "WebDAV Proxy iniciado"
+	avisoInicialBody := "El servicio Movistar/O2 Cloud ha arrancado correctamente."
+
+	if len(startupWarnings) > 0 {
+		avisoInicialIcon = "⚠️"
+		avisoInicialTitle = "WebDAV Proxy iniciado con avisos"
+		avisoInicialBody = "El servicio ha arrancado, pero requiere atención:\n• " + strings.Join(startupWarnings, "\n• ")
+	}
+
 	_ = notifier.Alert(
 		"",
-		"🚀", "WebDAV Proxy iniciado",
-		"El servicio Movistar/O2 Cloud ha arrancado.",
-		fmt.Sprintf("WebDAV :%s | Panel Web :%s", webdavPort, webPort),
+		avisoInicialIcon,
+		avisoInicialTitle,
+		avisoInicialBody,
+		fmt.Sprintf("WebDAV :%s | Panel Web :%s\nVersión: %s", webdavPort, webPort, AppVersion),
 	)
 
 	// Manejo de señales de terminación

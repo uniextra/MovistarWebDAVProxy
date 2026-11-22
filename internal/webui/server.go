@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -36,6 +36,9 @@ var indexHTML []byte
 //go:embed templates/login.html
 var loginHTML []byte
 
+//go:embed static
+var staticFiles embed.FS
+
 var loginTmpl = template.Must(template.New("login").Parse(string(loginHTML)))
 
 const (
@@ -45,7 +48,7 @@ const (
 	sessionCookieName  = "mc_webui_session"
 	defaultSessionTTL  = 24 * time.Hour
 	rememberSessionTTL = 30 * 24 * time.Hour
-	panelCSP           = "default-src 'self'; base-uri 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	panelCSP           = "default-src 'self'; base-uri 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
 )
 
 type webSession struct {
@@ -177,7 +180,21 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/copy_status", s.handleCopyStatus)
 	mux.HandleFunc("/copy_events", s.handleCopyEvents)
 	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
+	//mux.Handle("/static/", http.FileServer(http.FS(staticFiles)))
+	staticHandler := http.FileServer(http.FS(staticFiles))
+	mux.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Evita mostrar Listados de directorio, mostrando error 404
+		if strings.HasSuffix(r.URL.Path, "/") {
+		    http.NotFound(w, r)
+		    return
+		}		
+		// Guarda los archivos estáticos en caché durante 1 año (31536000 segundos)		no hay que separar por tipo, al tener sólo woff2
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		// Vary: Accept-Encoding si en futuro se añaden otro tipo de archivos	Si hubiera svg estáticos, proteger XSS
+		staticHandler.ServeHTTP(w, r)
+	}))
 
+	// ejecutamos el filtro de seguridad y autenticación
 	return s.securityMiddleware(mux)
 }
 
@@ -190,13 +207,14 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		// Mejoras
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), bluetooth=()")
 
-		// /health siempre accesible sin autenticación para healthchecks de Docker
-		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
+		// /health (para healthchecks de Docker), favicon y recursos estáticos siempre accesibles sin autenticación
+		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" || strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}
+
 
 		// Protección CSRF / Cross-Origin para métodos que modifican estado
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
@@ -368,6 +386,8 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) boo
 
 func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	// PDTE revisar peticiones API, pero asegura se sirvan frescas
+	//w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
@@ -683,7 +703,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/svg+xml")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", "public, max-age=604800")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
 	_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#2563eb"/><path d="M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z" fill="white"/></svg>`))
 }
 
