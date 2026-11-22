@@ -372,6 +372,8 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) boo
 
 func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	// PDTE revisar peticiones API, pero asegura se sirvan frescas
+	//w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
