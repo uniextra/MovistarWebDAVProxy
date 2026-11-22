@@ -169,8 +169,14 @@ func (s *Server) Routes() http.Handler {
 	//mux.Handle("/static/", http.FileServer(http.FS(staticFiles)))
 	staticHandler := http.FileServer(http.FS(staticFiles))
 	mux.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Evita mostrar Listados de directorio, mostrando error 404
+		if strings.HasSuffix(r.URL.Path, "/") {
+		    http.NotFound(w, r)
+		    return
+		}		
 		// Guarda los archivos estáticos en caché durante 1 año (31536000 segundos)		no hay que separar por tipo, al tener sólo woff2
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		// Vary: Accept-Encoding si en futuro se añaden otro tipo de archivos	Si hubiera svg estáticos, proteger XSS
 		staticHandler.ServeHTTP(w, r)
 	}))
 
@@ -188,11 +194,12 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), bluetooth=()")
 
-		// /health siempre accesible sin autenticación para healthchecks de Docker
-		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
+		// /health (para healthchecks de Docker), favicon y recursos estáticos siempre accesibles sin autenticación
+		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" || strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}
+
 
 		// Protección CSRF / Cross-Origin para métodos que modifican estado
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
