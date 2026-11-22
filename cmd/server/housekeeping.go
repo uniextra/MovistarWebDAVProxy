@@ -21,19 +21,19 @@ type accountState struct {
 }
 
 // trashEmptyInterval es cada cuánto se vacía la papelera (WEB_TRASH_EMPTY_EVERY,
-// p. ej. "6h"). Desactivado por defecto: vaciarla borra para siempre lo que haya en
-// ella, también lo que se haya borrado a mano. Útil cuando lo que se borra son
-// sobre todo temporales (p. ej. los trozos del chunker de rclone), porque la
-// papelera cuenta para el límite de carpetas de la cuenta.
+// p. ej. "6h"; "0" lo desactiva). Por defecto, cada 6 h: lo que borra el proxy son
+// sobre todo trozos temporales, y la papelera cuenta para el límite de carpetas.
 func trashEmptyInterval() time.Duration {
 	v := strings.TrimSpace(os.Getenv("WEB_TRASH_EMPTY_EVERY"))
-	if v == "" || v == "0" {
+	if v == "" {
+		return 6 * time.Hour
+	}
+	if v == "0" {
 		return 0
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d < time.Minute {
-		logger.Log("[Cuenta] ⚠️ WEB_TRASH_EMPTY_EVERY=%q no válido (mínimo 1m); vaciado automático desactivado.", v)
-		return 0
+		return 6 * time.Hour
 	}
 	return d
 }

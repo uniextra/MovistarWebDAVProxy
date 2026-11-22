@@ -68,6 +68,8 @@ func main() {
 	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
 		notifier.Default.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
 	}
+	// La configuración propia del proxy (modo web, guardada desde el panel) manda.
+	notifier.LoadStored()
 
 	if config.WebSessionEnabled() {
 		// El modo de autenticación se anuncia al iniciar la sesión web.
@@ -185,6 +187,7 @@ func main() {
 
 	maxDown, maxUp := config.TransferLimits(client.WebMode())
 	webdav.SetTransferLimits(maxDown, maxUp)
+	webui.LoadUploadBandwidth()
 	if client.WebMode() && strings.TrimSpace(os.Getenv("SAPI_MAX_CONCURRENT")) == "" {
 		// En modo web las llamadas a la API ya las limita el navegador; aquí solo hay
 		// que dejar sitio a cada transferencia para que una subida no frene las lecturas.
@@ -273,10 +276,30 @@ func main() {
 	// 4. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
+	go watchHealth(ctx, webSess)
+	watchUploadSizeLimit()
+	// Contenido de los archivos diminutos (fichas del chunker...), una vez y en segundo
+	// plano cuando la base local esté sincronizada.
+	go func() {
+		for ctx.Err() == nil {
+			if fs := webdavServer.FS(); fs != nil {
+				if ms := fs.MetadataStore(); ms != nil && ms.HasInitialSync() {
+					fs.PrefillTinyContent(ctx)
+					return
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+		}
+	}()
 	go uiServer.UpdateChecker().Start(ctx, time.Hour)
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))
+		uiServer.SetWebRelogin(webSess.ReloginView().Handler("/web-relogin/"))
 		acct := &accountState{}
 		go runWebHousekeeping(ctx, client, webSess.LoggedIn, acct)
 		uiServer.SetWebSessionStatus(func() map[string]interface{} { return acct.status(webSess.Status()) })

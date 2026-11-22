@@ -21,10 +21,10 @@ func TestDeleteFile_WebModeUsesWebCall(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	c := newWebTestClient(t, srv.URL)
-	if err := c.DeleteFile("1234567890", "archivo-chunk001_tmp000"); err != nil {
+	if err := c.DeleteFile("7281688111", "aadi3glf-chunk001_gs5zo4"); err != nil {
 		t.Fatal(err)
 	}
-	want := `/sapi/media/file?action=delete&softdelete=true {"data":{"files":[1234567890]}}`
+	want := `/sapi/media/file?action=delete&softdelete=true {"data":{"files":[7281688111]}}`
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("llamadas = %q, esperado %q", got, want)
 	}

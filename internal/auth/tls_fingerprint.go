@@ -13,6 +13,7 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
+	"golang.org/x/sys/cpu"
 
 	"movistar-webdav-proxy/internal/config"
 )
@@ -115,7 +116,10 @@ func helloSpecFor(helloID utls.ClientHelloID) (utls.ClientHelloSpec, bool) {
 // newUClient crea la UConn para helloID, aplicando la especificación a medida si
 // la huella es propia.
 func newUClient(conn net.Conn, cfg *utls.Config, helloID utls.ClientHelloID) (*utls.UConn, error) {
-	spec, custom := helloSpecFor(helloID)
+	spec, custom := chachaFirstSpec(helloID) // sin AES por hardware: ChaCha20 delante (ver preferChaCha)
+	if !custom {
+		spec, custom = helloSpecFor(helloID)
+	}
 	if !custom {
 		return utls.UClient(conn, cfg, helloID), nil
 	}
@@ -136,10 +140,7 @@ func FingerprintName() string {
 // uTLS para que el ClientHello imite al perfil elegido en lugar del de crypto/tls.
 // Firma compatible con http2.Transport.DialTLSContext.
 func dialTLSContextWithUTLSALPN(ctx context.Context, network, addr string, nextProtos []string) (net.Conn, error) {
-	plainConn, err := (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext(ctx, network, addr)
+	plainConn, err := newDialer().DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +186,9 @@ func dialTLSContextWithUTLSHTTP1(ctx context.Context, network, addr string) (net
 func http1OnlySpec(helloID utls.ClientHelloID) (utls.ClientHelloSpec, error) {
 	if spec, ok := helloSpecFor(helloID); ok {
 		// Sin ALPN, como el cliente oficial: el servidor responde en HTTP/1.1.
+		if preferChaCha() {
+			spec.CipherSuites = chachaFirst(spec.CipherSuites)
+		}
 		return spec, nil
 	}
 	spec, err := utls.UTLSIdToSpec(helloID)
@@ -196,7 +200,80 @@ func http1OnlySpec(helloID utls.ClientHelloID) (utls.ClientHelloSpec, error) {
 			alpn.AlpnProtocols = []string{"http/1.1"}
 		}
 	}
+	if preferChaCha() {
+		spec.CipherSuites = chachaFirst(spec.CipherSuites)
+	}
 	return spec, nil
+}
+
+// preferChaCha indica si usar ChaCha20-Poly1305 en vez de AES-GCM (ver chachaFirst). Chrome (BoringSSL)
+// lo hace en procesadores sin AES por hardware, como el de la Raspberry Pi 4: ahí AES
+// va por software y es ~5 veces más lento que ChaCha20 (medido en la Pi 4: 69 frente a
+// 322 MB/s por núcleo), y con AES el cifrado de la conexión con Movistar se comía la
+// CPU. TLS_PREFER_CHACHA=true/false lo fuerza. Por defecto, según el procesador, salvo
+// en el perfil desktop: ahí se mantiene intacta la huella del cliente oficial y solo
+// se aplica con TLS_PREFER_CHACHA=true.
+func preferChaCha() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TLS_PREFER_CHACHA"))) {
+	case "true", "1", "yes", "si", "sí":
+		return true
+	case "false", "0", "no":
+		return false
+	}
+	if config.IsDesktopProfile() {
+		return false
+	}
+	return !hasAESHardware()
+}
+
+func hasAESHardware() bool {
+	return cpu.ARM64.HasAES || cpu.X86.HasAES || cpu.S390X.HasAES
+}
+
+// chachaFirst devuelve los cifrados con los ChaCha20 delante (tras el GREASE inicial,
+// si lo hay) y sin los AES-GCM de TLS 1.3: aunque ChaCha20 vaya primero, CloudFront
+// elige AES si se le ofrece (preferencia del servidor), y Movistar negocia TLS 1.3. Con
+// solo ChaCha20 en TLS 1.3 responde igual (comprobado el 20/11/2026: portada 200, API
+// sin sesión 401, descarga 200, sin 403 de bot). Los de TLS 1.2 se quedan en su orden.
+func chachaFirst(suites []uint16) []uint16 {
+	isChaCha := func(c uint16) bool {
+		return c == utls.TLS_CHACHA20_POLY1305_SHA256 ||
+			c == utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305 ||
+			c == utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+	}
+	out := make([]uint16, 0, len(suites))
+	i := 0
+	for ; i < len(suites) && suites[i]&0x0f0f == 0x0a0a; i++ { // GREASE
+		out = append(out, suites[i])
+	}
+	for _, c := range suites[i:] {
+		if isChaCha(c) {
+			out = append(out, c)
+		}
+	}
+	for _, c := range suites[i:] {
+		if !isChaCha(c) && c != utls.TLS_AES_128_GCM_SHA256 && c != utls.TLS_AES_256_GCM_SHA384 {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// chachaFirstSpec devuelve el ClientHello del perfil con ChaCha20 delante, si toca
+// (preferChaCha) y el perfil tiene especificación fija.
+func chachaFirstSpec(helloID utls.ClientHelloID) (utls.ClientHelloSpec, bool) {
+	if !preferChaCha() {
+		return utls.ClientHelloSpec{}, false
+	}
+	spec, ok := helloSpecFor(helloID)
+	if !ok {
+		var err error
+		if spec, err = utls.UTLSIdToSpec(helloID); err != nil {
+			return spec, false
+		}
+	}
+	spec.CipherSuites = chachaFirst(spec.CipherSuites)
+	return spec, true
 }
 
 func dialTLSContextHTTP1Only(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -207,10 +284,7 @@ func dialTLSContextHTTP1Only(ctx context.Context, network, addr string) (net.Con
 		return dialTLSContextWithUTLSALPN(ctx, network, addr, []string{"http/1.1"})
 	}
 
-	plainConn, err := (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext(ctx, network, addr)
+	plainConn, err := newDialer().DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -275,6 +349,15 @@ func (t *fingerprintedTransport) RoundTrip(req *http.Request) (*http.Response, e
 	return t.h1.RoundTrip(req)
 }
 
+// CloseIdleConnections cierra las conexiones abiertas de todos sus transportes.
+func (t *fingerprintedTransport) CloseIdleConnections() {
+	t.h1.CloseIdleConnections()
+	t.h2.CloseIdleConnections()
+	if t.sapiH1 != nil {
+		t.sapiH1.CloseIdleConnections()
+	}
+}
+
 // UsesHTTP1ForSAPI indica si los hosts SAPI van por HTTP/1.1 (perfil "desktop").
 func (t *fingerprintedTransport) UsesHTTP1ForSAPI() bool {
 	return t.sapiH1 != nil
@@ -296,10 +379,7 @@ func NewFingerprintedTransport() http.RoundTripper {
 	}
 
 	h1 := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext: newDialer().DialContext,
 		// El host de subida devuelve HTTP 408 ("Server timeout waiting for the
 		// HTTP request from the client") si se reutiliza una conexión keep-alive
 		// que el servidor ya consideraba caducada. Forzamos conexión nueva por
@@ -312,6 +392,14 @@ func NewFingerprintedTransport() http.RoundTripper {
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		MaxConnsPerHost:       100,
+	}
+
+	if preferChaCha() {
+		// Sin AES por hardware, crypto/tls negocia AES-GCM con upload.* (CloudFront
+		// elige AES si se le ofrece) y lo cifra por software: en la Pi 4 era lo que más
+		// CPU gastaba al subir (perfil del 20/11/2026: ~45 % del proxy en AES/GHASH a
+		// ~28 MB/s). Con uTLS solo se ofrece ChaCha20 en TLS 1.3, como en las descargas.
+		h1.DialTLSContext = dialTLSContextHTTP1Only
 	}
 
 	ft := &fingerprintedTransport{h1: h1, h2: h2}
@@ -336,10 +424,7 @@ func NewFingerprintedTransport() http.RoundTripper {
 // HTTP/1.1 con keep-alive (como el cliente oficial) y ALPN "http/1.1".
 func newSAPIHTTP1Transport() *http.Transport {
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           newDialer().DialContext,
 		DialTLSContext:        dialTLSContextHTTP1Only,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -356,10 +441,7 @@ func newSAPIHTTP1Transport() *http.Transport {
 // CloudFront trata el login de forma distinta a los endpoints SAPI normales.
 func NewHTTP1FingerprintedTransport() http.RoundTripper {
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           newDialer().DialContext,
 		DialTLSContext:        dialTLSContextWithUTLSHTTP1,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -375,10 +457,7 @@ func NewHTTP1FingerprintedTransport() http.RoundTripper {
 // de CloudFront tratan de forma distinta el ClientHello cuando ALPN está vacío.
 func NewNoALPNHTTP1Transport() http.RoundTripper {
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           newDialer().DialContext,
 		DialTLSContext:        dialTLSContextWithUTLSNoALPN,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,

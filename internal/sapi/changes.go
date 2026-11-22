@@ -336,6 +336,11 @@ func (c *Client) GetMediaByIDs(ids []int64) ([]MediaItem, error) {
 			return nil, fmt.Errorf("API error in get media (batch %d-%d): %v", i, end, res.Error)
 		}
 
+		for _, m := range res.Data.Media {
+			if m.ID != "" && m.URL != "" {
+				c.storeFreshURL(m.ID, m.URL) // recién firmada: sirve para descargar
+			}
+		}
 		allMedia = append(allMedia, res.Data.Media...)
 	}
 
