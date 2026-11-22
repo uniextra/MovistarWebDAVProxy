@@ -24,7 +24,7 @@ const (
 
 var (
 	// Version se inyecta en tiempo de compilación mediante -ldflags "-X movistar-webdav-proxy/internal/config.Version=..."
-	Version        = "v2.6.18"
+	Version        = "v2.6.19"
 	TokensDir      = "/app/tokens"
 	fileLock       sync.Mutex
 	phoneNonDigits = regexp.MustCompile(`[^\d]`)
