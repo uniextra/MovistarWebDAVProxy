@@ -99,3 +99,12 @@ func TestUnsupportedAsFileIsOptIn(t *testing.T) {
 		t.Error("con true debe activarse")
 	}
 }
+
+func TestDNSCacheTTL(t *testing.T) {
+	for v, want := range map[string]time.Duration{"": 60 * time.Second, "0": 0, "30": 30 * time.Second, "-5": 60 * time.Second, "x": 60 * time.Second} {
+		t.Setenv("SAPI_DNS_CACHE_SEC", v)
+		if got := DNSCacheTTL(); got != want {
+			t.Errorf("SAPI_DNS_CACHE_SEC=%q: %v, quería %v", v, got, want)
+		}
+	}
+}

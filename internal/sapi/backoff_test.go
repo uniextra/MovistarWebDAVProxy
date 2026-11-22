@@ -11,6 +11,9 @@ import (
 )
 
 func TestNewClient_MaxIdleConnsPerHost(t *testing.T) {
+	// Perfil browser; el desktop abre una conexión por petición, como la app
+	// (TestDesktopConnections* en internal/auth).
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
 	client, err := NewClient(config.AccountConfig{
 		Provider:      "movistar",
 		Phone:         "612345678",

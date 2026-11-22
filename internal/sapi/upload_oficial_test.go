@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -829,5 +830,100 @@ func TestOfficialUpload_UnsupportedAsFileNeverOnOverwrite(t *testing.T) {
 	}
 	if f.posts != 1 || len(f.deleted) != 0 {
 		t.Fatalf("sin reintentos ni borrados: %d envíos, retirados %v", f.posts, f.deleted)
+	}
+}
+
+// servidor del fake que cuenta conexiones; con reject408 responde 408 la primera vez
+// que se envía el contenido por una conexión ya usada (como el servidor de subidas con
+// una conexión que él daba por caducada).
+func newCountingOfficialSAPI(t *testing.T, reject408 bool) (*fakeOfficialSAPI, *httptest.Server, *atomic.Int32, *atomic.Int32, *atomic.Int32) {
+	f, _ := newFakeOfficialSAPI(t)
+	var conns, reqs, rejected atomic.Int32
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs.Add(1)
+		mu.Lock()
+		reused := seen[r.RemoteAddr]
+		seen[r.RemoteAddr] = true
+		mu.Unlock()
+		if reject408 && reused && r.Method == http.MethodPost && r.URL.Query().Get("action") == "save" && rejected.Load() == 0 {
+			rejected.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Connection", "close")
+			http.Error(w, "Server timeout waiting for the HTTP request from the client.", http.StatusRequestTimeout)
+			return
+		}
+		f.serve(w, r)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return f, srv, &conns, &reqs, &rejected
+}
+
+func TestOfficialUpload_NewConnectionPerRequestLikeTheApp(t *testing.T) {
+	f, srv, conns, reqs, _ := newCountingOfficialSAPI(t, false)
+	c := newOfficialTestClient(t, srv)
+	c.SetMediaRefreshHook(nil)
+	for _, n := range []string{"a.bin", "b.bin"} {
+		if _, err := c.UploadFileToFolder(n, bytes.NewReader([]byte("hola")), 4, 1, "", "", time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if conns.Load() != reqs.Load() {
+		t.Fatalf("%d peticiones por %d conexiones: la app abre una por petición", reqs.Load(), conns.Load())
+	}
+	if got := f.postHeader[0].Get("Connection"); got != "Keep-Alive" {
+		t.Fatalf("Connection = %q, la app envía «Keep-Alive»", got)
+	}
+}
+
+func TestOfficialUpload_KeepaliveReusesConnections(t *testing.T) {
+	t.Setenv("SAPI_KEEPALIVE", "true")
+	_, srv, conns, reqs, _ := newCountingOfficialSAPI(t, false)
+	c := newOfficialTestClient(t, srv)
+	for _, n := range []string{"a.bin", "b.bin", "c.bin"} {
+		if _, err := c.UploadFileToFolder(n, bytes.NewReader([]byte("hola")), 4, 1, "", "", time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if conns.Load() >= reqs.Load() {
+		t.Fatalf("con SAPI_KEEPALIVE: %d peticiones por %d conexiones, debería reutilizar", reqs.Load(), conns.Load())
+	}
+}
+
+// Una conexión reutilizada que el servidor de subidas rechaza con 408: se repite en
+// una nueva y la subida termina bien.
+func TestOfficialUpload_KeepaliveStaleConnectionRetried(t *testing.T) {
+	t.Setenv("SAPI_KEEPALIVE", "true")
+	f, srv, _, _, rejected := newCountingOfficialSAPI(t, true)
+	c := newOfficialTestClient(t, srv)
+	officialUploadBackoff = func(int) time.Duration { return time.Hour } // no debe esperar
+	payload := randomPayload(t, 2048)
+	done := make(chan error, 1)
+	var item *MediaItem
+	go func() {
+		var err error
+		item, err = c.UploadFileToFolder("x.bin", bytes.NewReader(payload), int64(len(payload)), 1, "", "", time.Time{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("la subida esperó: el reintento tras una conexión caducada debe ser inmediato")
+	}
+	if rejected.Load() != 1 {
+		t.Fatalf("el servidor debería haber rechazado 1 envío, rechazó %d", rejected.Load())
+	}
+	if !bytes.Equal(f.data[item.ID], payload) {
+		t.Fatal("contenido distinto")
 	}
 }
