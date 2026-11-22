@@ -79,6 +79,29 @@ func (w *WebDAVFileWriter) rejectUnsupported() error {
 
 type uploadGuardKey struct{}
 
+// moveGuardKey / moveGuard: un MOVE que O2 no pudo completar por algo pasajero (un
+// destino que aún no se sirve, un fallo al subir) responde 503 + Retry-After con el
+// motivo, en vez del 403 de x/net/webdav, que los clientes toman por «sin permiso».
+type moveGuardKey struct{}
+
+type moveGuard struct {
+	retryLater atomic.Bool
+	reason     atomic.Value // string
+}
+
+func (g *moveGuard) setRetryLater(reason string) {
+	if g == nil {
+		return
+	}
+	g.reason.Store(reason)
+	g.retryLater.Store(true)
+}
+
+func moveRetryLater(ctx context.Context, reason string) {
+	g, _ := ctx.Value(moveGuardKey{}).(*moveGuard)
+	g.setRetryLater(reason)
+}
+
 type uploadGuard struct {
 	expected int64 // Content-Length anunciado (-1 si no se sabe)
 	broken   atomic.Bool
@@ -2339,6 +2362,10 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 var (
 	reuploadSourceWait = 45 * time.Second
 	reuploadSourcePoll = 2 * time.Second
+	// reuploadValidationWait: lo más que se espera a que O2 valide el destino re-subido
+	// antes de comprobarlo (get-validation-status, como la app). Con archivos de
+	// Hyper Backup se han visto 30-46 s entre la subida y que O2 sirva el destino.
+	reuploadValidationWait = 3 * time.Minute
 )
 
 // waitForDownloadURL consulta por ID la URL de descarga de un archivo recién subido
@@ -2431,12 +2458,13 @@ func (mfs *MovistarFS) moveByReupload(ctx context.Context, oldMedia *sapi.MediaI
 	// el destino entero y se comparará por hash. En la ruta de contenido tenemos los
 	// bytes exactos en memoria, así que se verifica el destino por tamaño (sin forzar
 	// una descarga) y el contenido queda respaldado por la copia en RAM.
-	return mfs.finishReupload(oldMedia, reader, cachedContent, newName, newFolderID, modTime, srcHash, content == nil)
+	return mfs.finishReupload(ctx, oldMedia, reader, cachedContent, newName, newFolderID, modTime, srcHash, content == nil)
 }
 
-func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSeeker, cachedContent []byte, newName string, newFolderID int64, modTime time.Time, srcHash string, verifyContent bool) (*MemoryFile, error) {
+func (mfs *MovistarFS) finishReupload(ctx context.Context, oldMedia *sapi.MediaItem, reader io.ReadSeeker, cachedContent []byte, newName string, newFolderID int64, modTime time.Time, srcHash string, verifyContent bool) (*MemoryFile, error) {
 	newItem, err := mfs.client.UploadFileToFolder(newName, reader, oldMedia.Size, newFolderID, "", "", modTime)
 	if err != nil {
+		moveRetryLater(ctx, fmt.Sprintf("O2 Cloud no aceptó la copia de '%s' con el nombre nuevo; el original sigue intacto", oldMedia.Name))
 		return nil, fmt.Errorf("moveByReupload upload error: %w", err)
 	}
 
@@ -2452,6 +2480,14 @@ func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSe
 	// EOF limpio) no es prueba de fallo: se reintenta hasta reuploadSourceWait.
 	confirmedURL := newItem.URL
 	confirmed := false
+	// Primero, como la app tras subir, esperar a que O2 dé el destino por validado: hasta
+	// entonces no lo sirve entero y la comprobación de abajo solo gastaría su plazo.
+	t0 := time.Now()
+	if mfs.client.WaitMediaValidated(ctx, newItem.ID, newFolderID, reuploadValidationWait) {
+		if d := time.Since(t0); d > 5*time.Second {
+			logger.Log("[WebDAV] ⏳ '%s' validado por O2 en %s; se comprueba antes de borrar el original", newName, d.Round(time.Second))
+		}
+	}
 	deadline := time.Now().Add(reuploadSourceWait)
 	for {
 		dst, qErr := mfs.client.GetMediaByID(newItem.ID)
@@ -2513,10 +2549,19 @@ func (mfs *MovistarFS) finishReupload(oldMedia *sapi.MediaItem, reader io.ReadSe
 			// vn != size con EOF limpio: el destino existe pero aún no se sirve entero,
 			// como cualquier subida reciente. No es prueba de fallo: se reintenta.
 		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("moveByReupload: no se pudo confirmar el destino '%s' a tiempo; no se borra el origen", newName)
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			// El original sigue intacto. Se retira la copia sin confirmar para que el
+			// reintento del cliente no deje dos archivos con el mismo nombre en O2.
+			if dErr := mfs.client.DeleteFile(newItem.ID, newName); dErr != nil {
+				logger.Log("[WebDAV] ⚠️ No se pudo retirar la copia sin confirmar '%s' (ID: %s): %v", newName, newItem.ID, dErr)
+			}
+			moveRetryLater(ctx, fmt.Sprintf("O2 Cloud aún no sirve la copia de '%s' con el nombre nuevo; el original sigue intacto, reinténtalo", oldMedia.Name))
+			return nil, fmt.Errorf("moveByReupload: no se pudo confirmar el destino '%s' a tiempo; se retira la copia y no se borra el origen", newName)
 		}
-		time.Sleep(reuploadSourcePoll)
+		select {
+		case <-ctx.Done():
+		case <-time.After(reuploadSourcePoll):
+		}
 	}
 
 	// Confirmado: ya es seguro borrar el original.
