@@ -74,8 +74,9 @@ func readAll(t *testing.T, rc io.ReadCloser) string {
 	return string(b)
 }
 
-// Una URL firmada caducada se renueva por ID, se reintenta y se recuerda para las
-// lecturas siguientes (sin volver a probar la caducada).
+// Como la web, antes de descargar se pide la URL del archivo por ID (la guardada
+// puede haber caducado) y se reutiliza para las lecturas siguientes: la caducada
+// nunca se prueba.
 func TestWebDownload_ExpiredURLIsRefreshedAndRemembered(t *testing.T) {
 	var oldHits, lookups int32
 	srv := webDownloadServer(t, &oldHits, &lookups)
@@ -97,8 +98,8 @@ func TestWebDownload_ExpiredURLIsRefreshedAndRemembered(t *testing.T) {
 	if got := readAll(t, rc); got != webTestContent[20:] {
 		t.Fatalf("contenido %q, esperado %q", got, webTestContent[20:])
 	}
-	if oldHits != 1 || lookups != 1 {
-		t.Errorf("esperada 1 petición a la URL caducada y 1 renovación; hubo %d y %d", oldHits, lookups)
+	if oldHits != 0 || lookups != 1 {
+		t.Errorf("esperadas 0 peticiones a la URL caducada y 1 renovación; hubo %d y %d", oldHits, lookups)
 	}
 }
 
@@ -123,7 +124,7 @@ func TestWebDownload_IgnoredRangeIsAnError(t *testing.T) {
 	}
 }
 
-// También en modo normal (sin WebMode) una URL firmada caducada (403) se renueva por ID.
+// También en modo normal (sin WebMode) la URL se pide por ID antes de descargar.
 func TestNormalDownload_ExpiredURLIsRefreshedAndRemembered(t *testing.T) {
 	var oldHits, lookups int32
 	srv := webDownloadServer(t, &oldHits, &lookups)
@@ -155,8 +156,8 @@ func TestNormalDownload_ExpiredURLIsRefreshedAndRemembered(t *testing.T) {
 	if got := readAll(t, rc); got != webTestContent[10:] {
 		t.Fatalf("contenido %q, esperado %q", got, webTestContent[10:])
 	}
-	if oldHits != 1 || lookups != 1 {
-		t.Errorf("esperada 1 petición a la URL caducada y 1 renovación; hubo %d y %d", oldHits, lookups)
+	if oldHits != 0 || lookups != 1 {
+		t.Errorf("esperadas 0 peticiones a la URL caducada y 1 renovación; hubo %d y %d", oldHits, lookups)
 	}
 }
 
@@ -215,5 +216,26 @@ func TestUploadFileToFolder_TransientMED1048RetriesAndSucceeds(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 2 {
 		t.Fatalf("expected 2 upload attempts, got %d", got)
+	}
+}
+
+// Pasado DOWNLOAD_URL_MAX_AGE se vuelve a pedir la URL; si la renovación previa
+// falla, se intenta con la guardada y, si da 403, se renueva y se reintenta.
+func TestWebDownload_RenewsAfterMaxAgeAndFallsBack(t *testing.T) {
+	var oldHits, lookups int32
+	srv := webDownloadServer(t, &oldHits, &lookups)
+	c := newWebTestClient(t, srv.URL)
+	t.Setenv("DOWNLOAD_URL_MAX_AGE", "1ms")
+	item := MediaItem{ID: "42", Name: "a.bin", Size: int64(len(webTestContent)), URL: srv.URL + "/dl/old"}
+	for i := 0; i < 2; i++ {
+		rc, err := c.DownloadFileStreamRange(item, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		readAll(t, rc)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if oldHits != 0 || lookups != 2 {
+		t.Fatalf("esperadas 2 renovaciones sin tocar la URL caducada; hubo %d y %d", oldHits, lookups)
 	}
 }

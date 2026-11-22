@@ -67,13 +67,14 @@ type Server struct {
 	notifier      *notifier.TelegramNotifier
 	updateChecker *updater.Checker
 	loginMu       sync.Mutex
-	loginState   map[string]*pendingLogin
-	authCfg      config.AuthConfig
-	rateLimiter  *config.AuthRateLimiter
-	sessionMu    sync.RWMutex
-	sessions     map[string]*webSession
-	webLogin     http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
-	webStatus    func() map[string]interface{}
+	loginState    map[string]*pendingLogin
+	authCfg       config.AuthConfig
+	rateLimiter   *config.AuthRateLimiter
+	sessionMu     sync.RWMutex
+	sessions      map[string]*webSession
+	webLogin      http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
+	webRelogin    http.Handler // inicio de sesión aparte sin cerrar el actual, bajo /web-relogin/
+	webStatus     func() map[string]interface{}
 }
 
 // SetWebSessionStatus publica en /web_session el estado de la sesión web (modo web).
@@ -85,6 +86,12 @@ func (s *Server) SetWebSessionStatus(f func() map[string]interface{}) {
 // de Movistar Cloud (modo web). Queda detrás de la autenticación del panel.
 func (s *Server) SetWebLogin(h http.Handler) {
 	s.webLogin = h
+}
+
+// SetWebRelogin publica en /web-relogin/ la vista para volver a iniciar sesión (p. ej.
+// con «No cerrar sesión») sin cerrar la sesión en uso. Detrás de la autenticación del panel.
+func (s *Server) SetWebRelogin(h http.Handler) {
+	s.webRelogin = h
 }
 
 type pendingLogin struct {
@@ -156,13 +163,20 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/unlink", s.handleUnlink)
 	mux.HandleFunc("/test_telegram", s.handleTestTelegram)
 	mux.HandleFunc("/save_telegram", s.handleSaveTelegram)
+	mux.HandleFunc("/telegram_status", s.handleTelegramStatus)
 	mux.HandleFunc("/api/diagnostic/compare", s.handleDiagnosticCompare)
 	mux.HandleFunc("/diagnostic/compare", s.handleDiagnosticCompare)
 	if s.webLogin != nil {
 		mux.Handle("/web-login/", s.webLogin)
 	}
+	if s.webRelogin != nil {
+		mux.Handle("/web-relogin/", s.webRelogin)
+	}
 	mux.HandleFunc("/web_session", s.handleWebSession)
 	mux.HandleFunc("/transfers", s.handleTransfers)
+	mux.HandleFunc("/copy_status", s.handleCopyStatus)
+	mux.HandleFunc("/copy_events", s.handleCopyEvents)
+	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
 
 	return s.securityMiddleware(mux)
 }
@@ -178,7 +192,6 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 
-
 		// /health siempre accesible sin autenticación para healthchecks de Docker
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
 			next.ServeHTTP(w, r)
@@ -192,7 +205,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		
+
 		// Rutas públicas de autenticación web
 		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
 			next.ServeHTTP(w, r)
@@ -1200,8 +1213,7 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 			chatID = envChat
 		}
 	}
-	
-	
+
 	if botToken == "" || chatID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
@@ -1217,8 +1229,7 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.notifier.UpdateCredentials(botToken, chatID)
-	if err := s.notifier.SendTestAlert(cfg.Provider); err != nil {
+	if err := notifier.SendTestWith(botToken, chatID, cfg.Provider); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
 			"message": err.Error(),
@@ -1226,6 +1237,35 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+}
+
+// handleTelegramStatus: si Telegram está configurado (token enmascarado), para el panel.
+func (s *Server) handleTelegramStatus(w http.ResponseWriter, r *http.Request) {
+	token, chat := notifier.Default.Credentials()
+	on, lastAt, lastErr := notifier.Default.Status()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "telegram_configured": on,
+		"telegram_token_masked": logger.Mask(token), "telegram_chat_id": chat, "last_sent": lastAt, "last_error": lastErr})
+}
+
+// saveTelegramWeb guarda Telegram en la configuración del proxy (modo web, sin cuenta
+// por teléfono). Un token vacío o enmascarado conserva el actual.
+func (s *Server) saveTelegramWeb(w http.ResponseWriter, token, chat string) {
+	if cur, _ := notifier.Default.Credentials(); token == "" || strings.Contains(token, "…") || strings.Contains(token, "****") {
+		token = cur
+	}
+	if !config.ValidateBotToken(token) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Formato de Token de Telegram inválido (esperado: 123456:ABC-DEF...)"})
+		return
+	}
+	if !config.ValidateChatID(chat) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Formato de Chat ID inválido (esperado: ID numérico o @canal)"})
+		return
+	}
+	if err := notifier.SaveStored(token, chat); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "No se pudo guardar: " + err.Error()})
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
@@ -1240,6 +1280,10 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 	}
 
 	phone := config.SanitizePhone(body.Phone)
+	if phone == "" && config.WebSessionEnabled() {
+		s.saveTelegramWeb(w, strings.TrimSpace(body.BotToken), strings.TrimSpace(body.ChatID))
+		return
+	}
 	if phone == "" {
 		if activeCfg := s.client.GetConfig(); activeCfg.Phone != "" {
 			phone = activeCfg.Phone

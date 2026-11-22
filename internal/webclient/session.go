@@ -32,11 +32,14 @@ const sapiJS = `window.__sapi = async (method, path, body, ctype, deviceId) => {
   const m = document.cookie.match(/validationKey=([^;]+)/);
   const vk = m ? decodeURIComponent(m[1]) : '';
   const sep = path.includes('?') ? '&' : '?';
-  const opts = {method, credentials: 'include', headers: {'Accept': 'application/json', 'X-deviceid': 'web-' + deviceId}};
+  const opts = {method, credentials: 'include', headers: {'Accept': 'application/json', 'X-deviceid': 'web-' + deviceId}, signal: AbortSignal.timeout(85000)};
   if (body !== null) { opts.headers['Content-Type'] = ctype || 'application/json;charset=UTF-8'; opts.body = body; }
   const r = await fetch(path + (vk ? sep + 'validationkey=' + encodeURIComponent(vk) : ''), opts);
   return {status: r.status, ctype: r.headers.get('content-type') || '', body: await r.text()};
 }; true`
+
+// sapiCallTimeout es lo máximo que espera una llamada a SAPI desde la web.
+const sapiCallTimeout = 90 * time.Second
 
 // ErrNotLoggedIn indica que la sesión de la web no está iniciada o ha caducado.
 var ErrNotLoggedIn = errors.New("sesión web de Movistar Cloud no iniciada o caducada")
@@ -58,6 +61,7 @@ type Session struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	userAgent   string
+	launchMu    sync.Mutex // un solo relanzamiento a la vez (si no, quedan Chromium huérfanos)
 
 	stateMu    sync.RWMutex
 	loggedIn   bool
@@ -74,6 +78,9 @@ type Session struct {
 	renewMu      sync.RWMutex
 	lastRenewAt  time.Time
 	lastRenewTry time.Time
+	renewFails   int // renovaciones fallidas seguidas (al llegar a renewMaxFails se avisa; nunca se borra la PLC)
+
+	re relogin // inicio de sesión aparte, sin cerrar el actual (relogin.go)
 }
 
 // Response es la respuesta de una llamada a SAPI hecha desde la pestaña.
@@ -130,6 +137,20 @@ func (s *Session) start() error {
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.WindowSize(1280, 900),
+		// Menos memoria y procesos (p. ej. en una Raspberry Pi): sin GPU, extensiones
+		// ni servicios de Chrome en segundo plano, y como mucho 2 procesos de pestaña.
+		// Son las opciones por defecto de chromedp; la web y sus cookies no cambian.
+		chromedp.DisableGPU,
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("disable-background-networking", true),
+		chromedp.Flag("disable-component-update", true),
+		chromedp.Flag("disable-default-apps", true),
+		chromedp.Flag("disable-sync", true),
+		chromedp.Flag("disable-features", "Translate,MediaRouter,OptimizationHints"),
+		chromedp.Flag("renderer-process-limit", "2"),
+		chromedp.Flag("mute-audio", true),
+		// Su caché va a /tmp, que en Docker es RAM (tmpfs): como mucho 32 MB.
+		chromedp.Flag("disk-cache-size", "33554432"),
 	}
 	if goruntime.GOOS == "linux" {
 		// Misma clave de cifrado de cookies en todos los arranques (sin llavero en el servidor).
@@ -144,12 +165,27 @@ func (s *Session) start() error {
 
 	actx, acancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	ctx, cancel := chromedp.NewContext(actx)
+	ua, err := chromedp.Run(ctx, chromedp.Evaluate[string]("navigator.userAgent"))
+	if err != nil {
+		cancel()
+		acancel()
+		return fmt.Errorf("arrancar Chromium: %w", err)
+	}
+	// Sin pantalla, Chromium se anuncia como «HeadlessChrome» y la web de Movistar
+	// (o su protección anti-bots) puede quedarse cargando sin mostrar el login. Se
+	// relanza con el mismo User-Agent de un Chrome normal.
+	if strings.Contains(ua, "HeadlessChrome") {
+		ua = strings.ReplaceAll(ua, "HeadlessChrome", "Chrome")
+		cancel()
+		acancel()
+		actx, acancel = chromedp.NewExecAllocator(context.Background(), append(opts, chromedp.UserAgent(ua))...)
+		ctx, cancel = chromedp.NewContext(actx)
+	}
 	if err := chromedp.Do(ctx, chromedp.Navigate(PortalURL+"/")); err != nil {
 		cancel()
 		acancel()
 		return fmt.Errorf("arrancar Chromium: %w", err)
 	}
-	ua, _ := chromedp.Run(ctx, chromedp.Evaluate[string]("navigator.userAgent"))
 
 	s.mu.Lock()
 	s.allocCancel, s.ctx, s.cancel, s.userAgent = acancel, ctx, cancel, ua
@@ -162,6 +198,15 @@ func (s *Session) start() error {
 func (s *Session) tab() (context.Context, error) {
 	s.mu.Lock()
 	ctx := s.ctx
+	s.mu.Unlock()
+	if ctx != nil && ctx.Err() == nil {
+		return ctx, nil
+	}
+	s.launchMu.Lock()
+	defer s.launchMu.Unlock()
+	// Otra llamada puede haberlo relanzado mientras se esperaba.
+	s.mu.Lock()
+	ctx = s.ctx
 	s.mu.Unlock()
 	if ctx != nil && ctx.Err() == nil {
 		return ctx, nil
@@ -222,7 +267,11 @@ func (s *Session) eval(tab context.Context, method, path string, body []byte, co
 		bodyJS = string(b)
 	}
 	expr := fmt.Sprintf("window.__sapi(%q, %q, %s, %q, %q)", method, path, bodyJS, contentType, s.deviceID)
-	r, err := chromedp.Run(tab, chromedp.Evaluate[Response](expr, chromedp.EvalAwaitPromise))
+	// Con plazo: si la conexión de la web se queda muerta (p. ej. se fue el cable) la
+	// llamada no puede esperar para siempre (la web también corta a los 85 s).
+	ctx, cancel := context.WithTimeout(tab, sapiCallTimeout)
+	defer cancel()
+	r, err := chromedp.Run(ctx, chromedp.Evaluate[Response](expr, chromedp.EvalAwaitPromise))
 	if err != nil {
 		return nil, err
 	}

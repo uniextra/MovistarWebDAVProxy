@@ -12,7 +12,7 @@ import (
 // implícito de la primera en vez de devolver 423.
 func TestImplicitLockWaitsForConcurrentRequest(t *testing.T) {
 	ls := newResilientLockSystem()
-	implicit := webdav.LockDetails{Root: "/datos/carpeta", Duration: -1, ZeroDepth: true}
+	implicit := webdav.LockDetails{Root: "/Serie/Temporada 7", Duration: -1, ZeroDepth: true}
 
 	tok1, err := ls.Create(time.Now(), implicit)
 	if err != nil {
