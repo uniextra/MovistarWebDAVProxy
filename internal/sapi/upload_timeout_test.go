@@ -64,6 +64,7 @@ func TestUploadFileToFolder_Retries408WithFreshConnection(t *testing.T) {
 }
 
 func TestUploadTransportDisablesKeepAlives(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // el desktop: ver TestDesktopConnections* (internal/auth)
 	client, err := NewClient(config.AccountConfig{
 		Provider:      "movistar",
 		AccessToken:   "a",

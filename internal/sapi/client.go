@@ -1104,6 +1104,10 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 		if req.Header.Get("x-request-id") == "" {
 			req.Header.Set("x-request-id", auth.NewRequestID())
 		}
+		// La app envía «Connection: Keep-Alive» aunque abra una conexión por petición.
+		if req.Header.Get("Connection") == "" {
+			req.Header.Set("Connection", "Keep-Alive")
+		}
 	} else {
 		if req.Header.Get("Referer") == "" && req.URL != nil && req.URL.Host != "" {
 			req.Header.Set("Referer", req.URL.Scheme+"://"+req.URL.Host+"/")

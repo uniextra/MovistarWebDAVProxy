@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -443,11 +444,12 @@ type officialSaveResult struct {
 func (c *Client) officialSendContent(kind, id string, p officialUpload, contentType string) (*officialSaveResult, error) {
 	seeker, canSeek := p.reader.(io.ReadSeeker)
 	var lastErr error
+	staleConn := false // el último fallo fue en una conexión reutilizada (SAPI_KEEPALIVE)
 	attempts := config.UploadAttempts()
 	for attempt := 0; attempt < attempts; attempt++ {
 		offset := int64(0)
 		if attempt > 0 || p.pendingID != "" {
-			if attempt > 0 && !sleepCtx(p.context(), officialUploadBackoff(attempt-1)) {
+			if attempt > 0 && !staleConn && !sleepCtx(p.context(), officialUploadBackoff(attempt-1)) {
 				return nil, &UploadInterruptedError{MediaID: id, Err: fmt.Errorf("el cliente abandonó la subida: %w", p.context().Err())}
 			}
 			got, done, err := c.officialQueryOffset(p.context(), kind, id, p.size)
@@ -473,11 +475,14 @@ func (c *Client) officialSendContent(kind, id string, p officialUpload, contentT
 			}
 		}
 
-		res, retry, err := c.officialPostContent(kind, id, p, contentType, offset)
+		res, retry, reused, err := c.officialPostContent(kind, id, p, contentType, offset)
 		if err == nil {
 			return res, nil
 		}
 		lastErr = err
+		// Una conexión reutilizada que el servidor ya había cerrado (o que responde 408):
+		// se repite enseguida, una sola vez, en una conexión nueva.
+		staleConn = reused && retry && attempt == 0
 		if p.context().Err() != nil {
 			// El cliente se fue: no se sigue subiendo para nadie.
 			logger.Log("[SAPI] ✋ El cliente abandonó la subida de '%s'; se aborta.", p.name)
@@ -492,6 +497,10 @@ func (c *Client) officialSendContent(kind, id string, p officialUpload, contentT
 		if !canSeek {
 			return nil, &UploadInterruptedError{MediaID: id, Err: err}
 		}
+		if staleConn {
+			logger.Log("[SAPI] 🔄 Envío de '%s' en una conexión reutilizada caducada (%v); se repite en una nueva", p.name, err)
+			continue
+		}
 		logger.Log("[SAPI] ⚠️ Envío de '%s' cortado (%v); intento %d/%d", p.name, err, attempt+1, attempts)
 	}
 	return nil, &UploadInterruptedError{MediaID: id, Err: lastErr}
@@ -499,7 +508,12 @@ func (c *Client) officialSendContent(kind, id string, p officialUpload, contentT
 
 // officialPostContent hace un envío (completo o el resto desde offset). retry indica
 // si el fallo es de los que se arreglan reintentando.
-func (c *Client) officialPostContent(kind, id string, p officialUpload, contentType string, offset int64) (*officialSaveResult, bool, error) {
+func (c *Client) officialPostContent(kind, id string, p officialUpload, contentType string, offset int64) (res *officialSaveResult, retry, reused bool, err error) {
+	res, retry, err = c.officialPostContentOnce(kind, id, p, contentType, offset, &reused)
+	return res, retry, reused, err
+}
+
+func (c *Client) officialPostContentOnce(kind, id string, p officialUpload, contentType string, offset int64, reused *bool) (*officialSaveResult, bool, error) {
 	c.mu.RLock()
 	u := fmt.Sprintf("%s/sapi/upload/%s?action=save&lastupdate=true&acceptasynchronous=true", c.uploadURL, kind)
 	c.mu.RUnlock()
@@ -519,6 +533,9 @@ func (c *Client) officialPostContent(kind, id string, p officialUpload, contentT
 	}
 	req.Header["x-funambol-file-size"] = []string{strconv.FormatInt(p.size, 10)}
 	req.Header["x-funambol-id"] = []string{id}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { *reused = info.Reused },
+	}))
 
 	resp, err := c.DoRequest(req)
 	if err != nil {

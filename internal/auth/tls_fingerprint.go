@@ -140,7 +140,7 @@ func FingerprintName() string {
 // uTLS para que el ClientHello imite al perfil elegido en lugar del de crypto/tls.
 // Firma compatible con http2.Transport.DialTLSContext.
 func dialTLSContextWithUTLSALPN(ctx context.Context, network, addr string, nextProtos []string) (net.Conn, error) {
-	plainConn, err := newDialer().DialContext(ctx, network, addr)
+	plainConn, err := dialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +284,7 @@ func dialTLSContextHTTP1Only(ctx context.Context, network, addr string) (net.Con
 		return dialTLSContextWithUTLSALPN(ctx, network, addr, []string{"http/1.1"})
 	}
 
-	plainConn, err := newDialer().DialContext(ctx, network, addr)
+	plainConn, err := dialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +379,7 @@ func NewFingerprintedTransport() http.RoundTripper {
 	}
 
 	h1 := &http.Transport{
-		DialContext: newDialer().DialContext,
+		DialContext: dialContext,
 		// El host de subida devuelve HTTP 408 ("Server timeout waiting for the
 		// HTTP request from the client") si se reutiliza una conexión keep-alive
 		// que el servidor ya consideraba caducada. Forzamos conexión nueva por
@@ -416,15 +416,35 @@ func NewFingerprintedTransport() http.RoundTripper {
 			}
 			return std.DialContext(ctx, network, addr)
 		}
+		desktopConnections(h1, ft.sapiH1)
 	}
 	return ft
 }
 
+// desktopConnections: como la app, una conexión TLS nueva por petición con cloud.* y
+// con upload.*. Sin DisableKeepAlives, que añadiría «Connection: close» (la app envía
+// «Connection: Keep-Alive»): la conexión no vuelve al grupo de ociosas y se cierra al
+// terminar la respuesta. Con SAPI_KEEPALIVE se reutilizan mientras lleven menos de
+// SAPI_KEEPALIVE_IDLE_SEC sin uso (el servidor de subidas responde 408 a una conexión
+// que él ya daba por caducada: con un plazo corto no se llega a reutilizar).
+func desktopConnections(ts ...*http.Transport) {
+	keep := config.Keepalive()
+	for _, t := range ts {
+		t.DisableKeepAlives = false
+		if keep {
+			t.IdleConnTimeout = config.KeepaliveIdle()
+			t.MaxIdleConnsPerHost = 4
+		} else {
+			t.MaxIdleConnsPerHost = -1
+		}
+	}
+}
+
 // newSAPIHTTP1Transport es el transporte de los hosts SAPI en el perfil "desktop":
-// HTTP/1.1 con keep-alive (como el cliente oficial) y ALPN "http/1.1".
+// HTTP/1.1 y ALPN "http/1.1"; la reutilización de conexiones la fija desktopConnections.
 func newSAPIHTTP1Transport() *http.Transport {
 	return &http.Transport{
-		DialContext:           newDialer().DialContext,
+		DialContext:           dialContext,
 		DialTLSContext:        dialTLSContextHTTP1Only,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -441,7 +461,7 @@ func newSAPIHTTP1Transport() *http.Transport {
 // CloudFront trata el login de forma distinta a los endpoints SAPI normales.
 func NewHTTP1FingerprintedTransport() http.RoundTripper {
 	return &http.Transport{
-		DialContext:           newDialer().DialContext,
+		DialContext:           dialContext,
 		DialTLSContext:        dialTLSContextWithUTLSHTTP1,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -457,7 +477,7 @@ func NewHTTP1FingerprintedTransport() http.RoundTripper {
 // de CloudFront tratan de forma distinta el ClientHello cuando ALPN está vacío.
 func NewNoALPNHTTP1Transport() http.RoundTripper {
 	return &http.Transport{
-		DialContext:           newDialer().DialContext,
+		DialContext:           dialContext,
 		DialTLSContext:        dialTLSContextWithUTLSNoALPN,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,

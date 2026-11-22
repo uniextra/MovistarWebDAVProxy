@@ -127,6 +127,32 @@ func UploadRetryMaxWait() time.Duration {
 	return envSeconds("SAPI_UPLOAD_RETRY_MAX_SEC", 60*time.Second)
 }
 
+// Conexiones con la nube en el perfil desktop. La app abre una conexión TLS nueva en
+// cada petición, con cloud.* y con upload.* (captura del 17-18/11/2026: ~9.900
+// conexiones en 1,5 h), aunque envía «Connection: Keep-Alive»; el proxy hace lo mismo.
+// Keepalive (SAPI_KEEPALIVE, por defecto false) las reutiliza mientras lleven menos de
+// KeepaliveIdle sin uso: ahorra el saludo TLS de cada petición en equipos poco potentes
+// (p. ej. una Raspberry Pi con muchos archivos pequeños), apartándose de la app.
+func Keepalive() bool { return envBool("SAPI_KEEPALIVE", false) }
+func KeepaliveIdle() time.Duration {
+	return envSeconds("SAPI_KEEPALIVE_IDLE_SEC", 5*time.Second)
+}
+
+// DNSCacheTTL (SAPI_DNS_CACHE_SEC, por defecto 60; 0 = sin caché): cuánto se guarda la
+// dirección de los servidores de la nube. Go no guarda las respuestas DNS y pregunta en
+// cada conexión nueva; Windows sí las guarda para la app. 60 s es el TTL con el que
+// publican sus direcciones CloudFront (cloud.*) y el balanceador de AWS (upload.*). Si
+// una conexión a la dirección guardada falla, se descarta y se vuelve a preguntar.
+func DNSCacheTTL() time.Duration {
+	// envSeconds no admite 0 (lo toma como «sin valor»); aquí 0 desactiva la caché.
+	v := strings.TrimSpace(os.Getenv("SAPI_DNS_CACHE_SEC"))
+	f, err := strconv.ParseFloat(v, 64)
+	if v == "" || err != nil || f < 0 || math.IsInf(f, 0) || math.IsNaN(f) {
+		return 60 * time.Second
+	}
+	return time.Duration(f * float64(time.Second))
+}
+
 // Login fallido en el perfil desktop: reintento a los LoginRetryFirstWait, que se
 // dobla hasta LoginRetryMaxWait; la sesión se da por caducada solo tras
 // LoginGiveUpRejections rechazos de credenciales durante al menos LoginGiveUpAfter.
