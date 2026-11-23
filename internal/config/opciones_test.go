@@ -108,3 +108,59 @@ func TestDNSCacheTTL(t *testing.T) {
 		}
 	}
 }
+
+func TestGalleryOptions(t *testing.T) {
+	t.Setenv("GALLERY_ENABLED", "")
+	t.Setenv("GALLERY_DIR", "")
+	t.Setenv("GALLERY_LAYOUT", "")
+	t.Setenv("GALLERY_UPLOAD", "true")
+	t.Setenv("GALLERY_DELETE", "true")
+
+	if GalleryEnabled() {
+		t.Error("GALLERY_ENABLED debe ser false por defecto")
+	}
+	if GalleryUpload() || GalleryDelete() {
+		t.Error("GALLERY_UPLOAD y GALLERY_DELETE deben ser false si GALLERY_ENABLED=false")
+	}
+	if got := GalleryDir(); got != "_gallery" {
+		t.Errorf("GalleryDir()=%q, esperado _gallery", got)
+	}
+	if got := GalleryLayout(); got != "year-month" {
+		t.Errorf("GalleryLayout()=%q, esperado year-month", got)
+	}
+
+	t.Setenv("GALLERY_ENABLED", "true")
+	if !GalleryEnabled() || !GalleryUpload() || !GalleryDelete() {
+		t.Error("con GALLERY_ENABLED=true, GalleryUpload y GalleryDelete deben activarse")
+	}
+
+	for raw, want := range map[string]string{
+		"Galeria":     "Galeria",
+		"/Galeria/":   "Galeria",
+		"":            "_gallery",
+		".":           "_gallery",
+		"..":          "_gallery",
+		"sub/dir":     "_gallery",
+		"sub\\dir":    "_gallery",
+		"  MisFotos ": "MisFotos",
+	} {
+		t.Setenv("GALLERY_DIR", raw)
+		if got := GalleryDir(); got != want {
+			t.Errorf("GALLERY_DIR=%q -> %q, esperado %q", raw, got, want)
+		}
+	}
+
+	for raw, want := range map[string]string{
+		"flat":       "flat",
+		" FLAT ":     "flat",
+		"year-month": "year-month",
+		"ym":         "year-month",
+		"date":       "year-month",
+		"other":      "year-month",
+	} {
+		t.Setenv("GALLERY_LAYOUT", raw)
+		if got := GalleryLayout(); got != want {
+			t.Errorf("GALLERY_LAYOUT=%q -> %q, esperado %q", raw, got, want)
+		}
+	}
+}

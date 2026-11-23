@@ -392,6 +392,10 @@ type MovistarFS struct {
 
 	emptyFileManager *EmptyFileManager
 
+	galleryMu       sync.RWMutex
+	galleryCache    *galleryIndex
+	galleryConflict atomic.Bool
+
 	removeErrMu   sync.Mutex
 	lastRemoveErr error
 }
@@ -613,7 +617,11 @@ func (mfs *MovistarFS) applyMediaRefresh(r sapi.MediaRefresh) {
 	}
 	mfs.cacheMu.Unlock()
 	if stored {
-		mfs.InvalidateCache(folderID) // se recarga desde la base, ya con la URL
+		if folderID == 0 {
+			mfs.updateGalleryCacheURL(r.ID, r.URL, r.ETag)
+		} else {
+			mfs.InvalidateCache(folderID) // se recarga desde la base, ya con la URL
+		}
 	}
 }
 
@@ -832,6 +840,7 @@ func (mfs *MovistarFS) RecordSyncTime(t time.Time) {
 	mfs.syncFailures = 0
 	mfs.nextSyncAllowed = time.Time{}
 	mfs.syncMu.Unlock()
+	mfs.invalidateGalleryCache()
 }
 
 // MaybeTriggerSync launches an asynchronous, non-blocking SyncChanges if time.Since(lastSyncTime) > syncInterval.
@@ -909,7 +918,6 @@ func (mfs *MovistarFS) InvalidateCache(folderID int64) {
 		return
 	}
 	mfs.cacheMu.Lock()
-	defer mfs.cacheMu.Unlock()
 	if folderID != 0 {
 		delete(mfs.folderCache, folderID)
 		delete(mfs.mediaCache, folderID)
@@ -917,6 +925,10 @@ func (mfs *MovistarFS) InvalidateCache(folderID int64) {
 		mfs.folderCache = make(map[int64]*cachedFolders)
 		mfs.mediaCache = make(map[int64]*cachedMedia)
 		mfs.rootFolderIDCache.Store(0)
+	}
+	mfs.cacheMu.Unlock()
+	if folderID == 0 {
+		mfs.invalidateGalleryCache()
 	}
 }
 
@@ -1645,6 +1657,9 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		logger.Log("[WebDAV] 🧹 Ignorada creación de carpeta del sistema: '%s'", cleanPath)
 		return nil
 	}
+	if mfs.isGalleryPath(cleanPath) {
+		return fs.ErrPermission
+	}
 
 	// Si otra petición está creando ahora la carpeta madre (p. ej. varios MKCOL a la
 	// vez al empezar una carpeta nueva), se espera a que termine en vez de responder
@@ -1716,6 +1731,9 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 	// Absorber escrituras o PROPPATCH sobre archivos de sistema (desktop.ini, .DS_Store, etc.)
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 && isOSJunkPath(cleanPath) {
 		return NewDevNullFileWriter(cleanPath, path.Base(cleanPath)), nil
+	}
+	if mfs.isGalleryPath(cleanPath) {
+		return mfs.galleryOpenFile(ctx, cleanPath, flag, perm)
 	}
 
 	// Manejo de escritura (solo cuando se solicita escritura/creación/truncado explícito;
@@ -1962,6 +1980,9 @@ func (mfs *MovistarFS) RemoveAll(ctx context.Context, name string) (err error) {
 		mfs.getDuplicatiStore().Delete(cleanPath)
 		return nil
 	}
+	if mfs.isGalleryPath(cleanPath) {
+		return mfs.galleryRemoveAll(ctx, cleanPath)
+	}
 
 	// Lock por path: contiende con un MOVE/PUT en curso sobre el mismo fichero.
 	unlock := acquireFolderLock(cleanPath)
@@ -2124,6 +2145,9 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 	}
 	if isOSJunkPath(oldClean) && !isOSJunkPath(newClean) {
 		return nil
+	}
+	if mfs.isGalleryPath(oldClean) || mfs.isGalleryPath(newClean) {
+		return fs.ErrPermission
 	}
 
 	// Lock por path (dentro de este proceso) para serializar MOVE/PUT/DELETE del
@@ -2554,6 +2578,9 @@ func (mfs *MovistarFS) Stat(ctx context.Context, name string) (os.FileInfo, erro
 			isDir:   false,
 		}, nil
 	}
+	if mfs.isGalleryPath(cleanPath) {
+		return mfs.galleryStat(cleanPath)
+	}
 
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
@@ -2761,10 +2788,24 @@ func (w *WebDAVFileWriter) canStream() bool {
 	return w.guard != nil && w.guard.expected > 0 && w.parentFolderID >= 0
 }
 
+func (w *WebDAVFileWriter) maybeExtractGalleryEXIF(header []byte) {
+	if w.parentFolderID != 0 || !w.modTime.IsZero() || len(header) == 0 {
+		return
+	}
+	if len(header) > exifHeaderReadLimit {
+		header = header[:exifHeaderReadLimit]
+	}
+	if t, ok := extractEXIFDate(header); ok {
+		w.modTime = t
+		logger.Log("[WebDAV] 📅 Fecha EXIF detectada para '%s': %s", w.name, t.UTC().Format("2006-01-02 15:04:05 UTC"))
+	}
+}
+
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 	if !w.canStream() || w.streamDone != nil {
 		return
 	}
+	w.maybeExtractGalleryEXIF(initialBytes)
 	if w.tmpFile != nil && !w.slotHeld {
 		// Con copia local, solo en flujo si el turno está libre AHORA: esperarlo
 		// pararía la lectura del cuerpo (el io.Pipe no avanza) y un cliente que
@@ -3153,6 +3194,12 @@ func (w *WebDAVFileWriter) Close() error {
 	// de modo que la subida y la actualización de caché no se crucen con ellos.
 	w.ensurePathLock()
 
+	// La galería virtual no admite archivos de 0 bytes ni emulación local.
+	if w.parentFolderID == 0 && w.size == 0 {
+		w.cleanupTemp()
+		return w.rejectUnsupported()
+	}
+
 	// Se emulan en SQLite y memoria, sin subir a la nube: los archivos en carpetas
 	// virtuales heredadas, los vacíos de bloqueo y control (viven segundos) y, si no se
 	// suben los vacíos de verdad (realEmptyFiles), todos los de 0 bytes.
@@ -3277,6 +3324,12 @@ func (w *WebDAVFileWriter) Close() error {
 		var reader io.Reader
 		if w.tmpFile != nil {
 			defer w.cleanupTemp()
+			if w.parentFolderID == 0 && w.modTime.IsZero() {
+				hdr := make([]byte, exifHeaderReadLimit)
+				if hn, _ := w.tmpFile.ReadAt(hdr, 0); hn > 0 {
+					w.maybeExtractGalleryEXIF(hdr[:hn])
+				}
+			}
 			_, _ = w.tmpFile.Seek(0, io.SeekStart)
 			reader = w.tmpFile
 		} else {
@@ -3284,6 +3337,7 @@ func (w *WebDAVFileWriter) Close() error {
 			if w.buf != nil {
 				bufBytes = w.buf.Bytes() // nil: archivo de 0 bytes sin ninguna escritura
 			}
+			w.maybeExtractGalleryEXIF(bufBytes)
 			reader = bytes.NewReader(bufBytes)
 			if w.size <= 256*1024 {
 				cachedContent = bufBytes
@@ -3371,7 +3425,9 @@ func (w *WebDAVFileWriter) Close() error {
 			w.mfs.emptyFileManager.ScheduleSave()
 		}
 		logMetaErr("UpsertMedia", ms.UpsertMedia(*media))
-		logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(w.parentFolderID, time.Now().UTC().Format("20060102T150405Z")))
+		if w.parentFolderID > 0 {
+			logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(w.parentFolderID, time.Now().UTC().Format("20060102T150405Z")))
+		}
 		if strings.EqualFold(os.Getenv("DEDUPE_ON_OVERWRITE"), "true") && w.parentFolderID > 0 {
 			if dups, err := ms.GetDuplicateMediaInFolder(w.parentFolderID, w.name); err == nil && len(dups) > 1 {
 				for _, oldDup := range dups[1:] {
@@ -3382,7 +3438,15 @@ func (w *WebDAVFileWriter) Close() error {
 			}
 		}
 	}
-	w.mfs.InvalidateCache(w.parentFolderID)
+	if w.parentFolderID == 0 {
+		if media != nil {
+			w.mfs.addToGalleryCache(*media)
+		} else {
+			w.mfs.invalidateGalleryCache()
+		}
+	} else {
+		w.mfs.InvalidateCache(w.parentFolderID)
+	}
 
 	return nil
 }
@@ -3978,6 +4042,18 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			}
 		}
 		d.mfs.cacheMu.RUnlock()
+
+		if (d.path == "/" || d.path == ".") && config.GalleryEnabled() && !d.mfs.hasRealGalleryConflict() {
+			galleryDir := config.GalleryDir()
+			if !seen[galleryDir] {
+				seen[galleryDir] = true
+				mt := now.UTC()
+				if idx, gErr := d.mfs.getGalleryIndex(); gErr == nil && idx != nil {
+					mt = idx.lookupDirModTime("/"+galleryDir, false)
+				}
+				list = append(list, &VirtualFileInfo{name: galleryDir, size: 0, mode: os.ModeDir | 0755, modTime: mt, isDir: true})
+			}
+		}
 
 		if ms != nil {
 			if vFiles, vErr := ms.ListVirtualEmptyFilesInFolder(d.folderID); vErr == nil {

@@ -32,6 +32,19 @@ Esta guía reúne toda la referencia técnica del proxy: variables de entorno co
 | `WEBDAV_TMPDIR` | `/tmp` *(o `TMPDIR`)* | Directorio para archivos temporales durante subidas mayores al búfer RAM. Si montas un volumen en disco (ej. `/app/tmp`), define `WEBDAV_TMPDIR=/app/tmp` para usarlo. |
 | `TZ` | `Europe/Madrid` | Zona horaria del contenedor (usada en marcas de tiempo de logs y alertas). |
 
+### 🖼️ Galería Virtual (WebDAV)
+
+| Variable | Por defecto | Descripción |
+| :--- | :--- | :--- |
+| `GALLERY_ENABLED` | `false` | Expone una carpeta virtual en WebDAV con las fotos y vídeos de la Galería que no pertenecen a ninguna carpeta (`folder_id = 0`), leyendo directamente la caché SQLite ya sincronizada. Desactivada por defecto. |
+| `GALLERY_DIR` | `_gallery` | Nombre de la carpeta virtual en la raíz de WebDAV (`/_gallery`). Si ya existe una carpeta real con ese nombre, la virtual no se monta. |
+| `GALLERY_LAYOUT` | `year-month` | Organización de los archivos: `year-month` (subcarpetas virtuales `/YYYY/MM/...`, recomendada en cuentas grandes) o `flat` (todos juntos bajo `/_gallery`). |
+| `GALLERY_UPLOAD` | `false` | Permite subir fotos y vídeos (`PUT`) directamente a la Galería (`folder_id = 0`). Requiere `GALLERY_ENABLED=true`. Rechaza archivos vacíos o que no sean foto/vídeo (`415`). |
+| `GALLERY_DELETE` | `false` | Permite enviar a la papelera (`DELETE`) elementos de la Galería (`folder_id = 0`) desde la carpeta virtual. Requiere `GALLERY_ENABLED=true`. No permite borrar carpetas virtuales ni elementos en carpetas reales. |
+
+> [!WARNING]
+> Si activas `GALLERY_ENABLED=true` y ejecutas `rclone sync <local> remoto:` contra la raíz `/`, añade `--exclude "/_gallery/**"` (o el nombre de `GALLERY_DIR`) para evitar que `rclone` intente borrar la carpeta virtual de destino.
+
 ### 🔔 Notificaciones de Telegram (PR #53)
 
 | Variable | Por defecto | Descripción |

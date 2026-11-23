@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -441,6 +442,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Política de acceso HTTP sobre la carpeta virtual de la Galería.
+	if s.guardGalleryRequest(lw, r, method, urlPath) {
+		return
+	}
+
 	// 1b. Bloqueo del cortafuegos de O2 (waf_breaker.go): mientras dure la pausa, las
 	// escrituras que necesitan el servidor bloqueado se rechazan con 503 + Retry-After sin
 	// llamar a O2. Antes llegaban al cliente como 409/500 genéricos y rclone las reintentaba
@@ -546,6 +552,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 4. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
 	if method == "GET" || method == "HEAD" {
+		if s.serveGalleryBrowserHTML(lw, r, urlPath) {
+			return
+		}
 		ext := filepath.Ext(urlPath)
 		ct := mime.TypeByExtension(ext)
 		if ct == "" {
@@ -1046,4 +1055,70 @@ func (s *Server) rejectWriteDuringWAFBlock(w http.ResponseWriter, method, urlPat
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	http.Error(w, fmt.Sprintf("O2 Cloud firewall (WAF) block: %s paused until %s", strings.ToLower(method), until.Local().Format("15:04")), http.StatusServiceUnavailable)
 	return true
+}
+
+func (s *Server) guardGalleryRequest(w http.ResponseWriter, r *http.Request, method, urlPath string) bool {
+	if s == nil || s.fs == nil {
+		return false
+	}
+	cleanPath := path.Clean("/" + urlPath)
+	var dstPath string
+	if method == "MOVE" || method == "COPY" {
+		if u, err := url.Parse(r.Header.Get("Destination")); err == nil && u.Path != "" {
+			dstPath = path.Clean("/" + u.Path)
+		}
+	}
+
+	switch method {
+	case "MKCOL":
+		if s.fs.isGalleryPath(cleanPath) {
+			http.Error(w, "Forbidden: cannot create folders in virtual gallery", http.StatusForbidden)
+			return true
+		}
+	case "MOVE":
+		if s.fs.isGalleryPath(cleanPath) || (dstPath != "" && s.fs.isGalleryPath(dstPath)) {
+			http.Error(w, "Forbidden: cannot move items into or out of virtual gallery", http.StatusForbidden)
+			return true
+		}
+	case "COPY":
+		if dstPath != "" && s.fs.isGalleryPath(dstPath) {
+			http.Error(w, "Forbidden: cannot copy items into virtual gallery", http.StatusForbidden)
+			return true
+		}
+	case "DELETE":
+		if s.fs.isGalleryPath(cleanPath) {
+			if !config.GalleryDelete() {
+				http.Error(w, "Forbidden: gallery delete is disabled (GALLERY_DELETE=false)", http.StatusForbidden)
+				return true
+			}
+			if s.fs.isGalleryVirtualDir(cleanPath) {
+				http.Error(w, "Forbidden: cannot delete virtual gallery directory", http.StatusForbidden)
+				return true
+			}
+		}
+	case "PUT":
+		if s.fs.isGalleryPath(cleanPath) {
+			if !config.GalleryUpload() {
+				http.Error(w, "Forbidden: gallery upload is disabled (GALLERY_UPLOAD=false)", http.StatusForbidden)
+				return true
+			}
+			if strings.HasSuffix(urlPath, "/") || s.fs.isGalleryVirtualDir(cleanPath) {
+				http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
+				return true
+			}
+			if !s.fs.validGalleryUploadPath(cleanPath) {
+				http.Error(w, "Not Found: invalid virtual gallery path", http.StatusNotFound)
+				return true
+			}
+			if !sapi.IsGalleryMediaName(path.Base(cleanPath)) {
+				http.Error(w, "Unsupported Media Type: virtual gallery only accepts photos and videos", http.StatusUnsupportedMediaType)
+				return true
+			}
+			if r.ContentLength == 0 {
+				http.Error(w, "Unsupported Media Type: virtual gallery does not accept empty files", http.StatusUnsupportedMediaType)
+				return true
+			}
+		}
+	}
+	return false
 }
