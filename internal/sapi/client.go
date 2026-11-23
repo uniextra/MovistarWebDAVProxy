@@ -2140,6 +2140,28 @@ func (c *Client) waitMediaValidatedIn(mediaID string, folderID int64) bool {
 	}
 }
 
+// WaitMediaValidated espera, como la app tras subir, a que O2 dé por validado un
+// archivo recién subido (get-validation-status deja de devolver "V"/"A"), hasta max o
+// hasta que se cancele ctx (el cliente se fue). Devuelve true si quedó validado.
+func (c *Client) WaitMediaValidated(ctx context.Context, mediaID string, folderID int64, max time.Duration) bool {
+	deadline := time.Now().Add(max)
+	for {
+		st, err := c.mediaValidationStatus(mediaID, folderID)
+		if err != nil {
+			return false // no se sabe (o ya no existe): la comprobación de después decide
+		}
+		if st != "V" && st != "A" {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		if !sleepCtx(ctx, mediaValidationPoll) {
+			return false
+		}
+	}
+}
+
 func mediaMoveDelay(attempt int) time.Duration {
 	d := mediaMoveRetryDelay * time.Duration(attempt+1)
 	if d > mediaMoveMaxDelay {
