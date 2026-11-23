@@ -342,14 +342,32 @@ func TestGallery_YearMonthAndFlatLayoutsAndDisambiguationAndGet(t *testing.T) {
 		t.Errorf("flat no debe incluir folder_id>0")
 	}
 
-	// 7. Vista HTML navegable desde navegador web (GET /_gallery)
+	// 7. Vista HTML navegable desde navegador web (/, carpetas normales y /_gallery)
 	t.Setenv("GALLERY_LAYOUT", "year-month")
+	recRootHTML := doDAV(t, srv, "GET", "/", nil, "")
+	if recRootHTML.Code != http.StatusOK || !strings.Contains(recRootHTML.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("GET / HTML = %d, Content-Type=%q", recRootHTML.Code, recRootHTML.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(recRootHTML.Body.String(), `href="/Documentos"`) || !strings.Contains(recRootHTML.Body.String(), `href="/_gallery"`) {
+		t.Errorf("HTML / debe enlazar a /Documentos y /_gallery: %s", recRootHTML.Body.String())
+	}
+	recDocsHTML := doDAV(t, srv, "GET", "/Documentos", nil, "")
+	if recDocsHTML.Code != http.StatusOK || !strings.Contains(recDocsHTML.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("GET /Documentos HTML = %d, Content-Type=%q", recDocsHTML.Code, recDocsHTML.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(recDocsHTML.Body.String(), `href="/Documentos/privado.jpg"`) || !strings.Contains(recDocsHTML.Body.String(), `href="/"`) {
+		t.Errorf("HTML /Documentos debe incluir /Documentos/privado.jpg y enlace padre /: %s", recDocsHTML.Body.String())
+	}
+	recDocsFile := doDAV(t, srv, "GET", "/Documentos/privado.jpg", nil, "")
+	if recDocsFile.Code != http.StatusOK || recDocsFile.Body.String() != "bytes-en-carpeta-500" {
+		t.Errorf("GET /Documentos/privado.jpg = %d %q", recDocsFile.Code, recDocsFile.Body.String())
+	}
 	recHTML := doDAV(t, srv, "GET", "/_gallery", nil, "")
 	if recHTML.Code != http.StatusOK || !strings.Contains(recHTML.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("GET /_gallery HTML = %d, Content-Type=%q", recHTML.Code, recHTML.Header().Get("Content-Type"))
 	}
-	if !strings.Contains(recHTML.Body.String(), "/_gallery/2026") {
-		t.Errorf("HTML /_gallery sin enlace a /_gallery/2026: %s", recHTML.Body.String())
+	if !strings.Contains(recHTML.Body.String(), "/_gallery/2026") || !strings.Contains(recHTML.Body.String(), `href="/"`) {
+		t.Errorf("HTML /_gallery sin enlace a /_gallery/2026 o padre /: %s", recHTML.Body.String())
 	}
 	recHTMLNov := doDAV(t, srv, "GET", "/_gallery/2026/11", nil, "")
 	if recHTMLNov.Code != http.StatusOK || !strings.Contains(recHTMLNov.Body.String(), "foto.jpg") {
