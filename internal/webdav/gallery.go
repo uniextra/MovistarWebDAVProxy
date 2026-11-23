@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
+	"html/template"
 	"io"
 	"io/fs"
 	"net/http"
@@ -1003,6 +1003,45 @@ func encodePathSegments(p string) string {
 	return "/" + strings.Join(parts, "/")
 }
 
+func (idx *galleryIndex) lookupCanonicalDir(cleanPath string, fold bool) (string, []os.FileInfo, bool) {
+	if idx == nil {
+		return "", nil, false
+	}
+	if entries, ok := idx.dirs[cleanPath]; ok {
+		return cleanPath, entries, true
+	}
+	if fold {
+		for k, entries := range idx.dirs {
+			if strings.EqualFold(k, cleanPath) {
+				return k, entries, true
+			}
+		}
+	}
+	return "", nil, false
+}
+
+type galleryHTMLRow struct {
+	Icon string
+	Href string
+	Name string
+	Size string
+	Date string
+}
+
+type galleryHTMLView struct {
+	Path  string
+	Count int
+	Rows  []galleryHTMLRow
+}
+
+var galleryBrowserTmpl = template.Must(template.New("gallery-browser").Parse(
+	`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+		`<title>Galería - {{.Path}}</title>` +
+		`<style>body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}main{max-width:960px;margin:0 auto}h1{font-size:1.25rem;margin:0 0 16px;color:#38bdf8}table{width:100%;border-collapse:collapse;background:#1e293b;border-radius:8px;overflow:hidden}th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #334155;font-size:.9rem}th{color:#94a3b8;font-weight:600}a{color:#7dd3fc;text-decoration:none}a:hover{text-decoration:underline}.num{text-align:right;white-space:nowrap;color:#cbd5e1}.dt{white-space:nowrap;color:#94a3b8}</style>` +
+		`</head><body><main><h1>🖼️ {{.Path}} ({{.Count}})</h1><table><thead><tr><th>Nombre</th><th class="num">Tamaño</th><th>Fecha</th></tr></thead><tbody>` +
+		`{{range .Rows}}<tr><td>{{.Icon}} <a href="{{.Href}}">{{.Name}}</a></td><td class="num">{{.Size}}</td><td class="dt">{{.Date}}</td></tr>{{end}}` +
+		`</tbody></table></main></body></html>`))
+
 // serveGalleryBrowserHTML sirve una vista HTML navegable cuando se abre una
 // carpeta de /_gallery directamente desde un navegador web (GET / HEAD).
 func (s *Server) serveGalleryBrowserHTML(w http.ResponseWriter, r *http.Request, urlPath string) bool {
@@ -1019,7 +1058,7 @@ func (s *Server) serveGalleryBrowserHTML(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "Error cargando galería", http.StatusInternalServerError)
 		return true
 	}
-	entries, ok := idx.lookupDir(cleanPath, s.fs.caseInsensitive())
+	canonicalDir, entries, ok := idx.lookupCanonicalDir(cleanPath, s.fs.caseInsensitive())
 	if !ok {
 		http.NotFound(w, r)
 		return true
@@ -1027,49 +1066,56 @@ func (s *Server) serveGalleryBrowserHTML(w http.ResponseWriter, r *http.Request,
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return true
 	}
 
-	var sb strings.Builder
-	sb.WriteString(`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`)
-	sb.WriteString(`<title>Galería - ` + html.EscapeString(cleanPath) + `</title>`)
-	sb.WriteString(`<style>body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}main{max-width:960px;margin:0 auto}h1{font-size:1.25rem;margin:0 0 16px;color:#38bdf8}table{width:100%;border-collapse:collapse;background:#1e293b;border-radius:8px;overflow:hidden}th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #334155;font-size:.9rem}th{color:#94a3b8;font-weight:600}a{color:#7dd3fc;text-decoration:none}a:hover{text-decoration:underline}.num{text-align:right;white-space:nowrap;color:#cbd5e1}.dt{white-space:nowrap;color:#94a3b8}</style></head><body><main>`)
-	sb.WriteString(`<h1>🖼️ ` + html.EscapeString(cleanPath) + ` (` + strconv.Itoa(len(entries)) + `)</h1><table><thead><tr><th>Nombre</th><th class="num">Tamaño</th><th>Fecha</th></tr></thead><tbody>`)
-
-	parent := path.Dir(cleanPath)
-	if parent != cleanPath && parent != "." && parent != "/" {
-		sb.WriteString(`<tr><td>📁 <a href="` + encodePathSegments(parent) + `">..</a></td><td class="num">-</td><td class="dt">-</td></tr>`)
+	rows := make([]galleryHTMLRow, 0, len(entries)+1)
+	parent := path.Dir(canonicalDir)
+	if parent != canonicalDir && parent != "." && parent != "/" {
+		rows = append(rows, galleryHTMLRow{
+			Icon: "📁",
+			Href: encodePathSegments(parent),
+			Name: "..",
+			Size: "-",
+			Date: "-",
+		})
 	}
 
 	for _, e := range entries {
-		childPath := path.Clean(cleanPath + "/" + e.Name())
-		href := encodePathSegments(childPath)
-		icon := "📄"
+		childPath := path.Clean(canonicalDir + "/" + e.Name())
+		icon := "🖼️"
 		sizeStr := formatHumanBytes(e.Size())
 		if e.IsDir() {
 			icon = "📁"
 			sizeStr = "-"
 		} else {
-			ext := strings.ToLower(path.Ext(e.Name()))
-			switch ext {
+			switch strings.ToLower(path.Ext(e.Name())) {
 			case ".mp4", ".mov", ".m4v", ".3gp", ".avi", ".mkv":
 				icon = "🎬"
-			default:
-				icon = "🖼️"
 			}
 		}
 		dateStr := "-"
 		if !e.ModTime().IsZero() && e.ModTime().Year() > 1970 {
 			dateStr = e.ModTime().Local().Format("2006-01-02 15:04")
 		}
-		sb.WriteString(`<tr><td>` + icon + ` <a href="` + href + `">` + html.EscapeString(e.Name()) + `</a></td><td class="num">` + sizeStr + `</td><td class="dt">` + dateStr + `</td></tr>`)
+		rows = append(rows, galleryHTMLRow{
+			Icon: icon,
+			Href: encodePathSegments(childPath),
+			Name: e.Name(),
+			Size: sizeStr,
+			Date: dateStr,
+		})
 	}
-	sb.WriteString(`</tbody></table></main></body></html>`)
 
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, sb.String())
+	_ = galleryBrowserTmpl.Execute(w, galleryHTMLView{
+		Path:  canonicalDir,
+		Count: len(entries),
+		Rows:  rows,
+	})
 	return true
 }
 
