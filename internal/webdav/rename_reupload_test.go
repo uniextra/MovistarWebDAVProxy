@@ -329,3 +329,46 @@ func TestRename_ExtensionChange_ShortDownloadKeepsOriginal(t *testing.T) {
 		t.Fatal("se creó un destino truncado en la nube")
 	}
 }
+
+// Si O2 no llega a servir la copia con el nombre nuevo, el MOVE responde 503 +
+// Retry-After con el motivo (no 403, que los clientes toman por «sin permiso»), el
+// original se conserva y la copia sin confirmar se retira para que el reintento no deje
+// dos archivos con el mismo nombre.
+func TestRename_ExtensionChange_UnconfirmedDestinationRetryLater(t *testing.T) {
+	oldWait, oldPoll := reuploadSourceWait, reuploadSourcePoll
+	reuploadSourceWait, reuploadSourcePoll = 200*time.Millisecond, 20*time.Millisecond
+	defer func() { reuploadSourceWait, reuploadSourcePoll = oldWait, oldPoll }()
+
+	f := newReuploadO2()
+	srv := newReuploadServer(t, f)
+	payload := randomBytes(64 * 1024)
+	oldID := f.seed("c.part", payload)
+	f.mu.Lock()
+	f.lag = 1 << 30            // la consulta por ID nunca conoce lo recién subido…
+	f.queries[oldID] = 1 << 31 // …pero sí el original, ya asentado
+	f.mu.Unlock()
+
+	rec := do(srv, "MOVE", "/c.part", nil, map[string]string{"Destination": "/c.idx", "Overwrite": "T"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("MOVE sin destino confirmado: esperado 503, obtenido %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("falta Retry-After")
+	}
+	if !strings.Contains(rec.Body.String(), "original sigue intacto") {
+		t.Errorf("el cuerpo debería explicar el motivo, es %q", rec.Body.String())
+	}
+	if f.wasDeleted(oldID) {
+		t.Fatal("se borró el original sin confirmar el destino")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.deleted) != 1 {
+		t.Fatalf("debería retirarse solo la copia sin confirmar, borrados: %v", f.deleted)
+	}
+	for id, name := range f.names {
+		if name == "c.idx" {
+			t.Fatalf("queda la copia sin confirmar %s en la nube", id)
+		}
+	}
+}

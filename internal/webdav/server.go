@@ -544,6 +544,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// MOVE: si O2 no pudo completarlo por algo pasajero, 503 + Retry-After con el motivo
+	// en vez del 403 de x/net/webdav (ver moveGuard en fs.go).
+	if method == "MOVE" {
+		g := &moveGuard{}
+		mw := &moveStatusInterceptor{ResponseWriter: lw, guard: g}
+		s.handler.ServeHTTP(mw, r.WithContext(context.WithValue(r.Context(), moveGuardKey{}, g)))
+		return
+	}
+
 	// 4. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
 	if method == "GET" || method == "HEAD" {
 		ext := filepath.Ext(urlPath)
@@ -1046,4 +1055,35 @@ func (s *Server) rejectWriteDuringWAFBlock(w http.ResponseWriter, method, urlPat
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	http.Error(w, fmt.Sprintf("O2 Cloud firewall (WAF) block: %s paused until %s", strings.ToLower(method), until.Local().Format("15:04")), http.StatusServiceUnavailable)
 	return true
+}
+
+// moveStatusInterceptor convierte en 503 + Retry-After el 403 de un MOVE que falló por
+// algo pasajero de O2 (moveGuard), con el motivo en el cuerpo.
+type moveStatusInterceptor struct {
+	http.ResponseWriter
+	guard   *moveGuard
+	ownBody bool
+}
+
+func (m *moveStatusInterceptor) WriteHeader(statusCode int) {
+	if m.guard != nil && m.guard.retryLater.Load() && statusCode == http.StatusForbidden {
+		h := m.ResponseWriter.Header()
+		h.Set("Retry-After", "30")
+		h.Del("Content-Length")
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+		h.Set("X-Content-Type-Options", "nosniff")
+		m.ownBody = true
+		m.ResponseWriter.WriteHeader(http.StatusServiceUnavailable)
+		reason, _ := m.guard.reason.Load().(string)
+		_, _ = m.ResponseWriter.Write([]byte(reason + "\n"))
+		return
+	}
+	m.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (m *moveStatusInterceptor) Write(b []byte) (int, error) {
+	if m.ownBody {
+		return len(b), nil // el cuerpo es el motivo; se descarta el «Forbidden» de x/net/webdav
+	}
+	return m.ResponseWriter.Write(b)
 }
