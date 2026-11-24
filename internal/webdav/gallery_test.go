@@ -604,15 +604,17 @@ func TestBrowserUI_PermissionsAndBreadcrumbs(t *testing.T) {
 		t.Fatalf("GET / = %d, ct=%q", recRoot.Code, recRoot.Header().Get("Content-Type"))
 	}
 	csp := recRoot.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "script-src 'nonce-") || !strings.Contains(csp, "font-src 'self'") || strings.Contains(csp, "img-src") {
+	if !strings.Contains(csp, "script-src 'nonce-") || !strings.Contains(csp, "font-src 'self'") || !strings.Contains(csp, "img-src 'self'") {
 		t.Errorf("CSP inesperado: %q", csp)
 	}
 	rootBody := recRoot.Body.String()
 	if strings.Contains(strings.ToLower(rootBody), "<img") {
 		t.Errorf("el listado HTML no debe incluir etiquetas <img> ni miniaturas")
 	}
-	if !strings.Contains(rootBody, `id="bootLoader"`) || !strings.Contains(rootBody, `id="navProgress"`) {
-		t.Errorf("el HTML debe incluir el loader inicial y la barra de navegación: %s", rootBody)
+	for _, idAttr := range []string{`id="bootLoader"`, `id="navProgress"`, `id="lightbox"`, `id="lbPrev"`, `id="lbNext"`, `id="lbStage"`} {
+		if !strings.Contains(rootBody, idAttr) {
+			t.Errorf("el HTML debe incluir %s: %s", idAttr, rootBody)
+		}
 	}
 	if !strings.Contains(rootBody, `data-can-upload="true"`) || !strings.Contains(rootBody, `data-can-mkcol="true"`) {
 		t.Errorf("raíz debe habilitar subida y nueva carpeta: %s", rootBody)
