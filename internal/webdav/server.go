@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -96,6 +97,21 @@ func (b *bufferedResponse) Write(p []byte) (int, error) {
 	return b.body.Write(p)
 }
 
+const (
+	browserLoginPath    = "/__login"
+	browserLogoutPath   = "/__logout"
+	browserStaticPrefix = "/__static/"
+)
+
+// BrowserAuth permite compartir la sesión web y el formulario de login del
+// panel WebUI (:5000) con la vista web integrada en el servidor WebDAV (:5050).
+type BrowserAuth struct {
+	ValidateCookie func(r *http.Request) bool
+	HandleLogin    http.HandlerFunc
+	HandleLogout   http.HandlerFunc
+	HandleStatic   http.Handler
+}
+
 type Server struct {
 	handler        *webdav.Handler
 	fs             *MovistarFS
@@ -104,10 +120,52 @@ type Server struct {
 	authCfg        config.AuthConfig
 	rateLimiter    *config.AuthRateLimiter
 	ntlmAuth       *config.NTLMAuthenticator
+	browserAuth    *BrowserAuth
 	connIDs        map[net.Conn]string // conexión TCP -> id, para ligar la auth NTLM a la conexión real
 	connMu         sync.Mutex
 	activeWG       sync.WaitGroup
 	duplicatiStore *DuplicatiProbeStore
+}
+
+// SetBrowserAuth enlaza la autenticación por sesión web compartida con el panel WebUI.
+func (s *Server) SetBrowserAuth(ba *BrowserAuth) {
+	if s != nil {
+		s.browserAuth = ba
+	}
+}
+
+func isMutatingMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, "PROPFIND":
+		return false
+	default:
+		return true
+	}
+}
+
+func isSameOriginBrowserRequest(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	fwdHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if origin != "" {
+		if strings.EqualFold(origin, "null") {
+			return false
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host) || (fwdHost != "" && strings.EqualFold(u.Host, fwdHost))
+	}
+	referer := strings.TrimSpace(r.Header.Get("Referer"))
+	if referer != "" {
+		if u, err := url.Parse(referer); err == nil && u.Host != "" {
+			return strings.EqualFold(u.Host, r.Host) || (fwdHost != "" && strings.EqualFold(u.Host, fwdHost))
+		}
+	}
+	return true
 }
 
 // connSeq genera un identificador único por cada conexión TCP aceptada.
@@ -350,64 +408,55 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lw.Header().Set("MS-Author-Via", "DAV")
 	}
 
-	// 1. Validación Basic Auth / NTLMv2 y rate-limit por IP (salvo OPTIONS sin credenciales para discovery)
+	// 0. Rutas reservadas para compartir el login/logout web y estáticos del Dashboard (:5000 -> :5050)
+	if s.browserAuth != nil {
+		if urlPath == browserLoginPath && s.browserAuth.HandleLogin != nil {
+			s.browserAuth.HandleLogin(lw, r)
+			return
+		}
+		if urlPath == browserLogoutPath && s.browserAuth.HandleLogout != nil {
+			s.browserAuth.HandleLogout(lw, r)
+			return
+		}
+		if strings.HasPrefix(urlPath, browserStaticPrefix) && s.browserAuth.HandleStatic != nil {
+			s.browserAuth.HandleStatic.ServeHTTP(lw, r)
+			return
+		}
+	}
+
+	// 1. Validación por cookie compartida del Dashboard, Basic Auth o NTLMv2
 	if s.authCfg.IsEnabled() {
-		authHeader := r.Header.Get("Authorization")
-		// Identidad de la conexión TCP real (no el par IP:puerto) y si la petición
-		// llega a través de un proxy inverso de confianza. La autenticación NTLM es
-		// por conexión; tras un proxy que agrupa conexiones upstream no puede confiarse.
-		connKey := connIDFromContext(r.Context())
-		viaTrustedProxy := config.RemoteIsTrustedProxy(r)
-		if config.IsNTLMHeader(authHeader) {
-			if s.rateLimiter.IsBlocked(clientIP) {
-				logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
-				http.Error(lw, "Too Many Authentication Failures", http.StatusTooManyRequests)
+		cookieAuthed := s.browserAuth != nil && s.browserAuth.ValidateCookie != nil && s.browserAuth.ValidateCookie(r)
+		if cookieAuthed {
+			if isMutatingMethod(method) && !isSameOriginBrowserRequest(r) {
+				http.Error(lw, "Forbidden (CSRF)", http.StatusForbidden)
 				return
 			}
-			challenge, isType1, ntlmUser, ok := s.ntlmAuth.HandleHandshake(connKey, clientIP, authHeader, s.authCfg)
-			if isType1 {
-				if r.Body != nil {
-					_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
-				}
-				lw.Header().Set("WWW-Authenticate", challenge)
-				http.Error(lw, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			if !ok {
-				if r.Body != nil {
-					_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
-				}
-				if ntlmUser != "" {
-					s.rateLimiter.RecordFailure(clientIP)
-					logger.Log("[WebDAV] 🔒 Intento de acceso NTLM fallido desde %s (usuario: %s)", clientIP, logger.Mask(ntlmUser))
-				}
-				lw.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
-				if s.shouldOfferNTLM(r) {
-					lw.Header().Add("WWW-Authenticate", "NTLM")
-				}
-				http.Error(lw, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			s.rateLimiter.Reset(clientIP)
 		} else {
-			rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(authHeader)
-			connAuthed := false
-			if !hasAuth && !viaTrustedProxy && connKey != "" && s.ntlmAuth != nil {
-				_, connAuthed = s.ntlmAuth.IsConnAuthenticated(connKey)
-			}
-			if !connAuthed && (method != "OPTIONS" || hasAuth) {
+			authHeader := r.Header.Get("Authorization")
+			// Identidad de la conexión TCP real (no el par IP:puerto) y si la petición
+			// llega a través de un proxy inverso de confianza. La autenticación NTLM es
+			// por conexión; tras un proxy que agrupa conexiones upstream no puede confiarse.
+			connKey := connIDFromContext(r.Context())
+			viaTrustedProxy := config.RemoteIsTrustedProxy(r)
+			if config.IsNTLMHeader(authHeader) {
 				if s.rateLimiter.IsBlocked(clientIP) {
 					logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
 					http.Error(lw, "Too Many Authentication Failures", http.StatusTooManyRequests)
 					return
 				}
-				if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
-					if r.Body != nil {
-						_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
-					}
-					if hasAuth && (rawUser != "" || pass != "") {
+				challenge, isType1, ntlmUser, ok := s.ntlmAuth.HandleHandshake(connKey, clientIP, authHeader, s.authCfg)
+				if isType1 {
+					drainSmallAuthBody(r)
+					lw.Header().Set("WWW-Authenticate", challenge)
+					http.Error(lw, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
+				if !ok {
+					drainSmallAuthBody(r)
+					if ntlmUser != "" {
 						s.rateLimiter.RecordFailure(clientIP)
-						logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s, %s)", clientIP, logger.Mask(rawUser), config.DescribeCredentialShape(rawUser, pass))
+						logger.Log("[WebDAV] 🔒 Intento de acceso NTLM fallido desde %s (usuario: %s)", clientIP, logger.Mask(ntlmUser))
 					}
 					lw.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
 					if s.shouldOfferNTLM(r) {
@@ -417,6 +466,45 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				s.rateLimiter.Reset(clientIP)
+			} else {
+				rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(authHeader)
+				connAuthed := false
+				if !hasAuth && !viaTrustedProxy && connKey != "" && s.ntlmAuth != nil {
+					_, connAuthed = s.ntlmAuth.IsConnAuthenticated(connKey)
+				}
+				if !connAuthed && (method != "OPTIONS" || hasAuth) {
+					if s.rateLimiter.IsBlocked(clientIP) {
+						logger.Log("[WebDAV] 🚫 IP bloqueada temporalmente por exceso de fallos de autenticación: %s", clientIP)
+						http.Error(lw, "Too Many Authentication Failures", http.StatusTooManyRequests)
+						return
+					}
+					if !hasAuth || !s.authCfg.Validate(cleanUser, pass) {
+						// Si entra desde un navegador sin credenciales, redirigimos al login web
+						// del Dashboard en vez de provocar el diálogo Basic Auth del navegador.
+						if !hasAuth && s.browserAuth != nil && s.browserAuth.HandleLogin != nil &&
+							(method == http.MethodGet || method == http.MethodHead) &&
+							strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") {
+							next := path.Clean("/" + urlPath)
+							if next == "" || next == "." {
+								next = "/"
+							}
+							http.Redirect(lw, r, browserLoginPath+"?next="+url.QueryEscape(next), http.StatusSeeOther)
+							return
+						}
+						drainSmallAuthBody(r)
+						if hasAuth && (rawUser != "" || pass != "") {
+							s.rateLimiter.RecordFailure(clientIP)
+							logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s, %s)", clientIP, logger.Mask(rawUser), config.DescribeCredentialShape(rawUser, pass))
+						}
+						lw.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+						if s.shouldOfferNTLM(r) {
+							lw.Header().Add("WWW-Authenticate", "NTLM")
+						}
+						http.Error(lw, "Unauthorized", http.StatusUnauthorized)
+						return
+					}
+					s.rateLimiter.Reset(clientIP)
+				}
 			}
 		}
 	}
@@ -438,6 +526,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Nombres de más de 255 caracteres: Movistar Cloud los recortaría sin avisar.
 	if rejectLongNames(lw, r) {
+		return
+	}
+
+	// Política de acceso HTTP sobre la carpeta virtual de la Galería.
+	if s.guardGalleryRequest(lw, r, method, urlPath) {
 		return
 	}
 
@@ -555,6 +648,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 4. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
 	if method == "GET" || method == "HEAD" {
+		if s.serveGalleryBrowserHTML(lw, r, urlPath) {
+			return
+		}
 		ext := filepath.Ext(urlPath)
 		ct := mime.TypeByExtension(ext)
 		if ct == "" {
@@ -1057,6 +1153,72 @@ func (s *Server) rejectWriteDuringWAFBlock(w http.ResponseWriter, method, urlPat
 	return true
 }
 
+func (s *Server) guardGalleryRequest(w http.ResponseWriter, r *http.Request, method, urlPath string) bool {
+	if s == nil || s.fs == nil {
+		return false
+	}
+	cleanPath := path.Clean("/" + urlPath)
+	var dstPath string
+	if method == "MOVE" || method == "COPY" {
+		if u, err := url.Parse(r.Header.Get("Destination")); err == nil && u.Path != "" {
+			dstPath = path.Clean("/" + u.Path)
+		}
+	}
+
+	switch method {
+	case "MKCOL":
+		if s.fs.isGalleryPath(cleanPath) {
+			http.Error(w, "Forbidden: cannot create folders in virtual gallery", http.StatusForbidden)
+			return true
+		}
+	case "MOVE":
+		if s.fs.isGalleryPath(cleanPath) || (dstPath != "" && s.fs.isGalleryPath(dstPath)) {
+			http.Error(w, "Forbidden: cannot move items into or out of virtual gallery", http.StatusForbidden)
+			return true
+		}
+	case "COPY":
+		if dstPath != "" && s.fs.isGalleryPath(dstPath) {
+			http.Error(w, "Forbidden: cannot copy items into virtual gallery", http.StatusForbidden)
+			return true
+		}
+	case "DELETE":
+		if s.fs.isGalleryPath(cleanPath) {
+			if !config.GalleryDelete() {
+				http.Error(w, "Forbidden: gallery delete is disabled (GALLERY_DELETE=false)", http.StatusForbidden)
+				return true
+			}
+			if s.fs.isGalleryVirtualDir(cleanPath) {
+				http.Error(w, "Forbidden: cannot delete virtual gallery directory", http.StatusForbidden)
+				return true
+			}
+		}
+	case "PUT":
+		if s.fs.isGalleryPath(cleanPath) {
+			if !config.GalleryUpload() {
+				http.Error(w, "Forbidden: gallery upload is disabled (GALLERY_UPLOAD=false)", http.StatusForbidden)
+				return true
+			}
+			if strings.HasSuffix(urlPath, "/") || s.fs.isGalleryVirtualDir(cleanPath) {
+				http.Error(w, "Cannot PUT to a collection", http.StatusMethodNotAllowed)
+				return true
+			}
+			if !s.fs.validGalleryUploadPath(cleanPath) {
+				http.Error(w, "Not Found: invalid virtual gallery path", http.StatusNotFound)
+				return true
+			}
+			if !sapi.IsGalleryMediaName(path.Base(cleanPath)) {
+				http.Error(w, "Unsupported Media Type: virtual gallery only accepts photos and videos", http.StatusUnsupportedMediaType)
+				return true
+			}
+			if r.ContentLength == 0 {
+				http.Error(w, "Unsupported Media Type: virtual gallery does not accept empty files", http.StatusUnsupportedMediaType)
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // moveStatusInterceptor convierte en 503 + Retry-After el 403 de un MOVE que falló por
 // algo pasajero de O2 (moveGuard), con el motivo en el cuerpo.
 type moveStatusInterceptor struct {
@@ -1086,4 +1248,25 @@ func (m *moveStatusInterceptor) Write(b []byte) (int, error) {
 		return len(b), nil // el cuerpo es el motivo; se descarta el «Forbidden» de x/net/webdav
 	}
 	return m.ResponseWriter.Write(b)
+}
+
+// drainSmallAuthBody consume cuerpos XML pequeños (p. ej. PROPFIND en NTLM) antes de
+// responder 401 para mantener viva la conexión TCP, pero evita leer el cuerpo en PUT,
+// peticiones con Expect: 100-continue o cuerpos grandes/chunked; leer r.Body en esos casos
+// hace que net/http emita "100 Continue" prematuro antes del 401 y rompa clientes como
+// Synology File Station (libcurl), que abortan sin reintentar con Authorization.
+func drainSmallAuthBody(r *http.Request) {
+	if r == nil || r.Body == nil {
+		return
+	}
+	if r.Method == http.MethodPut {
+		return
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Expect")), "100-continue") {
+		return
+	}
+	if r.ContentLength <= 0 || r.ContentLength > 64*1024 {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
 }

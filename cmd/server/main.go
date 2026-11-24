@@ -197,6 +197,10 @@ func main() {
 
 	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
 	webdavServer := webdav.NewServerWithAuth(client, davAuth, metaStore)
+	if config.GalleryEnabled() {
+		logger.Log("[WebDAV] 🖼️ Galería virtual habilitada en /%s (layout: %s, subir: %v, borrar: %v)",
+			config.GalleryDir(), config.GalleryLayout(), config.GalleryUpload(), config.GalleryDelete())
+	}
 	if !client.HasCredentials() {
 		webdavServer.SetRunning(false)
 		logger.Log("[WebDAV] ⏸️ Proxy WebDAV pausado: esperando vinculación de cuenta en el panel web.")
@@ -276,6 +280,7 @@ func main() {
 	// 4. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
+	webdavServer.SetBrowserAuth(uiServer.BrowserAuth())
 	go watchHealth(ctx, webSess)
 	watchUploadSizeLimit()
 	// Contenido de los archivos diminutos (fichas del chunker...), una vez y en segundo

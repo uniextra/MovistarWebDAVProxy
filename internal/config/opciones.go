@@ -180,6 +180,44 @@ func CopyWaitBytesPerSec() int64 {
 	return int64(envInt("WEBDAV_COPY_WAIT_MBPS", 10)) << 20
 }
 
+// GalleryEnabled (GALLERY_ENABLED, por defecto false): expone una carpeta virtual
+// en WebDAV con las fotos y vídeos de la Galería que no están dentro de ninguna
+// carpeta de «Mis Archivos» (folder_id = 0). Desactivada por defecto para no
+// alterar copias existentes sobre /.
+func GalleryEnabled() bool { return envBool("GALLERY_ENABLED", false) }
+
+// GalleryDir (GALLERY_DIR, por defecto "_gallery"): nombre de la carpeta virtual
+// de la galería en la raíz de WebDAV.
+func GalleryDir() string {
+	dir := strings.TrimSpace(os.Getenv("GALLERY_DIR"))
+	dir = strings.Trim(dir, "/\\")
+	if dir == "" || dir == "." || dir == ".." || strings.ContainsAny(dir, "/\\") {
+		return "_gallery"
+	}
+	return dir
+}
+
+// GalleryLayout (GALLERY_LAYOUT, por defecto "year-month"): organización de la
+// galería virtual ("year-month" en subcarpetas YYYY/MM, o "flat" en una sola lista).
+func GalleryLayout() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GALLERY_LAYOUT"))) {
+	case "flat":
+		return "flat"
+	case "year-month", "ym", "date", "":
+		return "year-month"
+	default:
+		return "year-month"
+	}
+}
+
+// GalleryUpload (GALLERY_UPLOAD, por defecto false): permite subir fotos y vídeos
+// directamente a la Galería (folder_id = 0) a través de la carpeta virtual.
+func GalleryUpload() bool { return GalleryEnabled() && envBool("GALLERY_UPLOAD", false) }
+
+// GalleryDelete (GALLERY_DELETE, por defecto false): permite enviar a la papelera
+// elementos de la Galería (folder_id = 0) desde la carpeta virtual.
+func GalleryDelete() bool { return GalleryEnabled() && envBool("GALLERY_DELETE", false) }
+
 // envBool lee un sí/no; vacío o no reconocido = def.
 func envBool(name string, def bool) bool {
 	if v, ok := envBoolSet(name); ok {

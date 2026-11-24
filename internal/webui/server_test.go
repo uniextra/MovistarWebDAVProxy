@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/updater"
@@ -1185,4 +1186,224 @@ func TestStaticFilesPublicAccessAndDirectoryListing(t *testing.T) {
 			t.Fatalf("fallo de seguridad: /static/../status devolvió 200 sin autenticación")
 		}
 	})
+}
+
+func TestWebUI_SharedBrowserSessionAndExplorerLink(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := config.TokensDir
+	config.TokensDir = tmpDir
+	t.Cleanup(func() { config.TokensDir = origTokensDir })
+
+	cfg := config.AccountConfig{
+		Provider: "movistar",
+		Phone:    "612345678",
+		DeviceID: "fol-secretdevice1234",
+	}
+	client, err := sapi.NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	ms, err := cache.NewMetadataStore(filepath.Join(tmpDir, "meta.db"))
+	if err != nil {
+		t.Fatalf("NewMetadataStore failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	_ = ms.SetSyncState("root_folder_id", "100")
+	_ = ms.SetInitialSync("cursor-1")
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 100, Name: "/", Magic: true})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 200, Name: "Documentos", ParentID: 100})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 201, Name: "Mis Documentos", ParentID: 100})
+
+	authCfg := config.AuthConfig{Username: "admin", Password: "secretpassword"}
+	davSrv := webdav.NewServerWithAuth(client, authCfg, ms)
+	if fs := davSrv.FS(); fs != nil {
+		fs.RecordSyncTime(time.Now())
+	}
+	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
+	davSrv.SetBrowserAuth(uiSrv.BrowserAuth())
+	uiHandler := uiSrv.Routes()
+
+	// 1. El Dashboard sirve el enlace al Explorador
+	idxReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	idxReq.SetBasicAuth("admin", "secretpassword")
+	idxRec := httptest.NewRecorder()
+	uiHandler.ServeHTTP(idxRec, idxReq)
+	if idxRec.Code != http.StatusOK || !strings.Contains(idxRec.Body.String(), `id="explorer-header-btn"`) || !strings.Contains(idxRec.Body.String(), "updateExplorerLink") {
+		t.Fatalf("Dashboard debe incluir enlace al explorador: code=%d", idxRec.Code)
+	}
+
+	// 2. Navegador directo a :5050 GET / sin cookie -> redirige a /__login sin WWW-Authenticate Basic
+	davBrowserReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	davBrowserReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+	davBrowserRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(davBrowserRec, davBrowserReq)
+	if davBrowserRec.Code != http.StatusSeeOther || davBrowserRec.Header().Get("Location") != "/__login?next=%2F" {
+		t.Fatalf("esperado 303 -> /__login?next=%%2F, recibido %d loc=%q", davBrowserRec.Code, davBrowserRec.Header().Get("Location"))
+	}
+	if davBrowserRec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("no debe enviar WWW-Authenticate a navegación HTML: %q", davBrowserRec.Header().Get("WWW-Authenticate"))
+	}
+
+	// 3. Cliente WebDAV (PROPFIND / o GET / sin Accept: text/html) -> sigue exigiendo Basic Auth 401
+	pfReq := httptest.NewRequest("PROPFIND", "/", nil)
+	pfRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(pfRec, pfReq)
+	if pfRec.Code != http.StatusUnauthorized || !strings.Contains(pfRec.Header().Get("WWW-Authenticate"), "Basic") {
+		t.Fatalf("PROPFIND sin credenciales debe devolver 401 Basic, recibido %d (%q)", pfRec.Code, pfRec.Header().Get("WWW-Authenticate"))
+	}
+	cliGetReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	cliGetRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(cliGetRec, cliGetReq)
+	if cliGetRec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET sin Accept text/html ni credenciales debe devolver 401, recibido %d", cliGetRec.Code)
+	}
+
+	// 4. Login en el Dashboard (:5000/login) genera cookie válida en WebDAV (:5050)
+	form := url.Values{"username": {"admin"}, "password": {"secretpassword"}}
+	uiLoginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	uiLoginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	uiLoginRec := httptest.NewRecorder()
+	uiHandler.ServeHTTP(uiLoginRec, uiLoginReq)
+	if uiLoginRec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /login esperado 303, recibido %d", uiLoginRec.Code)
+	}
+	var sessCookie *http.Cookie
+	for _, c := range uiLoginRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			sessCookie = c
+			break
+		}
+	}
+	if sessCookie == nil || sessCookie.Value == "" {
+		t.Fatalf("POST /login no devolvió cookie %s", sessionCookieName)
+	}
+
+	davWithCookieReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	davWithCookieReq.AddCookie(sessCookie)
+	davWithCookieRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(davWithCookieRec, davWithCookieReq)
+	davBody := davWithCookieRec.Body.String()
+	if davWithCookieRec.Code != http.StatusOK || !strings.Contains(davBody, "Documentos") || !strings.Contains(davBody, `id="logoutBtn"`) {
+		t.Fatalf("GET / en WebDAV con cookie del Dashboard falló: %d body=%s", davWithCookieRec.Code, davBody)
+	}
+	if !strings.Contains(davBody, "/__static/fonts/inter-v20-latin-400-700.woff2") || !strings.Contains(davWithCookieRec.Header().Get("Content-Security-Policy"), "font-src 'self'") {
+		t.Errorf("el explorador debe usar la fuente offline /__static/fonts/ y CSP font-src 'self'")
+	}
+
+	// 5. Protección CSRF: petición mutante cross-site con cookie -> 403 Forbidden; same-origin -> pasa auth (404 porque no existe)
+	csrfReq := httptest.NewRequest(http.MethodDelete, "/noexiste.txt", nil)
+	csrfReq.AddCookie(sessCookie)
+	csrfReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	csrfRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(csrfRec, csrfReq)
+	if csrfRec.Code != http.StatusForbidden {
+		t.Fatalf("DELETE cross-site con cookie debía bloquearse con 403, recibido %d", csrfRec.Code)
+	}
+
+	sameOrigDel := httptest.NewRequest(http.MethodDelete, "/noexiste.txt", nil)
+	sameOrigDel.Host = "127.0.0.1:5050"
+	sameOrigDel.AddCookie(sessCookie)
+	sameOrigDel.Header.Set("Origin", "http://127.0.0.1:5050")
+	sameOrigDel.Header.Set("Sec-Fetch-Site", "same-origin")
+	sameOrigRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(sameOrigRec, sameOrigDel)
+	if sameOrigRec.Code != http.StatusNotFound {
+		t.Fatalf("DELETE same-origin con cookie debía pasar auth y devolver 404, recibido %d", sameOrigRec.Code)
+	}
+
+	// 6. Login directo en :5050/__login mantiene next seguro, bloquea open redirect y desbloquea :5000
+	getDavLogin := httptest.NewRequest(http.MethodGet, "/__login?next=%2FDocumentos", nil)
+	getDavLoginRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(getDavLoginRec, getDavLogin)
+	if getDavLoginRec.Code != http.StatusOK || !strings.Contains(getDavLoginRec.Body.String(), `action="/__login"`) {
+		t.Fatalf("GET /__login esperado 200 con action=/__login, recibido %d", getDavLoginRec.Code)
+	}
+	if !strings.Contains(getDavLoginRec.Body.String(), "/__static/fonts/inter-v20-latin-400-700.woff2") {
+		t.Errorf("GET /__login debe apuntar a /__static/fonts/inter-v20-latin-400-700.woff2")
+	}
+
+	// Fuente local en :5050 se sirve sin credenciales (200 font/woff2) y los directorios devuelven 404
+	fontReq := httptest.NewRequest(http.MethodGet, "/__static/fonts/inter-v20-latin-400-700.woff2", nil)
+	fontRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(fontRec, fontReq)
+	if fontRec.Code != http.StatusOK || fontRec.Header().Get("Content-Type") != "font/woff2" || !strings.Contains(fontRec.Header().Get("Cache-Control"), "max-age=31536000") || fontRec.Body.Len() == 0 {
+		t.Fatalf("GET /__static/fonts/... inesperado: code=%d ct=%q cc=%q len=%d", fontRec.Code, fontRec.Header().Get("Content-Type"), fontRec.Header().Get("Cache-Control"), fontRec.Body.Len())
+	}
+	staticDirReq := httptest.NewRequest(http.MethodGet, "/__static/", nil)
+	staticDirRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(staticDirRec, staticDirReq)
+	if staticDirRec.Code != http.StatusNotFound {
+		t.Errorf("listado /__static/ debe devolver 404, recibido %d", staticDirRec.Code)
+	}
+
+	for _, badNext := range []string{"//evil.com", `/\evil.com`, "https://evil.com"} {
+		postOpenRedirect := httptest.NewRequest(http.MethodPost, "/__login", strings.NewReader(url.Values{
+			"username": {"admin"}, "password": {"secretpassword"}, "next": {badNext},
+		}.Encode()))
+		postOpenRedirect.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		postOpenRec := httptest.NewRecorder()
+		davSrv.ServeHTTP(postOpenRec, postOpenRedirect)
+		if postOpenRec.Code != http.StatusSeeOther || postOpenRec.Header().Get("Location") != "/" {
+			t.Fatalf("open redirect %q debía normalizarse a '/', recibido %d loc=%q", badNext, postOpenRec.Code, postOpenRec.Header().Get("Location"))
+		}
+	}
+
+	postSpaceNext := httptest.NewRequest(http.MethodPost, "/__login", strings.NewReader(url.Values{
+		"username": {"admin"}, "password": {"secretpassword"}, "next": {"/Mis Documentos"},
+	}.Encode()))
+	postSpaceNext.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postSpaceRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(postSpaceRec, postSpaceNext)
+	if postSpaceRec.Code != http.StatusSeeOther || postSpaceRec.Header().Get("Location") != "/Mis%20Documentos" {
+		t.Fatalf("POST /__login con espacio debía codificarse a /Mis%%20Documentos, recibido %d loc=%q", postSpaceRec.Code, postSpaceRec.Header().Get("Location"))
+	}
+
+	postDavLogin := httptest.NewRequest(http.MethodPost, "/__login", strings.NewReader(url.Values{
+		"username": {"admin"}, "password": {"secretpassword"}, "next": {"/Documentos"},
+	}.Encode()))
+	postDavLogin.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postDavRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(postDavRec, postDavLogin)
+	if postDavRec.Code != http.StatusSeeOther || postDavRec.Header().Get("Location") != "/Documentos" {
+		t.Fatalf("POST /__login esperado 303 -> /Documentos, recibido %d loc=%q", postDavRec.Code, postDavRec.Header().Get("Location"))
+	}
+	var davCookie *http.Cookie
+	for _, c := range postDavRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			davCookie = c
+			break
+		}
+	}
+	if davCookie == nil {
+		t.Fatalf("POST /__login no emitió cookie de sesión")
+	}
+
+	uiStatusReq := httptest.NewRequest(http.MethodGet, "/status", nil)
+	uiStatusReq.AddCookie(davCookie)
+	uiStatusRec := httptest.NewRecorder()
+	uiHandler.ServeHTTP(uiStatusRec, uiStatusReq)
+	if uiStatusRec.Code != http.StatusOK {
+		t.Fatalf("cookie de /__login debía autenticar :5000 /status, recibido %d", uiStatusRec.Code)
+	}
+
+	// 7. Logout desde :5050/__logout invalida la sesión en ambos lados
+	logoutReq := httptest.NewRequest(http.MethodPost, "/__logout", nil)
+	logoutReq.Host = "127.0.0.1:5050"
+	logoutReq.Header.Set("Origin", "http://127.0.0.1:5050")
+	logoutReq.Header.Set("Accept", "application/json")
+	logoutReq.AddCookie(davCookie)
+	logoutRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("POST /__logout esperado 200 JSON, recibido %d", logoutRec.Code)
+	}
+
+	uiAfterLogout := httptest.NewRequest(http.MethodGet, "/status", nil)
+	uiAfterLogout.Header.Set("Accept", "application/json")
+	uiAfterLogout.AddCookie(davCookie)
+	uiAfterRec := httptest.NewRecorder()
+	uiHandler.ServeHTTP(uiAfterRec, uiAfterLogout)
+	if uiAfterRec.Code != http.StatusUnauthorized {
+		t.Fatalf("sesión debía quedar invalidada en :5000 tras /__logout, recibido %d", uiAfterRec.Code)
+	}
 }

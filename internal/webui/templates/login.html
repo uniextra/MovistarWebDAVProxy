@@ -19,36 +19,19 @@
     <!-- Fuentes + Estilos locales -->  
     <style>
         /* inter - latin como google fonts en vez de font-weight: 400 700;  woff2 Chrome 36+, Opera 23+, Firefox 39+, Safari 12+, iOS 10+ */
-        @font-face {
-        font-display: swap;
-        font-family: 'Inter';
-        font-style: normal;
-        font-weight: 400;
-        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
-        }
-        @font-face {
-        font-display: swap;
-        font-family: 'Inter';
-        font-style: normal;
-        font-weight: 500;
-        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
-        }
-        @font-face {
-        font-display: swap;
-        font-family: 'Inter';
-        font-style: normal;
-        font-weight: 600;
-        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
-        }
-        @font-face {
-        font-display: swap;
-        font-family: 'Inter';
-        font-style: normal;
-        font-weight: 700;
-        src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2');
-        }
+        {{if .UseProxyStatic}}
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 400; src: url('/__static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 500; src: url('/__static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 600; src: url('/__static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 700; src: url('/__static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        {{else}}
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 400; src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 500; src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 600; src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        @font-face { font-display: swap; font-family: 'Inter'; font-style: normal; font-weight: 700; src: url('/static/fonts/inter-v20-latin-400-700.woff2') format('woff2'); }
+        {{end}}
 
-        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background-color: #f8fafc; }
 
         /* ---- Modo oscuro: reinterpreta los colores claros de la plantilla ---- */
         html.dark { color-scheme: dark; }
@@ -119,7 +102,8 @@
             </div>
             {{end}}
 
-            <form id="loginForm" method="POST" action="/login" autocomplete="on" class="space-y-4">
+            <form id="loginForm" method="POST" action="{{if .FormAction}}{{.FormAction}}{{else}}/login{{end}}" autocomplete="on" class="space-y-4">
+                {{if .Next}}<input type="hidden" name="next" value="{{.Next}}">{{end}}
                 <!-- Username field optimized for password managers -->
                 <div>
                     <label for="username" class="block text-xs font-semibold text-slate-700 mb-1.5">Usuario</label>

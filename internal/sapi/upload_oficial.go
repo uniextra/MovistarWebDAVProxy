@@ -208,10 +208,31 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 	}
 	kind := p.kind
 	if kind == "" {
-		kind = mediaKindForName(p.name)
+		if p.folderID == 0 {
+			kind = galleryKindForName(p.name)
+			if kind == "" {
+				return nil, fmt.Errorf("%w (solo fotos y vídeos en galería)", ErrMediaUnsupported)
+			}
+		} else {
+			kind = mediaKindForName(p.name)
+		}
 	}
 	// El tipo como lo manda la app (sin "; charset=…" y con sus valores para m4a, heic…).
 	contentType := contentTypeForName(p.name)
+	if p.folderID == 0 && kind == "video" && contentType == "application/octet-stream" {
+		switch strings.ToLower(filepath.Ext(p.name)) {
+		case ".mov":
+			contentType = "video/quicktime"
+		case ".m4v":
+			contentType = "video/x-m4v"
+		case ".3gp":
+			contentType = "video/3gpp"
+		case ".avi":
+			contentType = "video/x-msvideo"
+		case ".mkv":
+			contentType = "video/x-matroska"
+		}
+	}
 	if kind == "file" && mediaKindForName(p.name) != "file" {
 		contentType = "application/octet-stream" // imagen/audio/vídeo subido como genérico
 	}
@@ -276,6 +297,8 @@ func (c *Client) uploadOfficial(p officialUpload) (*MediaItem, error) {
 	created := now
 	if !p.created.IsZero() {
 		created = p.created // en una sobrescritura, O2 conserva la fecha de creación
+	} else if p.existing == "" && p.folderID == 0 && !p.modTime.IsZero() {
+		created = p.modTime
 	}
 	item := &MediaItem{
 		ID:               id,
@@ -319,7 +342,7 @@ func rewound(p officialUpload) (officialUpload, bool) {
 // imagen, audio o vídeo que O2 rechazó por su contenido (MED-1050). Solo con
 // SAPI_UNSUPPORTED_AS_FILE, en archivos nuevos y con un cuerpo que se pueda rebobinar.
 func (c *Client) unsupportedAsFile(err error, kind string, p officialUpload) (officialUpload, bool) {
-	if !errors.Is(err, ErrMediaUnsupported) || kind == "file" || !config.UnsupportedAsFile() ||
+	if !errors.Is(err, ErrMediaUnsupported) || kind == "file" || p.folderID <= 0 || !config.UnsupportedAsFile() ||
 		p.existing != "" || (p.pendingID != "" && !p.pendingNew) {
 		return p, false
 	}
@@ -339,10 +362,12 @@ func (c *Client) unsupportedAsFile(err error, kind string, p officialUpload) (of
 func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType string, now, modTime time.Time) (string, error) {
 	data := map[string]interface{}{
 		"contenttype":      contentType,
-		"folderid":         p.folderID,
 		"modificationdate": officialDate(modTime),
 		"name":             toCloudName(p.name),
 		"size":             p.size,
+	}
+	if p.folderID > 0 {
+		data["folderid"] = p.folderID
 	}
 	if p.existing != "" {
 		// Como la app (captura del 18/11/2026): id, tamaño y fecha de modificación
@@ -352,6 +377,8 @@ func (c *Client) officialSaveMetadata(kind string, p officialUpload, contentType
 			data["creationdate"] = officialDate(p.created)
 		}
 		logger.Log("[SAPI] 📝 Sobrescritura in-place para ID existente: %s (%s)", p.existing, p.name)
+	} else if p.folderID == 0 && !p.modTime.IsZero() {
+		data["creationdate"] = officialDate(modTime)
 	} else {
 		data["creationdate"] = officialDate(now)
 	}

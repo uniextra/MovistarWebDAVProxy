@@ -676,6 +676,38 @@ func (s *MetadataStore) GetDuplicateMediaInFolder(folderID int64, name string) (
 	return items, rows.Err()
 }
 
+// ListGalleryMedia returns all media items with folder_id = 0 without dropping
+// duplicate filenames, ordered deterministically by name and numeric ID.
+func (s *MetadataStore) ListGalleryMedia() ([]sapi.MediaItem, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	query := `
+		SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
+		FROM media
+		WHERE folder_id = 0
+		ORDER BY name COLLATE NOCASE ASC, CAST(id AS INTEGER) ASC, id ASC
+	`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("list gallery media: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]sapi.MediaItem, 0)
+	for rows.Next() {
+		m, err := scanMedia(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan gallery media row: %w", err)
+		}
+		items = append(items, *m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("gallery media rows error: %w", err)
+	}
+	return items, nil
+}
+
 // --- Write-Through / Mutation APIs ---
 
 // UpsertFolder inserts or updates a single folder.

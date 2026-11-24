@@ -2012,6 +2012,28 @@ func mediaKindForName(name string) string {
 	return "file"
 }
 
+// IsGalleryMediaName indica si el nombre corresponde a una foto o vídeo admitido
+// para subir directamente a la Galería virtual (sin carpeta).
+func IsGalleryMediaName(name string) bool {
+	return galleryKindForName(name) != ""
+}
+
+func galleryKindForName(name string) string {
+	ext := strings.ToLower(name)
+	if i := strings.LastIndex(ext, "."); i >= 0 {
+		ext = ext[i+1:]
+	} else {
+		return ""
+	}
+	switch ext {
+	case "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic":
+		return "picture"
+	case "mp4", "mov", "m4v", "3gp", "avi", "mkv":
+		return "video"
+	}
+	return ""
+}
+
 // mediaMoveRetries y mediaMoveRetryDelay controlan los reintentos cuando SAPI todavía
 // está validando un archivo recién subido (MED-1017), igual que en subidas y borrados.
 // La espera crece con cada intento hasta mediaMoveMaxDelay (~70 s en total): algunos
@@ -2469,7 +2491,9 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		"modificationdate": modRFC,
 		"creationdate":     nowRFC,
 		"contenttype":      mimeType,
-		"folderid":         folderID,
+	}
+	if folderID > 0 {
+		metaData["folderid"] = folderID
 	}
 	if existingMediaID != "" {
 		metaData["id"] = existingMediaID
