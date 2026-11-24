@@ -1831,6 +1831,30 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}), nil
 	}
 
+	if pc := propfindCacheFromContext(ctx); pc != nil {
+		if entry, ok := pc.get(mfs.propfindEntryKey(cleanPath)); ok {
+			if entry.isFolder {
+				dr := NewWebDAVDirReader(mfs, cleanPath, entry.folderID, entry.modTime)
+				dr.ctx = ctx
+				return dr, nil
+			}
+			if !entry.isRecentUpload && entry.media != nil {
+				if entry.media.Size == 0 || strings.HasPrefix(entry.media.ID, "virtual:") {
+					return NewWebDAVMemoryReader(cleanPath, &MemoryFile{
+						ID:       entry.media.ID,
+						Name:     entry.media.Name,
+						FolderID: entry.media.FolderID,
+						Content:  []byte{},
+						Size:     0,
+						ModTime:  parseTime(entry.media.ModificationDate),
+						CachedAt: time.Now(),
+					}), nil
+				}
+				return NewWebDAVFileReader(mfs, cleanPath, *entry.media), nil
+			}
+		}
+	}
+
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
 	if err != nil {
 		return nil, err
@@ -1841,7 +1865,9 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		if folderInfo != nil && string(folderInfo.ModificationDate) != "" {
 			mt = parseTime(folderInfo.ModificationDate)
 		}
-		return NewWebDAVDirReader(mfs, cleanPath, folderInfo.ID, mt), nil
+		dr := NewWebDAVDirReader(mfs, cleanPath, folderInfo.ID, mt)
+		dr.ctx = ctx
+		return dr, nil
 	}
 
 	// Comprobar memoria primero (con otras mayúsculas, solo si es el mismo archivo resuelto)
@@ -2625,6 +2651,12 @@ func (mfs *MovistarFS) Stat(ctx context.Context, name string) (os.FileInfo, erro
 	}
 	if mfs.isGalleryPath(cleanPath) {
 		return mfs.galleryStat(cleanPath)
+	}
+
+	if pc := propfindCacheFromContext(ctx); pc != nil {
+		if entry, ok := pc.get(mfs.propfindEntryKey(cleanPath)); ok && entry.fileInfo != nil {
+			return entry.fileInfo, nil
+		}
 	}
 
 	folderInfo, mediaInfo, isFolder, err := mfs.resolvePath(cleanPath)
@@ -3986,9 +4018,71 @@ func (mfs *MovistarFS) autoHealHyperBackupWriter(dirPath string, folderID int64,
 	return vFiles
 }
 
+type propfindCacheKey struct{}
+
+type propfindEntry struct {
+	fileInfo       os.FileInfo
+	isFolder       bool
+	folderID       int64
+	modTime        time.Time
+	media          *sapi.MediaItem
+	isRecentUpload bool
+}
+
+// propfindDirCache guarda los hijos listados por Readdir dentro de una misma petición
+// PROPFIND para que Stat y OpenFile de x/net/webdav los resuelvan en O(1) sin repetir
+// cientos de miles de consultas a SQLite en carpetas con decenas de miles de archivos.
+type propfindDirCache struct {
+	mu      sync.RWMutex
+	entries map[string]propfindEntry
+}
+
+func withPropfindCache(ctx context.Context) context.Context {
+	if propfindCacheFromContext(ctx) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, propfindCacheKey{}, &propfindDirCache{
+		entries: make(map[string]propfindEntry),
+	})
+}
+
+func propfindCacheFromContext(ctx context.Context) *propfindDirCache {
+	if ctx == nil {
+		return nil
+	}
+	c, _ := ctx.Value(propfindCacheKey{}).(*propfindDirCache)
+	return c
+}
+
+func (c *propfindDirCache) get(key string) (propfindEntry, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[key]
+	c.mu.RUnlock()
+	return e, ok
+}
+
+func (c *propfindDirCache) putAll(batch map[string]propfindEntry) {
+	if len(batch) == 0 {
+		return
+	}
+	c.mu.Lock()
+	for k, v := range batch {
+		c.entries[k] = v
+	}
+	c.mu.Unlock()
+}
+
+func (mfs *MovistarFS) propfindEntryKey(cleanPath string) string {
+	if mfs != nil && mfs.caseInsensitive() {
+		return strings.ToLower(cleanPath)
+	}
+	return cleanPath
+}
+
 type WebDAVDirReader struct {
 	noopDeadProps
 	mfs      *MovistarFS
+	ctx      context.Context
 	path     string
 	folderID int64
 	modTime  time.Time
@@ -4049,6 +4143,11 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 		seen := make(map[string]bool)
 		now := time.Now()
 		ms := d.mfs.MetadataStore()
+		pc := propfindCacheFromContext(d.ctx)
+		var pcBatch map[string]propfindEntry
+		if pc != nil {
+			pcBatch = make(map[string]propfindEntry, len(subs)+len(media))
+		}
 
 		d.mfs.cacheMu.RLock()
 		var tombstonesToClear []string
@@ -4067,7 +4166,17 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			}
 			if !seen[s.Name] && !isOSJunk(s.Name) && !isDuplicatiTestPath(s.Name) {
 				seen[s.Name] = true
-				list = append(list, &VirtualFileInfo{name: s.Name, size: 0, mode: os.ModeDir | 0755, modTime: parseTime(s.ModificationDate), isDir: true})
+				mt := parseTime(s.ModificationDate)
+				fi := &VirtualFileInfo{name: s.Name, size: 0, mode: os.ModeDir | 0755, modTime: mt, isDir: true}
+				list = append(list, fi)
+				if pcBatch != nil {
+					pcBatch[d.mfs.propfindEntryKey(childPath)] = propfindEntry{
+						fileInfo: fi,
+						isFolder: true,
+						folderID: s.ID,
+						modTime:  mt,
+					}
+				}
 			}
 		}
 
@@ -4084,7 +4193,16 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			name := m.Name
 			if !seen[name] && !isOSJunk(name) && !isDuplicatiTestPath(name) {
 				seen[name] = true
-				list = append(list, &VirtualFileInfo{name: name, size: m.Size, mode: 0644, modTime: parseTime(m.ModificationDate), isDir: false})
+				fi := &VirtualFileInfo{name: name, size: m.Size, mode: 0644, modTime: parseTime(m.ModificationDate), isDir: false}
+				list = append(list, fi)
+				if pcBatch != nil {
+					mc := m
+					pcBatch[d.mfs.propfindEntryKey(childPath)] = propfindEntry{
+						fileInfo: fi,
+						isFolder: false,
+						media:    &mc,
+					}
+				}
 			}
 		}
 
@@ -4096,7 +4214,15 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 			}
 			if mem.FolderID == d.folderID && !seen[mem.Name] && !isOSJunk(mem.Name) && !isDuplicatiTestPath(mem.Name) {
 				seen[mem.Name] = true
-				list = append(list, &VirtualFileInfo{name: mem.Name, size: mem.Size, mode: 0644, modTime: mem.ModTime, isDir: false})
+				fi := &VirtualFileInfo{name: mem.Name, size: mem.Size, mode: 0644, modTime: mem.ModTime, isDir: false}
+				list = append(list, fi)
+				if pcBatch != nil {
+					pcBatch[d.mfs.propfindEntryKey(childPath)] = propfindEntry{
+						fileInfo:       fi,
+						isFolder:       false,
+						isRecentUpload: true,
+					}
+				}
 			}
 		}
 		d.mfs.cacheMu.RUnlock()
@@ -4127,11 +4253,30 @@ func (d *WebDAVDirReader) Readdir(count int) ([]os.FileInfo, error) {
 					if !seen[name] && !isOSJunk(name) && !isDuplicatiTestPath(name) {
 						seen[name] = true
 						modTime := parseTime(sapi.FlexDate(vf.ModTime))
-						list = append(list, &VirtualFileInfo{name: name, size: 0, mode: 0644, modTime: modTime, isDir: false})
+						fi := &VirtualFileInfo{name: name, size: 0, mode: 0644, modTime: modTime, isDir: false}
+						list = append(list, fi)
+						if pcBatch != nil {
+							vMedia := &sapi.MediaItem{
+								ID:               fmt.Sprintf("virtual:%d:%s", d.folderID, name),
+								Name:             name,
+								FolderID:         d.folderID,
+								Size:             0,
+								ModificationDate: sapi.FlexDate(vf.ModTime),
+							}
+							pcBatch[d.mfs.propfindEntryKey(childPath)] = propfindEntry{
+								fileInfo: fi,
+								isFolder: false,
+								media:    vMedia,
+							}
+						}
 					}
 				}
 				d.mfs.cacheMu.RUnlock()
 			}
+		}
+
+		if pc != nil && len(pcBatch) > 0 {
+			pc.putAll(pcBatch)
 		}
 
 		if len(tombstonesToClear) > 0 {
