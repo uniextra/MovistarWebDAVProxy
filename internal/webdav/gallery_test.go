@@ -3,6 +3,7 @@ package webdav
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -509,24 +510,163 @@ func TestGallery_Phase2UploadAndDelete(t *testing.T) {
 	cloud.mu.Unlock()
 
 	// Verifica también que DeleteFile pasa el nombre real de la nube cuando usa endpoint por tipo
-	var deletedPath string
-	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
-	srvBrowser, msBrowser, cloudBrowser := newFakeGalleryServer(t, false)
-	t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+	t.Run("DeleteFile_BrowserProfile", func(t *testing.T) {
+		var deletedPath string
+		t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+		srvBrowser, msBrowser, cloudBrowser := newFakeGalleryServer(t, false)
+		t.Setenv("SAPI_CLIENT_PROFILE", "browser")
+		t.Setenv("GALLERY_ENABLED", "true")
+		t.Setenv("GALLERY_LAYOUT", "year-month")
+		t.Setenv("GALLERY_DELETE", "true")
+		seedGallerySampleData(t, msBrowser, cloudBrowser)
+		recDelBrowser := doDAV(t, srvBrowser, "DELETE", "/_gallery/2026/11/foto%20(200).jpg", nil, "")
+		if recDelBrowser.Code != http.StatusNoContent && recDelBrowser.Code != http.StatusOK {
+			t.Fatalf("DELETE browser = %d", recDelBrowser.Code)
+		}
+		cloudBrowser.mu.Lock()
+		if len(cloudBrowser.deletedCalls) > 0 {
+			deletedPath = cloudBrowser.deletedCalls[0]
+		}
+		cloudBrowser.mu.Unlock()
+		if !strings.Contains(deletedPath, "/sapi/media/picture?action=delete") {
+			t.Errorf("DELETE browser esperaba /sapi/media/picture?action=delete, got %q", deletedPath)
+		}
+	})
+
+	// 6. Captura PNG sin EXIF ni X-OC-Mtime -> deduce fecha del nombre y coloca en /YYYY/MM
+	pngBytes := []byte("\x89PNG\r\n\x1a\nscreenshot-payload")
+	recPNG := doDAV(t, srv, "PUT", "/_gallery/Captura%20de%20pantalla%202022-03-10%20091530.png", pngBytes, "")
+	if recPNG.Code != http.StatusCreated && recPNG.Code != http.StatusNoContent {
+		t.Fatalf("PUT PNG sin EXIF = %d: %s", recPNG.Code, recPNG.Body.String())
+	}
+	cloud.mu.Lock()
+	pngMeta := cloud.metaPayloads[len(cloud.metaPayloads)-1]
+	cloud.mu.Unlock()
+	if pngMeta["creationdate"] != "20220310T091530Z" {
+		t.Errorf("PNG sin EXIF esperaba fecha del nombre 20220310T091530Z, got %v", pngMeta["creationdate"])
+	}
+	recGetPNG := doDAV(t, srv, "GET", "/_gallery/2022/03/Captura%20de%20pantalla%202022-03-10%20091530.png", nil, "")
+	if recGetPNG.Code != http.StatusOK || !bytes.Equal(recGetPNG.Body.Bytes(), pngBytes) {
+		t.Errorf("GET PNG por fecha de nombre = %d", recGetPNG.Code)
+	}
+
+	// 7. Sobrescritura desde raíz /_gallery/PRUEBA.png y sobre item ya indexado (/enero.mp4) sin duplicados
+	v1 := []byte("prueba-version-1")
+	v2 := []byte("prueba-version-2-actualizada")
+	if r1 := doDAV(t, srv, "PUT", "/_gallery/PRUEBA.png", v1, ""); r1.Code != http.StatusCreated && r1.Code != http.StatusNoContent {
+		t.Fatalf("PUT PRUEBA v1 = %d", r1.Code)
+	}
+	if r2 := doDAV(t, srv, "PUT", "/_gallery/PRUEBA.png", v2, ""); r2.Code != http.StatusCreated && r2.Code != http.StatusNoContent {
+		t.Fatalf("PUT PRUEBA v2 = %d", r2.Code)
+	}
+	nowDir := fmt.Sprintf("/_gallery/%04d/%02d", time.Now().UTC().Year(), int(time.Now().UTC().Month()))
+	recNow := doDAV(t, srv, "PROPFIND", nowDir, nil, "1")
+	if recNow.Code != http.StatusMultiStatus || strings.Contains(recNow.Body.String(), "PRUEBA (") {
+		t.Errorf("sobrescritura de PRUEBA.png en raíz no debía dejar duplicados en %s: %s", nowDir, recNow.Body.String())
+	}
+	recEneroOW := doDAV(t, srv, "PUT", "/_gallery/enero.mp4", []byte("enero-reemplazado"), "")
+	if recEneroOW.Code != http.StatusCreated && recEneroOW.Code != http.StatusNoContent {
+		t.Fatalf("PUT overwrite /_gallery/enero.mp4 = %d", recEneroOW.Code)
+	}
+	cloud.mu.Lock()
+	eneroMeta := cloud.metaPayloads[len(cloud.metaPayloads)-1]
+	cloud.mu.Unlock()
+	if eneroMeta["id"] != "300" {
+		t.Errorf("sobrescritura de enero.mp4 desde raíz debía reutilizar ID 300, got %v", eneroMeta["id"])
+	}
+
+	// 8. Borrar el único elemento de /_gallery/2022/03 poda las carpetas virtuales vacías (03 y 2022)
+	recDelPNG := doDAV(t, srv, "DELETE", "/_gallery/2022/03/Captura%20de%20pantalla%202022-03-10%20091530.png", nil, "")
+	if recDelPNG.Code != http.StatusNoContent && recDelPNG.Code != http.StatusOK {
+		t.Fatalf("DELETE PNG = %d", recDelPNG.Code)
+	}
+	recGalRoot := doDAV(t, srv, "PROPFIND", "/_gallery", nil, "1")
+	if strings.Contains(recGalRoot.Body.String(), "/_gallery/2022") {
+		t.Errorf("carpeta vacía /_gallery/2022 debía podarse tras borrar su único fichero: %s", recGalRoot.Body.String())
+	}
+	if recYear := doDAV(t, srv, "PROPFIND", "/_gallery/2022", nil, "0"); recYear.Code != http.StatusNotFound {
+		t.Errorf("PROPFIND /_gallery/2022 tras borrado = %d, esperado 404", recYear.Code)
+	}
+}
+
+func TestBrowserUI_PermissionsAndBreadcrumbs(t *testing.T) {
 	t.Setenv("GALLERY_ENABLED", "true")
 	t.Setenv("GALLERY_LAYOUT", "year-month")
+	t.Setenv("GALLERY_UPLOAD", "false")
+	t.Setenv("GALLERY_DELETE", "false")
+	srv, ms, cloud := newFakeGalleryServer(t, false)
+	seedGallerySampleData(t, ms, cloud)
+
+	// 1. Raíz / con galería activa (fase lectura): CSP con nonce, cero <img>, permisos diferenciados
+	recRoot := doDAV(t, srv, "GET", "/", nil, "")
+	if recRoot.Code != http.StatusOK || !strings.Contains(recRoot.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("GET / = %d, ct=%q", recRoot.Code, recRoot.Header().Get("Content-Type"))
+	}
+	csp := recRoot.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'nonce-") || !strings.Contains(csp, "font-src 'self'") || strings.Contains(csp, "img-src") {
+		t.Errorf("CSP inesperado: %q", csp)
+	}
+	rootBody := recRoot.Body.String()
+	if strings.Contains(strings.ToLower(rootBody), "<img") {
+		t.Errorf("el listado HTML no debe incluir etiquetas <img> ni miniaturas")
+	}
+	if !strings.Contains(rootBody, `id="bootLoader"`) || !strings.Contains(rootBody, `id="navProgress"`) {
+		t.Errorf("el HTML debe incluir el loader inicial y la barra de navegación: %s", rootBody)
+	}
+	if !strings.Contains(rootBody, `data-can-upload="true"`) || !strings.Contains(rootBody, `data-can-mkcol="true"`) {
+		t.Errorf("raíz debe habilitar subida y nueva carpeta: %s", rootBody)
+	}
+	if !strings.Contains(rootBody, `data-href="/Documentos" data-dir="true" data-can-rename="true" data-can-delete="true"`) {
+		t.Errorf("carpeta real Documentos debe permitir renombrar y borrar: %s", rootBody)
+	}
+	if !strings.Contains(rootBody, `data-href="/_gallery" data-dir="true" data-can-rename="false" data-can-delete="false"`) {
+		t.Errorf("carpeta virtual _gallery en / no debe permitir renombrar ni borrar: %s", rootBody)
+	}
+
+	// 2. /_gallery/2026/11 en Fase 1 (solo lectura): breadcrumbs completos, sin upload/delete
+	recMonthRO := doDAV(t, srv, "GET", "/_gallery/2026/11", nil, "")
+	if recMonthRO.Code != http.StatusOK {
+		t.Fatalf("GET /_gallery/2026/11 RO = %d", recMonthRO.Code)
+	}
+	roBody := recMonthRO.Body.String()
+	for _, want := range []string{`href="/"`, `href="/_gallery"`, `href="/_gallery/2026"`, `data-can-upload="false"`, `data-can-mkcol="false"`} {
+		if !strings.Contains(roBody, want) {
+			t.Errorf("HTML RO sin %q", want)
+		}
+	}
+	if !strings.Contains(roBody, `data-href="/_gallery/2026/11/foto.jpg" data-dir="false" data-can-rename="false" data-can-delete="false"`) {
+		t.Errorf("foto.jpg en RO debe bloquear rename y delete: %s", roBody)
+	}
+
+	// 3. /_gallery/2026/11, /_gallery/2026 y /_gallery en Fase 2
+	t.Setenv("GALLERY_UPLOAD", "true")
 	t.Setenv("GALLERY_DELETE", "true")
-	seedGallerySampleData(t, msBrowser, cloudBrowser)
-	recDelBrowser := doDAV(t, srvBrowser, "DELETE", "/_gallery/2026/11/foto%20(200).jpg", nil, "")
-	if recDelBrowser.Code != http.StatusNoContent && recDelBrowser.Code != http.StatusOK {
-		t.Fatalf("DELETE browser = %d", recDelBrowser.Code)
+
+	recMonthRW := doDAV(t, srv, "GET", "/_gallery/2026/11", nil, "")
+	if recMonthRW.Code != http.StatusOK {
+		t.Fatalf("GET /_gallery/2026/11 RW = %d", recMonthRW.Code)
 	}
-	cloudBrowser.mu.Lock()
-	if len(cloudBrowser.deletedCalls) > 0 {
-		deletedPath = cloudBrowser.deletedCalls[0]
+	rwBody := recMonthRW.Body.String()
+	if !strings.Contains(rwBody, `data-upload-dir="/_gallery/2026/11"`) || !strings.Contains(rwBody, `data-can-upload="true"`) {
+		t.Errorf("subida en /_gallery/2026/11 debe estar activa: %s", rwBody)
 	}
-	cloudBrowser.mu.Unlock()
-	if !strings.Contains(deletedPath, "/sapi/media/picture?action=delete") {
-		t.Errorf("DELETE browser esperaba /sapi/media/picture?action=delete, got %q", deletedPath)
+	if !strings.Contains(rwBody, `data-href="/_gallery/2026/11/foto.jpg" data-dir="false" data-can-rename="false" data-can-delete="true"`) {
+		t.Errorf("foto.jpg en Fase 2 debe permitir delete y bloquear rename: %s", rwBody)
+	}
+
+	recYearRW := doDAV(t, srv, "GET", "/_gallery/2026", nil, "")
+	if recYearRW.Code != http.StatusOK {
+		t.Fatalf("GET /_gallery/2026 RW = %d", recYearRW.Code)
+	}
+	if !strings.Contains(recYearRW.Body.String(), `data-upload-dir="/_gallery"`) {
+		t.Errorf("subida dentro de /_gallery/2026 debe apuntar a /_gallery para clasificación EXIF")
+	}
+
+	recGalRW := doDAV(t, srv, "GET", "/_gallery", nil, "")
+	if recGalRW.Code != http.StatusOK {
+		t.Fatalf("GET /_gallery RW = %d", recGalRW.Code)
+	}
+	if !strings.Contains(recGalRW.Body.String(), `data-href="/_gallery/2026" data-dir="true" data-can-rename="false" data-can-delete="false"`) {
+		t.Errorf("subcarpeta virtual /_gallery/2026 nunca debe permitir rename ni delete: %s", recGalRW.Body.String())
 	}
 }

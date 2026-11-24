@@ -3,6 +3,8 @@ package webdav
 import (
 	"bytes"
 	"encoding/binary"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -181,4 +183,48 @@ func parseEXIFTimestamp(raw, offsetStr string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return u, true
+}
+
+var (
+	reFilenameHyphenDateTime  = regexp.MustCompile(`(?i)(?:^|[^0-9])(199\d|20\d\d)-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])[ _T-]([01]\d|2[0-3])[-.:]?([0-5]\d)[-.:]?([0-5]\d)(?:[^0-9]|$)`)
+	reFilenameCompactDateTime = regexp.MustCompile(`(?i)(?:^|[^0-9])(199\d|20\d\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[_-]([01]\d|2[0-3])([0-5]\d)([0-5]\d)(?:\d{3})?(?:[^0-9]|$)`)
+	reFilenameWhatsAppDate    = regexp.MustCompile(`(?i)(?:IMG|VID|PTT|AUD)[-_](199\d|20\d\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[-_]WA\d+`)
+)
+
+// extractDateFromFilename deduce una fecha válida a partir de nombres habituales
+// de capturas de pantalla o fotos/vídeos sin metadatos EXIF.
+func extractDateFromFilename(name string) (time.Time, bool) {
+	if name == "" {
+		return time.Time{}, false
+	}
+	buildValidUTC := func(ys, ms, ds, hs, mins, secs string) (time.Time, bool) {
+		y, _ := strconv.Atoi(ys)
+		mo, _ := strconv.Atoi(ms)
+		d, _ := strconv.Atoi(ds)
+		h, _ := strconv.Atoi(hs)
+		mi, _ := strconv.Atoi(mins)
+		s, _ := strconv.Atoi(secs)
+		t := time.Date(y, time.Month(mo), d, h, mi, s, 0, time.UTC)
+		if t.Year() != y || int(t.Month()) != mo || t.Day() != d {
+			return time.Time{}, false
+		}
+		return t, true
+	}
+
+	if m := reFilenameHyphenDateTime.FindStringSubmatch(name); len(m) == 7 {
+		if t, ok := buildValidUTC(m[1], m[2], m[3], m[4], m[5], m[6]); ok {
+			return t, true
+		}
+	}
+	if m := reFilenameCompactDateTime.FindStringSubmatch(name); len(m) == 7 {
+		if t, ok := buildValidUTC(m[1], m[2], m[3], m[4], m[5], m[6]); ok {
+			return t, true
+		}
+	}
+	if m := reFilenameWhatsAppDate.FindStringSubmatch(name); len(m) == 4 {
+		if t, ok := buildValidUTC(m[1], m[2], m[3], "12", "00", "00"); ok {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }

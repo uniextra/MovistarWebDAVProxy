@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -59,9 +60,12 @@ type webSession struct {
 }
 
 type loginPageData struct {
-	Version  string
-	Error    string
-	Username string
+	Version        string
+	Error          string
+	Username       string
+	FormAction     string
+	Next           string
+	UseProxyStatic bool
 }
 
 type Server struct {
@@ -180,34 +184,25 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/copy_status", s.handleCopyStatus)
 	mux.HandleFunc("/copy_events", s.handleCopyEvents)
 	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
-	//mux.Handle("/static/", http.FileServer(http.FS(staticFiles)))
-	staticHandler := http.FileServer(http.FS(staticFiles))
-	mux.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Evita mostrar Listados de directorio, mostrando error 404
-		if strings.HasSuffix(r.URL.Path, "/") {
-		    http.NotFound(w, r)
-		    return
-		}		
-		// Guarda los archivos estáticos en caché durante 1 año (31536000 segundos)		no hay que separar por tipo, al tener sólo woff2
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		// Vary: Accept-Encoding si en futuro se añaden otro tipo de archivos	Si hubiera svg estáticos, proteger XSS
-		staticHandler.ServeHTTP(w, r)
-	}))
+	mux.Handle("/static/", newStaticHandler("/static/"))
 
 	// ejecutamos el filtro de seguridad y autenticación
 	return s.securityMiddleware(mux)
 }
 
+func setPanelSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("Content-Security-Policy", panelCSP)
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), bluetooth=()")
+}
+
 func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", panelCSP)
-		// Mejoras
-		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
-		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), bluetooth=()")
+		setPanelSecurityHeaders(w)
 
 		// /health (para healthchecks de Docker), favicon y recursos estáticos siempre accesibles sin autenticación
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" || strings.HasPrefix(r.URL.Path, "/static/") {
@@ -534,15 +529,29 @@ func isJSONRequest(r *http.Request) bool {
 	return strings.Contains(accept, "application/json") && !strings.Contains(accept, "text/html")
 }
 
-func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg, username string) {
+func sanitizeRelativeRedirect(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" || !strings.HasPrefix(s, "/") || strings.HasPrefix(s, "//") || strings.ContainsAny(s, "\\\r\n\t\x00") {
+		return "/"
+	}
+	return s
+}
+
+func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg, username, formAction, nextTarget string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if r.Method == http.MethodHead {
 		return
 	}
+	if formAction == "" {
+		formAction = "/login"
+	}
 	data := loginPageData{
-		Version:  config.Version,
-		Error:    errMsg,
-		Username: username,
+		Version:        config.Version,
+		Error:          errMsg,
+		Username:       username,
+		FormAction:     formAction,
+		Next:           sanitizeRelativeRedirect(nextTarget),
+		UseProxyStatic: formAction == "/__login",
 	}
 	if err := loginTmpl.Execute(w, data); err != nil {
 		logger.Log("[WebUI] ❌ Error renderizando plantilla de login: %v", err)
@@ -550,8 +559,13 @@ func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg,
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	s.handleLoginWithAction(w, r, "/login")
+}
+
+func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, formAction string) {
+	nextTarget := sanitizeRelativeRedirect(r.URL.Query().Get("next"))
 	if !s.authCfg.IsEnabled() {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, nextTarget, http.StatusSeeOther)
 		return
 	}
 
@@ -559,7 +573,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet, http.MethodHead:
 		token := s.getSessionToken(r)
 		if token != "" && s.validateSession(token) {
-			http.Redirect(w, r, "/", http.StatusSeeOther)
+			http.Redirect(w, r, nextTarget, http.StatusSeeOther)
 			return
 		}
 		clientIP := config.ExtractClientIP(r)
@@ -568,7 +582,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			errMsg = "Demasiados intentos fallidos. Por seguridad, tu IP ha sido bloqueada temporalmente. Espera unos minutos."
 		}
-		s.renderLoginPage(w, r, errMsg, "")
+		s.renderLoginPage(w, r, errMsg, "", formAction, nextTarget)
 
 	case http.MethodPost:
 		if !validateSameOrigin(r) {
@@ -576,7 +590,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				jsonResponse(w, http.StatusForbidden, map[string]interface{}{"status": "error", "message": "Origen no permitido (CSRF)"})
 			} else {
 				w.WriteHeader(http.StatusForbidden)
-				s.renderLoginPage(w, r, "Origen de solicitud no permitido (CSRF)", "")
+				s.renderLoginPage(w, r, "Origen de solicitud no permitido (CSRF)", "", formAction, nextTarget)
 			}
 			return
 		}
@@ -593,7 +607,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			w.WriteHeader(http.StatusTooManyRequests)
-			s.renderLoginPage(w, r, "Demasiados intentos fallidos. Por seguridad, tu IP ha sido bloqueada temporalmente. Espera unos minutos.", "")
+			s.renderLoginPage(w, r, "Demasiados intentos fallidos. Por seguridad, tu IP ha sido bloqueada temporalmente. Espera unos minutos.", "", formAction, nextTarget)
 			return
 		}
 
@@ -620,11 +634,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		} else {
 			if err := r.ParseForm(); err != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				s.renderLoginPage(w, r, "Error al procesar el formulario", "")
+				s.renderLoginPage(w, r, "Error al procesar el formulario", "", formAction, nextTarget)
 				return
 			}
 			username = r.FormValue("username")
 			password = r.FormValue("password")
+			if formNext := r.FormValue("next"); formNext != "" {
+				nextTarget = sanitizeRelativeRedirect(formNext)
+			}
 			rememberVal := strings.ToLower(strings.TrimSpace(r.FormValue("remember")))
 			remember = rememberVal == "1" || rememberVal == "true" || rememberVal == "on" || rememberVal == "yes"
 		}
@@ -641,7 +658,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			w.WriteHeader(http.StatusUnauthorized)
-			s.renderLoginPage(w, r, "Usuario o contraseña incorrectos", username)
+			s.renderLoginPage(w, r, "Usuario o contraseña incorrectos", username, formAction, nextTarget)
 			return
 		}
 
@@ -657,7 +674,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			w.WriteHeader(http.StatusInternalServerError)
-			s.renderLoginPage(w, r, "Error interno del servidor", username)
+			s.renderLoginPage(w, r, "Error interno del servidor", username, formAction, nextTarget)
 			return
 		}
 
@@ -667,12 +684,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if isJSONRequest(r) {
 			jsonResponse(w, http.StatusOK, map[string]interface{}{
 				"status":   "ok",
-				"redirect": "/",
+				"redirect": nextTarget,
 			})
 			return
 		}
 
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, nextTarget, http.StatusSeeOther)
 
 	default:
 		w.Header().Set("Allow", "GET, HEAD, POST")
@@ -681,6 +698,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.handleLogoutWithRedirect(w, r, "/login")
+}
+
+func (s *Server) handleLogoutWithRedirect(w http.ResponseWriter, r *http.Request, redirectTarget string) {
 	token := s.getSessionToken(r)
 	if token != "" {
 		s.destroySession(token)
@@ -690,11 +711,59 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if isJSONRequest(r) {
 		jsonResponse(w, http.StatusOK, map[string]interface{}{
 			"status":   "ok",
-			"redirect": "/login",
+			"redirect": redirectTarget,
 		})
 		return
 	}
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	http.Redirect(w, r, redirectTarget, http.StatusSeeOther)
+}
+
+func newStaticHandler(urlPrefix string) http.Handler {
+	subFS, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		return http.NotFoundHandler()
+	}
+	fileServer := http.StripPrefix(urlPrefix, http.FileServer(http.FS(subFS)))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+// BrowserAuth expone la validación de cookie y el login/logout del Dashboard para
+// que el explorador web integrado en el servidor WebDAV comparta la misma sesión.
+func (s *Server) BrowserAuth() *webdav.BrowserAuth {
+	if s == nil {
+		return nil
+	}
+	return &webdav.BrowserAuth{
+		ValidateCookie: func(r *http.Request) bool {
+			return s.validateSession(s.getSessionToken(r))
+		},
+		HandleLogin: func(w http.ResponseWriter, r *http.Request) {
+			setPanelSecurityHeaders(w)
+			if r.Method == http.MethodPost && strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+				http.Error(w, "Forbidden (cross-site request)", http.StatusForbidden)
+				return
+			}
+			s.handleLoginWithAction(w, r, "/__login")
+		},
+		HandleLogout: func(w http.ResponseWriter, r *http.Request) {
+			setPanelSecurityHeaders(w)
+			if r.Method == http.MethodPost && (!validateSameOrigin(r) || strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")) {
+				http.Error(w, "Forbidden (CSRF)", http.StatusForbidden)
+				return
+			}
+			s.handleLogoutWithRedirect(w, r, "/__login")
+		},
+		HandleStatic: newStaticHandler("/__static/"),
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

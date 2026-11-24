@@ -88,3 +88,29 @@ func TestExtractEXIFDate(t *testing.T) {
 		t.Error("no debía extraer fecha de bytes no JPEG")
 	}
 }
+
+func TestExtractDateFromFilename(t *testing.T) {
+	cases := []struct {
+		name string
+		want time.Time
+		ok   bool
+	}{
+		{"Captura de pantalla 2026-01-26 140212.png", time.Date(2026, 1, 26, 14, 2, 12, 0, time.UTC), true},
+		{"Screenshot_20260126-140212.png", time.Date(2026, 1, 26, 14, 2, 12, 0, time.UTC), true},
+		{"IMG_20251103_211745.jpg", time.Date(2025, 11, 3, 21, 17, 45, 0, time.UTC), true},
+		{"PXL_20260126_140212345.jpg", time.Date(2026, 1, 26, 14, 2, 12, 0, time.UTC), true},
+		{"VID-20240815-WA0003.mp4", time.Date(2024, 8, 15, 12, 0, 0, 0, time.UTC), true},
+		{"IMG_20260231_120000.jpg", time.Time{}, false},
+		{"foto.png", time.Time{}, false},
+	}
+	for _, tc := range cases {
+		got, ok := extractDateFromFilename(tc.name)
+		if ok != tc.ok {
+			t.Errorf("%q: ok=%v, want %v (got=%v)", tc.name, ok, tc.ok, got)
+			continue
+		}
+		if ok && !got.Equal(tc.want) {
+			t.Errorf("%q: got=%v, want=%v", tc.name, got, tc.want)
+		}
+	}
+}

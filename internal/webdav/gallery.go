@@ -4,11 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"io/fs"
-	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"sort"
@@ -639,11 +636,38 @@ func (mfs *MovistarFS) galleryOpenFile(ctx context.Context, cleanPath string, fl
 		uploadName := fileName
 		var existingID string
 		var existingItem *sapi.MediaItem
-		if entry, ok := idx.lookupFile(cleanPath, mfs.caseInsensitive()); ok {
+		fold := mfs.caseInsensitive()
+		if entry, ok := idx.lookupFile(cleanPath, fold); ok {
 			existingID = entry.item.ID
 			it := entry.item
 			existingItem = &it
 			uploadName = entry.item.Name
+		} else if mem, okMem := mfs.recentGalleryUpload(cleanPath); okMem && mem.ID != "" {
+			existingID = mem.ID
+			uploadName = mem.Name
+			existingItem = &sapi.MediaItem{
+				ID:               mem.ID,
+				Name:             mem.Name,
+				Size:             mem.Size,
+				URL:              mem.URL,
+				FolderID:         0,
+				ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
+			}
+			for _, e := range idx.files {
+				if e.item.ID == mem.ID {
+					it := e.item
+					existingItem = &it
+					uploadName = e.item.Name
+					break
+				}
+			}
+		} else if rel, okRel := galleryNormalizedRelativeSegments(cleanPath); okRel && len(rel) == 1 {
+			if entry, okUnique := idx.lookupUniqueByName(fileName, fold); okUnique {
+				existingID = entry.item.ID
+				it := entry.item
+				existingItem = &it
+				uploadName = entry.item.Name
+			}
 		}
 
 		fw := NewWebDAVFileWriter(mfs, cleanPath, uploadName, 0, existingID)
@@ -897,13 +921,16 @@ func (mfs *MovistarFS) addToGalleryCache(item sapi.MediaItem) {
 			delete(idx.filesLower, strings.ToLower(k))
 			parent := path.Dir(k)
 			if list, ok := idx.dirs[parent]; ok {
-				filtered := list[:0]
+				filtered := make([]os.FileInfo, 0, len(list))
 				for _, fi := range list {
 					if fi.Name() != e.displayName {
 						filtered = append(filtered, fi)
 					}
 				}
 				idx.dirs[parent] = filtered
+				if parent != dirPath {
+					pruneEmptyGalleryDirs(idx, parent)
+				}
 			}
 		}
 	}
@@ -974,33 +1001,55 @@ func (mfs *MovistarFS) removeFromGalleryCache(id string) {
 					}
 				}
 				idx.dirs[parent] = filtered
+				pruneEmptyGalleryDirs(idx, parent)
 			}
 		}
 	}
 }
 
-func formatHumanBytes(b int64) string {
-	switch {
-	case b >= 1<<30:
-		return fmt.Sprintf("%.2f GB", float64(b)/(1<<30))
-	case b >= 1<<20:
-		return fmt.Sprintf("%.2f MB", float64(b)/(1<<20))
-	case b >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(b)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", b)
+func pruneEmptyGalleryDirs(idx *galleryIndex, dirPath string) {
+	if idx == nil || idx.layout == "flat" {
+		return
+	}
+	rootVirtual := "/" + idx.dirName
+	for dirPath != "" && dirPath != "." && dirPath != "/" && dirPath != rootVirtual {
+		list, ok := idx.dirs[dirPath]
+		if !ok || len(list) > 0 {
+			break
+		}
+		delete(idx.dirs, dirPath)
+		delete(idx.dirModTimes, dirPath)
+		parent := path.Dir(dirPath)
+		base := path.Base(dirPath)
+		if pList, pOK := idx.dirs[parent]; pOK {
+			filtered := make([]os.FileInfo, 0, len(pList))
+			for _, fi := range pList {
+				if fi.Name() != base {
+					filtered = append(filtered, fi)
+				}
+			}
+			idx.dirs[parent] = filtered
+		}
+		dirPath = parent
 	}
 }
 
-func encodePathSegments(p string) string {
-	parts := strings.Split(strings.Trim(p, "/"), "/")
-	if len(parts) == 1 && parts[0] == "" {
-		return "/"
+func (idx *galleryIndex) lookupUniqueByName(fileName string, fold bool) (galleryEntry, bool) {
+	if idx == nil || fileName == "" {
+		return galleryEntry{}, false
 	}
-	for i, seg := range parts {
-		parts[i] = url.PathEscape(seg)
+	var found galleryEntry
+	count := 0
+	for _, e := range idx.files {
+		if e.item.Name == fileName || (fold && strings.EqualFold(e.item.Name, fileName)) {
+			found = e
+			count++
+			if count > 1 {
+				return galleryEntry{}, false
+			}
+		}
 	}
-	return "/" + strings.Join(parts, "/")
+	return found, count == 1
 }
 
 func (idx *galleryIndex) lookupCanonicalDir(cleanPath string, fold bool) (string, []os.FileInfo, bool) {
@@ -1018,213 +1067,6 @@ func (idx *galleryIndex) lookupCanonicalDir(cleanPath string, fold bool) (string
 		}
 	}
 	return "", nil, false
-}
-
-type galleryHTMLRow struct {
-	Icon string
-	Href string
-	Name string
-	Size string
-	Date string
-}
-
-type galleryHTMLView struct {
-	Title string
-	Icon  string
-	Path  string
-	Count int
-	Rows  []galleryHTMLRow
-}
-
-var galleryBrowserTmpl = template.Must(template.New("gallery-browser").Parse(
-	`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-		`<title>{{.Title}} - {{.Path}}</title>` +
-		`<style>body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}main{max-width:960px;margin:0 auto}h1{font-size:1.25rem;margin:0 0 16px;color:#38bdf8}table{width:100%;border-collapse:collapse;background:#1e293b;border-radius:8px;overflow:hidden}th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #334155;font-size:.9rem}th{color:#94a3b8;font-weight:600}a{color:#7dd3fc;text-decoration:none}a:hover{text-decoration:underline}.num{text-align:right;white-space:nowrap;color:#cbd5e1}.dt{white-space:nowrap;color:#94a3b8}</style>` +
-		`</head><body><main><h1>{{.Icon}} {{.Path}} ({{.Count}})</h1><table><thead><tr><th>Nombre</th><th class="num">Tamaño</th><th>Fecha</th></tr></thead><tbody>` +
-		`{{range .Rows}}<tr><td>{{.Icon}} <a href="{{.Href}}">{{.Name}}</a></td><td class="num">{{.Size}}</td><td class="dt">{{.Date}}</td></tr>{{end}}` +
-		`</tbody></table></main></body></html>`))
-
-func (mfs *MovistarFS) resolveCanonicalFolder(cleanPath string) (string, int64, bool) {
-	if mfs == nil {
-		return "", 0, false
-	}
-	rootID, err := mfs.getRootFolderID()
-	if err != nil {
-		return "", 0, false
-	}
-	if cleanPath == "/" || cleanPath == "." {
-		return "/", rootID, true
-	}
-	parts := strings.Split(strings.Trim(cleanPath, "/"), "/")
-	currID := rootID
-	fold := mfs.caseInsensitive()
-	canonicalParts := make([]string, 0, len(parts))
-	now := time.Now()
-
-	for _, part := range parts {
-		var matched *sapi.FolderItem
-		mfs.cacheMu.RLock()
-		for k, cf := range mfs.createdFolders {
-			if exp, tomb := mfs.deletedTombstones[k]; tomb && now.Before(exp) {
-				continue
-			}
-			if time.Since(cf.Time) < 60*time.Second && cf.Info.ParentID == currID {
-				if cf.Info.Name == part || (fold && strings.EqualFold(cf.Info.Name, part)) {
-					info := cf.Info
-					matched = &info
-					break
-				}
-			}
-		}
-		mfs.cacheMu.RUnlock()
-
-		if matched == nil {
-			subs, err := mfs.getSubfolders(currID)
-			if err != nil {
-				return "", 0, false
-			}
-			for i := range subs {
-				if strings.EqualFold(subs[i].Name, ProxyInternalDir) {
-					continue
-				}
-				if subs[i].Name == part {
-					matched = &subs[i]
-					break
-				}
-				if fold && matched == nil && strings.EqualFold(subs[i].Name, part) {
-					matched = &subs[i]
-				}
-			}
-		}
-		if matched == nil {
-			return "", 0, false
-		}
-		canonicalParts = append(canonicalParts, matched.Name)
-		currID = matched.ID
-	}
-	return "/" + strings.Join(canonicalParts, "/"), currID, true
-}
-
-// serveGalleryBrowserHTML sirve una vista HTML navegable cuando se abre "/", una
-// carpeta de «Mis Archivos» o una subcarpeta de /_gallery desde un navegador (GET / HEAD).
-func (s *Server) serveGalleryBrowserHTML(w http.ResponseWriter, r *http.Request, urlPath string) bool {
-	if s == nil || s.fs == nil {
-		return false
-	}
-	cleanPath := path.Clean("/" + urlPath)
-
-	var canonicalDir string
-	var entries []os.FileInfo
-	pageTitle := "Movistar Cloud"
-	pageIcon := "📁"
-
-	if s.fs.isGalleryPath(cleanPath) {
-		if !s.fs.isGalleryVirtualDir(cleanPath) {
-			return false
-		}
-		idx, err := s.fs.getGalleryIndex()
-		if err != nil {
-			http.Error(w, "Error cargando galería", http.StatusInternalServerError)
-			return true
-		}
-		var ok bool
-		canonicalDir, entries, ok = idx.lookupCanonicalDir(cleanPath, s.fs.caseInsensitive())
-		if !ok {
-			http.NotFound(w, r)
-			return true
-		}
-		pageTitle = "Galería"
-		pageIcon = "🖼️"
-	} else {
-		if cleanPath != "/" && cleanPath != "." {
-			_, mediaInfo, isFolder, err := s.fs.resolvePath(cleanPath)
-			if err != nil || !isFolder || mediaInfo != nil {
-				return false
-			}
-		}
-		var folderID int64
-		var ok bool
-		canonicalDir, folderID, ok = s.fs.resolveCanonicalFolder(cleanPath)
-		if !ok {
-			return false
-		}
-		dr := NewWebDAVDirReader(s.fs, canonicalDir, folderID)
-		var err error
-		entries, err = dr.Readdir(-1)
-		if err != nil {
-			http.Error(w, "Error listando directorio", http.StatusInternalServerError)
-			return true
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].IsDir() != entries[j].IsDir() {
-				return entries[i].IsDir()
-			}
-			li := strings.ToLower(entries[i].Name())
-			lj := strings.ToLower(entries[j].Name())
-			if li != lj {
-				return li < lj
-			}
-			return entries[i].Name() < entries[j].Name()
-		})
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
-	if r.Method == http.MethodHead {
-		w.WriteHeader(http.StatusOK)
-		return true
-	}
-
-	rows := make([]galleryHTMLRow, 0, len(entries)+1)
-	parent := path.Dir(canonicalDir)
-	if canonicalDir != "/" && canonicalDir != "." && parent != canonicalDir && parent != "." {
-		rows = append(rows, galleryHTMLRow{
-			Icon: "📁",
-			Href: encodePathSegments(parent),
-			Name: "..",
-			Size: "-",
-			Date: "-",
-		})
-	}
-
-	for _, e := range entries {
-		childPath := path.Clean(canonicalDir + "/" + e.Name())
-		icon := "📄"
-		sizeStr := formatHumanBytes(e.Size())
-		if e.IsDir() {
-			icon = "📁"
-			sizeStr = "-"
-		} else {
-			switch strings.ToLower(path.Ext(e.Name())) {
-			case ".mp4", ".mov", ".m4v", ".3gp", ".avi", ".mkv", ".webm":
-				icon = "🎬"
-			case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".tiff", ".tif", ".avif":
-				icon = "🖼️"
-			}
-		}
-		dateStr := "-"
-		if !e.ModTime().IsZero() && e.ModTime().Year() > 1970 {
-			dateStr = e.ModTime().Local().Format("2006-01-02 15:04")
-		}
-		rows = append(rows, galleryHTMLRow{
-			Icon: icon,
-			Href: encodePathSegments(childPath),
-			Name: e.Name(),
-			Size: sizeStr,
-			Date: dateStr,
-		})
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_ = galleryBrowserTmpl.Execute(w, galleryHTMLView{
-		Title: pageTitle,
-		Icon:  pageIcon,
-		Path:  canonicalDir,
-		Count: len(entries),
-		Rows:  rows,
-	})
-	return true
 }
 
 // WebDAVGalleryDirReader implementa webdav.File para listar directorios virtuales de la galería.

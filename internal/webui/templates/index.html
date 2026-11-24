@@ -117,7 +117,11 @@
                 <p class="text-xs text-slate-500 mt-0.5">Proxy WebDAV nativo de alto rendimiento para Duplicati & HyperBackup</p>
             </div>
         </div>
-        <div class="flex items-center space-x-2 sm:space-x-2.5 flex-shrink-0">
+        <div class="flex flex-wrap items-center gap-2 sm:gap-2.5 flex-shrink-0">
+            <a id="explorer-header-btn" href="#" target="_blank" rel="noopener" class="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-blue-200" title="Abrir explorador web de archivos">
+                <span>📁</span>
+                <span>Explorador</span>
+            </a>
             <button onclick="toggleTheme()" id="theme-toggle" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs transition border border-slate-200" title="Cambiar entre modo claro y oscuro">🌙</button>
             <button onclick="openTelegramModal()" id="telegram-header-btn" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-slate-200" title="Configurar alertas Telegram">
                 <span>✈️</span>
@@ -496,6 +500,7 @@
 
         window.addEventListener('DOMContentLoaded', () => {
             updateProviderUI();
+            updateExplorerLink('5050');
             phoneInput.value = localStorage.getItem('mc_phone') || '';
             phoneInput.addEventListener('change', checkCredentials);
             checkCredentials();
@@ -776,6 +781,7 @@
                 if (webdavPort && data.webdav_host_port) {
                     webdavPort.textContent = data.webdav_host_port;
                 }
+                updateExplorerLink(data.webdav_host_port || '5050');
                 if (data.status === 'running') {
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
@@ -1172,6 +1178,13 @@
                 try { sessionStorage.setItem('mc_update_notified_' + data.latest_version, '1'); } catch (e) {}
                 showToast(`🆕 Nueva versión ${data.latest_version} disponible en GitHub.`, 'warning', 8000);
             }
+        }
+
+        function updateExplorerLink(port) {
+            const btn = document.getElementById('explorer-header-btn');
+            if (!btn) return;
+            const p = String(port || '5050').trim() || '5050';
+            btn.href = window.location.protocol + '//' + window.location.hostname + ':' + p + '/';
         }
 
         function logout() {

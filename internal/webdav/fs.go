@@ -2834,15 +2834,22 @@ func (w *WebDAVFileWriter) canStream() bool {
 }
 
 func (w *WebDAVFileWriter) maybeExtractGalleryEXIF(header []byte) {
-	if w.parentFolderID != 0 || !w.modTime.IsZero() || len(header) == 0 {
+	if w.parentFolderID != 0 || !w.modTime.IsZero() {
 		return
 	}
-	if len(header) > exifHeaderReadLimit {
-		header = header[:exifHeaderReadLimit]
+	if len(header) > 0 {
+		if len(header) > exifHeaderReadLimit {
+			header = header[:exifHeaderReadLimit]
+		}
+		if t, ok := extractEXIFDate(header); ok {
+			w.modTime = t
+			logger.Log("[WebDAV] 📅 Fecha EXIF detectada para '%s': %s", w.name, t.UTC().Format("2006-01-02 15:04:05 UTC"))
+			return
+		}
 	}
-	if t, ok := extractEXIFDate(header); ok {
+	if t, ok := extractDateFromFilename(w.name); ok {
 		w.modTime = t
-		logger.Log("[WebDAV] 📅 Fecha EXIF detectada para '%s': %s", w.name, t.UTC().Format("2006-01-02 15:04:05 UTC"))
+		logger.Log("[WebDAV] 📅 Fecha deducida del nombre para '%s': %s", w.name, t.UTC().Format("2006-01-02 15:04:05 UTC"))
 	}
 }
 
@@ -3484,6 +3491,12 @@ func (w *WebDAVFileWriter) Close() error {
 		}
 	}
 	if w.parentFolderID == 0 {
+		if w.existingID != "" && media != nil && media.ID != w.existingID {
+			w.mfs.removeFromGalleryCache(w.existingID)
+			if ms := w.mfs.MetadataStore(); ms != nil {
+				_ = ms.DeleteMedia(w.existingID)
+			}
+		}
 		if media != nil {
 			w.mfs.addToGalleryCache(*media)
 		} else {

@@ -280,6 +280,7 @@ func main() {
 	// 4. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
+	webdavServer.SetBrowserAuth(uiServer.BrowserAuth())
 	go watchHealth(ctx, webSess)
 	watchUploadSizeLimit()
 	// Contenido de los archivos diminutos (fichas del chunker...), una vez y en segundo
