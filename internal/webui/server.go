@@ -529,47 +529,11 @@ func isJSONRequest(r *http.Request) bool {
 	return strings.Contains(accept, "application/json") && !strings.Contains(accept, "text/html")
 }
 
-func sanitizeRelativeRedirect(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil {
+func (s *Server) resolveLocalRedirect(raw string) string {
+	if s == nil || s.webdavServer == nil || strings.TrimSpace(raw) == "" {
 		return "/"
 	}
-	p := u.Path
-	if len(p) == 0 || p[0] != '/' {
-		return "/"
-	}
-	if len(p) > 1 && (p[1] == '/' || p[1] == '\\') {
-		return "/"
-	}
-	if strings.ContainsAny(p, "\\\r\n\t\x00") {
-		return "/"
-	}
-	clean := path.Clean(p)
-	if clean == "/" || clean == "." {
-		return "/"
-	}
-	parts := strings.Split(strings.Trim(clean, "/"), "/")
-	escaped := make([]string, 0, len(parts))
-	for _, seg := range parts {
-		if seg == "" || seg == "." || seg == ".." {
-			return "/"
-		}
-		escaped = append(escaped, url.PathEscape(seg))
-	}
-	out := "/" + strings.Join(escaped, "/")
-	if len(out) > 1 && (out[1] == '/' || out[1] == '\\') {
-		return "/"
-	}
-	return out
-}
-
-func redirectLocal(w http.ResponseWriter, r *http.Request, target string) {
-	safe := sanitizeRelativeRedirect(target)
-	if u, err := url.Parse(safe); err != nil || u.Scheme != "" || u.Host != "" || len(safe) == 0 || safe[0] != '/' || (len(safe) > 1 && (safe[1] == '/' || safe[1] == '\\')) {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-	http.Redirect(w, r, safe, http.StatusSeeOther)
+	return s.webdavServer.CanonicalBrowserPath(raw)
 }
 
 func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg, username, formAction, nextTarget string) {
@@ -585,7 +549,7 @@ func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg,
 		Error:          errMsg,
 		Username:       username,
 		FormAction:     formAction,
-		Next:           sanitizeRelativeRedirect(nextTarget),
+		Next:           s.resolveLocalRedirect(nextTarget),
 		UseProxyStatic: formAction == "/__login",
 	}
 	if err := loginTmpl.Execute(w, data); err != nil {
@@ -598,9 +562,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, formAction string) {
-	nextTarget := sanitizeRelativeRedirect(r.URL.Query().Get("next"))
+	nextTarget := s.resolveLocalRedirect(r.URL.Query().Get("next"))
 	if !s.authCfg.IsEnabled() {
-		redirectLocal(w, r, nextTarget)
+		http.Redirect(w, r, nextTarget, http.StatusSeeOther)
 		return
 	}
 
@@ -608,7 +572,7 @@ func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, f
 	case http.MethodGet, http.MethodHead:
 		token := s.getSessionToken(r)
 		if token != "" && s.validateSession(token) {
-			redirectLocal(w, r, nextTarget)
+			http.Redirect(w, r, nextTarget, http.StatusSeeOther)
 			return
 		}
 		clientIP := config.ExtractClientIP(r)
@@ -675,7 +639,7 @@ func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, f
 			username = r.FormValue("username")
 			password = r.FormValue("password")
 			if formNext := r.FormValue("next"); formNext != "" {
-				nextTarget = sanitizeRelativeRedirect(formNext)
+				nextTarget = s.resolveLocalRedirect(formNext)
 			}
 			rememberVal := strings.ToLower(strings.TrimSpace(r.FormValue("remember")))
 			remember = rememberVal == "1" || rememberVal == "true" || rememberVal == "on" || rememberVal == "yes"
@@ -719,12 +683,12 @@ func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, f
 		if isJSONRequest(r) {
 			jsonResponse(w, http.StatusOK, map[string]interface{}{
 				"status":   "ok",
-				"redirect": sanitizeRelativeRedirect(nextTarget),
+				"redirect": nextTarget,
 			})
 			return
 		}
 
-		redirectLocal(w, r, nextTarget)
+		http.Redirect(w, r, nextTarget, http.StatusSeeOther)
 
 	default:
 		w.Header().Set("Allow", "GET, HEAD, POST")

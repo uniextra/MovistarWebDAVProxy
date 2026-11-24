@@ -1014,6 +1014,48 @@ func (mfs *MovistarFS) resolveCanonicalFolder(cleanPath string) (string, int64, 
 	return "/" + strings.Join(canonicalParts, "/"), currID, true
 }
 
+// CanonicalBrowserPath resuelve rawPath contra el árbol real o la galería virtual y
+// devuelve la ruta URL-encoded construida solo con nombres almacenados en el servidor
+// (SQLite/configuración), o "/" si no corresponde a ninguna carpeta existente.
+func (s *Server) CanonicalBrowserPath(rawPath string) string {
+	if s == nil || s.fs == nil {
+		return "/"
+	}
+	trimmed := strings.TrimSpace(rawPath)
+	if len(trimmed) == 0 || trimmed[0] != '/' || (len(trimmed) > 1 && (trimmed[1] == '/' || trimmed[1] == '\\')) {
+		return "/"
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil {
+		return "/"
+	}
+	p := u.Path
+	if len(p) == 0 || p[0] != '/' || (len(p) > 1 && (p[1] == '/' || p[1] == '\\')) {
+		return "/"
+	}
+	cleanPath := path.Clean(p)
+	if cleanPath == "/" || cleanPath == "." {
+		return "/"
+	}
+	if s.fs.isGalleryPath(cleanPath) {
+		if !s.fs.isGalleryVirtualDir(cleanPath) {
+			return "/"
+		}
+		idx, err := s.fs.getGalleryIndex()
+		if err != nil {
+			return "/"
+		}
+		if canonicalDir, _, ok := idx.lookupCanonicalDir(cleanPath, s.fs.caseInsensitive()); ok {
+			return encodePathSegments(canonicalDir)
+		}
+		return "/"
+	}
+	if canonicalDir, _, ok := s.fs.resolveCanonicalFolder(cleanPath); ok {
+		return encodePathSegments(canonicalDir)
+	}
+	return "/"
+}
+
 // serveGalleryBrowserHTML sirve el explorador web en modo listado cuando se abre "/",
 // una carpeta de «Mis Archivos» o una subcarpeta de /_gallery desde un navegador (GET / HEAD).
 func (s *Server) serveGalleryBrowserHTML(w http.ResponseWriter, r *http.Request, urlPath string) bool {

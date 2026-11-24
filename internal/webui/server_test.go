@@ -1212,6 +1212,7 @@ func TestWebUI_SharedBrowserSessionAndExplorerLink(t *testing.T) {
 	_ = ms.SetInitialSync("cursor-1")
 	_ = ms.UpsertFolder(sapi.FolderItem{ID: 100, Name: "/", Magic: true})
 	_ = ms.UpsertFolder(sapi.FolderItem{ID: 200, Name: "Documentos", ParentID: 100})
+	_ = ms.UpsertFolder(sapi.FolderItem{ID: 201, Name: "Mis Documentos", ParentID: 100})
 
 	authCfg := config.AuthConfig{Username: "admin", Password: "secretpassword"}
 	davSrv := webdav.NewServerWithAuth(client, authCfg, ms)
