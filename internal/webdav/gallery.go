@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/webdav"
@@ -31,6 +32,7 @@ type galleryEntry struct {
 }
 
 type galleryIndex struct {
+	mu          sync.RWMutex
 	builtAt     time.Time
 	dirName     string
 	layout      string
@@ -278,13 +280,15 @@ func (idx *galleryIndex) lookupDir(cleanPath string, fold bool) ([]os.FileInfo, 
 	if idx == nil {
 		return nil, false
 	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	if entries, ok := idx.dirs[cleanPath]; ok {
-		return entries, true
+		return append([]os.FileInfo(nil), entries...), true
 	}
 	if fold {
 		for k, entries := range idx.dirs {
 			if strings.EqualFold(k, cleanPath) {
-				return entries, true
+				return append([]os.FileInfo(nil), entries...), true
 			}
 		}
 	}
@@ -295,6 +299,8 @@ func (idx *galleryIndex) lookupDirModTime(cleanPath string, fold bool) time.Time
 	if idx == nil {
 		return time.Unix(0, 0).UTC()
 	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	if mt, ok := idx.dirModTimes[cleanPath]; ok {
 		return mt
 	}
@@ -312,11 +318,27 @@ func (idx *galleryIndex) lookupFile(cleanPath string, fold bool) (galleryEntry, 
 	if idx == nil {
 		return galleryEntry{}, false
 	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	if e, ok := idx.files[cleanPath]; ok {
 		return e, true
 	}
 	if fold {
 		if e, ok := idx.filesLower[strings.ToLower(cleanPath)]; ok {
+			return e, true
+		}
+	}
+	return galleryEntry{}, false
+}
+
+func (idx *galleryIndex) lookupByID(id string) (galleryEntry, bool) {
+	if idx == nil || id == "" {
+		return galleryEntry{}, false
+	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	for _, e := range idx.files {
+		if e.item.ID == id {
 			return e, true
 		}
 	}
@@ -653,13 +675,10 @@ func (mfs *MovistarFS) galleryOpenFile(ctx context.Context, cleanPath string, fl
 				FolderID:         0,
 				ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 			}
-			for _, e := range idx.files {
-				if e.item.ID == mem.ID {
-					it := e.item
-					existingItem = &it
-					uploadName = e.item.Name
-					break
-				}
+			if e, ok := idx.lookupByID(mem.ID); ok {
+				it := e.item
+				existingItem = &it
+				uploadName = e.item.Name
 			}
 		} else if rel, okRel := galleryNormalizedRelativeSegments(cleanPath); okRel && len(rel) == 1 {
 			if entry, okUnique := idx.lookupUniqueByName(fileName, fold); okUnique {
@@ -880,6 +899,8 @@ func (mfs *MovistarFS) updateGalleryCacheURL(id, downloadURL, etag string) {
 	if idx == nil {
 		return
 	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	for k, e := range idx.files {
 		if e.item.ID == id {
 			e.item.URL = downloadURL
@@ -902,6 +923,8 @@ func (mfs *MovistarFS) addToGalleryCache(item sapi.MediaItem) {
 	if idx == nil {
 		return
 	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 
 	rootVirtual := "/" + idx.dirName
 	mt, year, month := galleryItemDate(item)
@@ -988,6 +1011,8 @@ func (mfs *MovistarFS) removeFromGalleryCache(id string) {
 	if idx == nil {
 		return
 	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	for k, e := range idx.files {
 		if e.item.ID == id {
 			delete(idx.files, k)
@@ -1038,6 +1063,8 @@ func (idx *galleryIndex) lookupUniqueByName(fileName string, fold bool) (gallery
 	if idx == nil || fileName == "" {
 		return galleryEntry{}, false
 	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	var found galleryEntry
 	count := 0
 	for _, e := range idx.files {
@@ -1056,13 +1083,15 @@ func (idx *galleryIndex) lookupCanonicalDir(cleanPath string, fold bool) (string
 	if idx == nil {
 		return "", nil, false
 	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	if entries, ok := idx.dirs[cleanPath]; ok {
-		return cleanPath, entries, true
+		return cleanPath, append([]os.FileInfo(nil), entries...), true
 	}
 	if fold {
 		for k, entries := range idx.dirs {
 			if strings.EqualFold(k, cleanPath) {
-				return k, entries, true
+				return k, append([]os.FileInfo(nil), entries...), true
 			}
 		}
 	}

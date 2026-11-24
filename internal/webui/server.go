@@ -530,11 +530,46 @@ func isJSONRequest(r *http.Request) bool {
 }
 
 func sanitizeRelativeRedirect(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" || !strings.HasPrefix(s, "/") || strings.HasPrefix(s, "//") || strings.ContainsAny(s, "\\\r\n\t\x00") {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil {
 		return "/"
 	}
-	return s
+	p := u.Path
+	if len(p) == 0 || p[0] != '/' {
+		return "/"
+	}
+	if len(p) > 1 && (p[1] == '/' || p[1] == '\\') {
+		return "/"
+	}
+	if strings.ContainsAny(p, "\\\r\n\t\x00") {
+		return "/"
+	}
+	clean := path.Clean(p)
+	if clean == "/" || clean == "." {
+		return "/"
+	}
+	parts := strings.Split(strings.Trim(clean, "/"), "/")
+	escaped := make([]string, 0, len(parts))
+	for _, seg := range parts {
+		if seg == "" || seg == "." || seg == ".." {
+			return "/"
+		}
+		escaped = append(escaped, url.PathEscape(seg))
+	}
+	out := "/" + strings.Join(escaped, "/")
+	if len(out) > 1 && (out[1] == '/' || out[1] == '\\') {
+		return "/"
+	}
+	return out
+}
+
+func redirectLocal(w http.ResponseWriter, r *http.Request, target string) {
+	safe := sanitizeRelativeRedirect(target)
+	if u, err := url.Parse(safe); err != nil || u.Scheme != "" || u.Host != "" || len(safe) == 0 || safe[0] != '/' || (len(safe) > 1 && (safe[1] == '/' || safe[1] == '\\')) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, safe, http.StatusSeeOther)
 }
 
 func (s *Server) renderLoginPage(w http.ResponseWriter, r *http.Request, errMsg, username, formAction, nextTarget string) {
@@ -565,7 +600,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, formAction string) {
 	nextTarget := sanitizeRelativeRedirect(r.URL.Query().Get("next"))
 	if !s.authCfg.IsEnabled() {
-		http.Redirect(w, r, nextTarget, http.StatusSeeOther)
+		redirectLocal(w, r, nextTarget)
 		return
 	}
 
@@ -573,7 +608,7 @@ func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, f
 	case http.MethodGet, http.MethodHead:
 		token := s.getSessionToken(r)
 		if token != "" && s.validateSession(token) {
-			http.Redirect(w, r, nextTarget, http.StatusSeeOther)
+			redirectLocal(w, r, nextTarget)
 			return
 		}
 		clientIP := config.ExtractClientIP(r)
@@ -684,12 +719,12 @@ func (s *Server) handleLoginWithAction(w http.ResponseWriter, r *http.Request, f
 		if isJSONRequest(r) {
 			jsonResponse(w, http.StatusOK, map[string]interface{}{
 				"status":   "ok",
-				"redirect": nextTarget,
+				"redirect": sanitizeRelativeRedirect(nextTarget),
 			})
 			return
 		}
 
-		http.Redirect(w, r, nextTarget, http.StatusSeeOther)
+		redirectLocal(w, r, nextTarget)
 
 	default:
 		w.Header().Set("Allow", "GET, HEAD, POST")

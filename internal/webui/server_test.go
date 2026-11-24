@@ -1335,14 +1335,26 @@ func TestWebUI_SharedBrowserSessionAndExplorerLink(t *testing.T) {
 		t.Errorf("listado /__static/ debe devolver 404, recibido %d", staticDirRec.Code)
 	}
 
-	postOpenRedirect := httptest.NewRequest(http.MethodPost, "/__login", strings.NewReader(url.Values{
-		"username": {"admin"}, "password": {"secretpassword"}, "next": {"//evil.com"},
+	for _, badNext := range []string{"//evil.com", `/\evil.com`, "https://evil.com"} {
+		postOpenRedirect := httptest.NewRequest(http.MethodPost, "/__login", strings.NewReader(url.Values{
+			"username": {"admin"}, "password": {"secretpassword"}, "next": {badNext},
+		}.Encode()))
+		postOpenRedirect.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		postOpenRec := httptest.NewRecorder()
+		davSrv.ServeHTTP(postOpenRec, postOpenRedirect)
+		if postOpenRec.Code != http.StatusSeeOther || postOpenRec.Header().Get("Location") != "/" {
+			t.Fatalf("open redirect %q debía normalizarse a '/', recibido %d loc=%q", badNext, postOpenRec.Code, postOpenRec.Header().Get("Location"))
+		}
+	}
+
+	postSpaceNext := httptest.NewRequest(http.MethodPost, "/__login", strings.NewReader(url.Values{
+		"username": {"admin"}, "password": {"secretpassword"}, "next": {"/Mis Documentos"},
 	}.Encode()))
-	postOpenRedirect.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	postOpenRec := httptest.NewRecorder()
-	davSrv.ServeHTTP(postOpenRec, postOpenRedirect)
-	if postOpenRec.Code != http.StatusSeeOther || postOpenRec.Header().Get("Location") != "/" {
-		t.Fatalf("open redirect //evil.com debía normalizarse a '/', recibido %d loc=%q", postOpenRec.Code, postOpenRec.Header().Get("Location"))
+	postSpaceNext.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postSpaceRec := httptest.NewRecorder()
+	davSrv.ServeHTTP(postSpaceRec, postSpaceNext)
+	if postSpaceRec.Code != http.StatusSeeOther || postSpaceRec.Header().Get("Location") != "/Mis%20Documentos" {
+		t.Fatalf("POST /__login con espacio debía codificarse a /Mis%%20Documentos, recibido %d loc=%q", postSpaceRec.Code, postSpaceRec.Header().Get("Location"))
 	}
 
 	postDavLogin := httptest.NewRequest(http.MethodPost, "/__login", strings.NewReader(url.Values{
