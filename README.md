@@ -78,6 +78,14 @@ services:
       # Opcional: credenciales distintas para el panel web (si no se definen, usa las de WebDAV)
       # - WEBUI_USER=admin
       # - WEBUI_PASSWORD=OtroPasswordSeguro
+      # Opcional: puerto externo del explorador WebDAV si no usas 5050
+      # - WEBDAV_HOST_PORT=5050
+      # Opcional: carpeta virtual de Galería (/_gallery)
+      # - GALLERY_ENABLED=true          # Expone /_gallery en WebDAV y Explorador Web
+      # - GALLERY_LAYOUT=year-month     # year-month (/AAAA/MM, recomendado) o flat
+      # - GALLERY_DIR=_gallery          # Nombre de la carpeta virtual en /
+      # - GALLERY_UPLOAD=true           # Permite subir fotos/vídeos a /_gallery
+      # - GALLERY_DELETE=true           # Permite mandar elementos de /_gallery a la papelera
       # Opcional: notificaciones de Telegram activas desde el arranque del contenedor
       - TELEGRAM_BOT_TOKEN=
       - TELEGRAM_CHAT_ID=
@@ -87,7 +95,7 @@ services:
       # - WEBDAV_TMPDIR=/app/tmp
     ports:
       - "${BIND_IP:-0.0.0.0}:5000:5000"   # Panel Web de Gestión y Logs (usa BIND_IP=127.0.0.1 para solo localhost)
-      - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV (puerto 5050 en el host)
+      - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV y Explorador Web (puerto 5050 en el host)
     volumes:
       - movistar_tokens:/app/tokens
       # Opcional (requiere WEBDAV_TMPDIR=/app/tmp): útil en NAS con poca RAM para subidas grandes
@@ -173,7 +181,7 @@ Abre el panel web (`:5000`), pulsa **🔐 Abrir inicio de sesión**, entra con *
 ### 🗂️ Explorador Web Integrado en `:5050`
 Además de usar clientes WebDAV (WinSCP, Rclone, Finder, Synology File Station, etc.), puedes abrir **`http://IP_DE_TU_SERVIDOR:5050/`** directamente en tu navegador:
 * **Acceso único con el Dashboard (`:5000`):** Inicia sesión en `:5000` y pulsa **📁 Explorador** en la cabecera para entrar en `:5050` sin volver a introducir usuario y contraseña *(si publicas WebDAV en otro puerto distinto de `5050`, define `WEBDAV_HOST_PORT`)*. Si abres `:5050` directamente en el navegador, te mostrará la pantalla de login web (`/__login`) en lugar de la ventana nativa Basic Auth.
-* **Vista en modo listado 100 % offline:** Tabla ligera y rápida (sin miniaturas pesadas de imágenes), búsqueda instantánea (`/`), filtro por tipo, ordenación por columnas y *breadcrumbs*.
+* **Vista en modo listado 100 % offline + visor multimedia:** Tabla ligera y rápida (sin miniaturas pesadas de imágenes), búsqueda instantánea (`/`), filtro por tipo, ordenación por columnas y *breadcrumbs*. Al abrir cualquier foto o vídeo se muestra en un **visor integrado** para avanzar o retroceder entre ellos (`‹` / `›` y teclas `←` / `→`) sin salir del explorador.
 * **Gestión directa:** Arrastra y suelta (**Drag & Drop**) para subir archivos enviando automáticamente la fecha de modificación (`X-OC-Mtime`), crea carpetas (`+ Carpeta`), descarga, renombra o envía a la papelera desde el menú `⋮`. *(Nota: en carpetas, Movistar/O2 Cloud no proporciona tamaño agregado desde la API).*
 
 ### 🖼️ Cómo funcionan las Carpetas Virtuales de `/_gallery`

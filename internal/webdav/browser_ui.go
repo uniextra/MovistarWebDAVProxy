@@ -300,10 +300,11 @@ td.act-col{text-align:center;padding:4px 4px}
   max-width:100%;max-height:100%;
   display:flex;align-items:center;justify-content:center;
 }
-.lb-stage img{
+.lb-stage img,.lb-stage video{
   max-width:100%;max-height:calc(100vh - 96px);
   object-fit:contain;border-radius:6px;
   box-shadow:0 14px 40px rgba(0,0,0,.7);
+  background:#000;
 }
 .lb-msg{color:var(--muted);font-size:13.5px}
 .lb-nav{
@@ -440,7 +441,7 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
 
 <div id="toast" class="toast" hidden></div>
 
-<div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Visor de fotos">
+<div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Visor multimedia">
   <div class="lb-top">
     <div class="lb-meta">
       <span id="lbName" class="lb-name"></span>
@@ -452,9 +453,9 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
     </div>
   </div>
   <div id="lbBody" class="lb-body">
-    <button id="lbPrev" type="button" class="lb-nav lb-prev" aria-label="Foto anterior">‹</button>
+    <button id="lbPrev" type="button" class="lb-nav lb-prev" aria-label="Elemento anterior">‹</button>
     <div id="lbStage" class="lb-stage"></div>
-    <button id="lbNext" type="button" class="lb-nav lb-next" aria-label="Foto siguiente">›</button>
+    <button id="lbNext" type="button" class="lb-nav lb-next" aria-label="Elemento siguiente">›</button>
   </div>
 </div>
 
@@ -912,7 +913,7 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
     });
   }
 
-  // Lightbox para navegar entre fotos sin salir del explorador
+  // Lightbox para navegar entre fotos y vídeos sin salir del explorador
   var lightbox = document.getElementById('lightbox');
   var lbName = document.getElementById('lbName');
   var lbCount = document.getElementById('lbCount');
@@ -925,21 +926,59 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
   var lbItems = [];
   var lbIndex = -1;
 
+  function clearLightboxMedia() {
+    if (!lbStage) return;
+    var activeVid = lbStage.querySelector('video');
+    if (activeVid) {
+      try { activeVid.pause(); } catch (_) {}
+      activeVid.removeAttribute('src');
+      try { activeVid.load(); } catch (_) {}
+    }
+    lbStage.innerHTML = '';
+  }
+
   function renderLightbox() {
     if (!lightbox || lbIndex < 0 || lbIndex >= lbItems.length) return;
     var item = lbItems[lbIndex];
     lbName.textContent = item.name;
     lbCount.textContent = (lbIndex + 1) + ' / ' + lbItems.length;
     lbDownload.href = item.href;
-    lbDownload.setAttribute('download', item.name || 'foto');
+    lbDownload.setAttribute('download', item.name || 'archivo');
     lbPrev.disabled = lbIndex <= 0;
     lbNext.disabled = lbIndex >= lbItems.length - 1;
 
-    lbStage.innerHTML = '';
+    clearLightboxMedia();
     var loading = document.createElement('div');
     loading.className = 'lb-msg';
-    loading.textContent = 'Cargando imagen...';
+    loading.textContent = item.kind === 'video' ? 'Cargando vídeo...' : 'Cargando imagen...';
     lbStage.appendChild(loading);
+
+    if (item.kind === 'video') {
+      var vid = document.createElement('video');
+      vid.controls = true;
+      vid.autoplay = true;
+      vid.playsInline = true;
+      vid.preload = 'metadata';
+      vid.hidden = true;
+      vid.onloadedmetadata = function() {
+        if (lbItems[lbIndex] !== item) return;
+        loading.remove();
+        vid.hidden = false;
+      };
+      vid.oncanplay = function() {
+        if (lbItems[lbIndex] !== item) return;
+        loading.remove();
+        vid.hidden = false;
+      };
+      vid.onerror = function() {
+        if (lbItems[lbIndex] !== item) return;
+        vid.hidden = true;
+        loading.textContent = 'No se pudo reproducir el vídeo en el navegador. Usa Descargar.';
+      };
+      vid.src = item.href;
+      lbStage.appendChild(vid);
+      return;
+    }
 
     var img = document.createElement('img');
     img.alt = item.name;
@@ -960,10 +999,11 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
   function openLightbox(row) {
     if (!lightbox) return;
     var rows = getRows().filter(function(r) {
-      return r.dataset.kind === 'img' && r.dataset.dir !== 'true' && !r.classList.contains('hide');
+      return (r.dataset.kind === 'image' || r.dataset.kind === 'video') &&
+        r.dataset.dir !== 'true' && !r.classList.contains('hide');
     });
     lbItems = rows.map(function(r) {
-      return { href: r.dataset.href || '', name: r.dataset.name || '' };
+      return { href: r.dataset.href || '', name: r.dataset.name || '', kind: r.dataset.kind || 'image' };
     });
     lbIndex = rows.indexOf(row);
     if (lbIndex < 0) return;
@@ -974,7 +1014,7 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
   function closeLightbox() {
     if (!lightbox || lightbox.hidden) return;
     lightbox.hidden = true;
-    lbStage.innerHTML = '';
+    clearLightboxMedia();
     lbItems = [];
     lbIndex = -1;
   }
@@ -982,7 +1022,7 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
   if (lightbox) {
     tbody.addEventListener('click', function(ev) {
       if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
-      var link = ev.target.closest('tr.row[data-kind="img"][data-dir="false"] a.name-link');
+      var link = ev.target.closest('tr.row[data-kind="image"][data-dir="false"] a.name-link, tr.row[data-kind="video"][data-dir="false"] a.name-link');
       if (!link) return;
       var row = link.closest('tr.row');
       if (!row) return;
@@ -1261,7 +1301,7 @@ func (s *Server) serveGalleryBrowserHTML(w http.ResponseWriter, r *http.Request,
 	nonce := newCSPNonce()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; font-src 'self'; script-src 'nonce-"+nonce+"'; connect-src 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; font-src 'self'; script-src 'nonce-"+nonce+"'; connect-src 'self'; frame-ancestors 'none'")
 
 	var loadErrMsg string
 	if r.Method == http.MethodHead {

@@ -604,14 +604,15 @@ func TestBrowserUI_PermissionsAndBreadcrumbs(t *testing.T) {
 		t.Fatalf("GET / = %d, ct=%q", recRoot.Code, recRoot.Header().Get("Content-Type"))
 	}
 	csp := recRoot.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "script-src 'nonce-") || !strings.Contains(csp, "font-src 'self'") || !strings.Contains(csp, "img-src 'self'") {
+	if !strings.Contains(csp, "script-src 'nonce-") || !strings.Contains(csp, "font-src 'self'") || !strings.Contains(csp, "img-src 'self'") || !strings.Contains(csp, "media-src 'self'") {
 		t.Errorf("CSP inesperado: %q", csp)
 	}
 	rootBody := recRoot.Body.String()
-	if strings.Contains(strings.ToLower(rootBody), "<img") {
-		t.Errorf("el listado HTML no debe incluir etiquetas <img> ni miniaturas")
+	lowerBody := strings.ToLower(rootBody)
+	if strings.Contains(lowerBody, "<img") || strings.Contains(lowerBody, "<video") {
+		t.Errorf("el listado HTML no debe incluir etiquetas <img> ni <video> embebidas")
 	}
-	for _, idAttr := range []string{`id="bootLoader"`, `id="navProgress"`, `id="lightbox"`, `id="lbPrev"`, `id="lbNext"`, `id="lbStage"`} {
+	for _, idAttr := range []string{`id="bootLoader"`, `id="navProgress"`, `id="lightbox"`, `id="lbPrev"`, `id="lbNext"`, `id="lbStage"`, `tr.row[data-kind="image"][data-dir="false"]`, `tr.row[data-kind="video"][data-dir="false"]`} {
 		if !strings.Contains(rootBody, idAttr) {
 			t.Errorf("el HTML debe incluir %s: %s", idAttr, rootBody)
 		}
