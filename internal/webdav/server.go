@@ -447,17 +447,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				challenge, isType1, ntlmUser, ok := s.ntlmAuth.HandleHandshake(connKey, clientIP, authHeader, s.authCfg)
 				if isType1 {
-					if r.Body != nil {
-						_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
-					}
+					drainSmallAuthBody(r)
 					lw.Header().Set("WWW-Authenticate", challenge)
 					http.Error(lw, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
 				if !ok {
-					if r.Body != nil {
-						_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
-					}
+					drainSmallAuthBody(r)
 					if ntlmUser != "" {
 						s.rateLimiter.RecordFailure(clientIP)
 						logger.Log("[WebDAV] 🔒 Intento de acceso NTLM fallido desde %s (usuario: %s)", clientIP, logger.Mask(ntlmUser))
@@ -495,9 +491,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							http.Redirect(lw, r, browserLoginPath+"?next="+url.QueryEscape(next), http.StatusSeeOther)
 							return
 						}
-						if r.Body != nil {
-							_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
-						}
+						drainSmallAuthBody(r)
 						if hasAuth && (rawUser != "" || pass != "") {
 							s.rateLimiter.RecordFailure(clientIP)
 							logger.Log("[WebDAV] 🔒 Intento de acceso fallido desde %s (usuario: %s, %s)", clientIP, logger.Mask(rawUser), config.DescribeCredentialShape(rawUser, pass))
@@ -1254,4 +1248,25 @@ func (m *moveStatusInterceptor) Write(b []byte) (int, error) {
 		return len(b), nil // el cuerpo es el motivo; se descarta el «Forbidden» de x/net/webdav
 	}
 	return m.ResponseWriter.Write(b)
+}
+
+// drainSmallAuthBody consume cuerpos XML pequeños (p. ej. PROPFIND en NTLM) antes de
+// responder 401 para mantener viva la conexión TCP, pero evita leer el cuerpo en PUT,
+// peticiones con Expect: 100-continue o cuerpos grandes/chunked; leer r.Body en esos casos
+// hace que net/http emita "100 Continue" prematuro antes del 401 y rompa clientes como
+// Synology File Station (libcurl), que abortan sin reintentar con Authorization.
+func drainSmallAuthBody(r *http.Request) {
+	if r == nil || r.Body == nil {
+		return
+	}
+	if r.Method == http.MethodPut {
+		return
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Expect")), "100-continue") {
+		return
+	}
+	if r.ContentLength <= 0 || r.ContentLength > 64*1024 {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
 }

@@ -98,20 +98,27 @@ func (mfs *MovistarFS) isGalleryRootNameMatch(seg string) bool {
 }
 
 func (mfs *MovistarFS) isGalleryPath(cleanPath string) bool {
-	if mfs == nil || !config.GalleryEnabled() || mfs.hasRealGalleryConflict() {
+	if mfs == nil || !config.GalleryEnabled() {
 		return false
 	}
 	dirName := config.GalleryDir()
 	basePrefix := "/" + dirName
+	matches := false
 	if mfs.caseInsensitive() {
 		if strings.EqualFold(cleanPath, basePrefix) {
-			return true
-		}
-		return len(cleanPath) > len(basePrefix) &&
+			matches = true
+		} else if len(cleanPath) > len(basePrefix) &&
 			strings.EqualFold(cleanPath[:len(basePrefix)], basePrefix) &&
-			cleanPath[len(basePrefix)] == '/'
+			cleanPath[len(basePrefix)] == '/' {
+			matches = true
+		}
+	} else if cleanPath == basePrefix || strings.HasPrefix(cleanPath, basePrefix+"/") {
+		matches = true
 	}
-	return cleanPath == basePrefix || strings.HasPrefix(cleanPath, basePrefix+"/")
+	if !matches {
+		return false
+	}
+	return !mfs.hasRealGalleryConflict()
 }
 
 func galleryNormalizedRelativeSegments(cleanPath string) ([]string, bool) {

@@ -1,13 +1,16 @@
 package webdav
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/sapi"
@@ -506,7 +509,6 @@ func TestWebDAV_NTLM_Offer_Selective(t *testing.T) {
 	}
 }
 
-
 func TestWebDAV_ProppatchDoesNotTruncateUploadedFile(t *testing.T) {
 	srv, subidas, cerrar := servidorQueCuentaSubidas(t)
 	defer cerrar()
@@ -677,5 +679,102 @@ func TestWebDAV_SmallFileDownloadCachedInMemory(t *testing.T) {
 
 	if downloads != 1 {
 		t.Errorf("expected small file (/config) to be downloaded from SAPI only 1 time across 5 GETs, got %d", downloads)
+	}
+}
+
+type trackingBodyReader struct {
+	r    io.Reader
+	read bool
+}
+
+func (tb *trackingBodyReader) Read(p []byte) (int, error) {
+	tb.read = true
+	return tb.r.Read(p)
+}
+
+func (tb *trackingBodyReader) Close() error { return nil }
+
+func TestDrainSmallAuthBody(t *testing.T) {
+	cases := []struct {
+		name       string
+		method     string
+		expect     string
+		contentLen int64
+		wantRead   bool
+	}{
+		{name: "small PROPFIND drained", method: "PROPFIND", contentLen: 12, wantRead: true},
+		{name: "PUT never drained", method: http.MethodPut, contentLen: 12, wantRead: false},
+		{name: "Expect 100-continue never drained", method: "PROPFIND", expect: "100-continue", contentLen: 12, wantRead: false},
+		{name: "chunked (-1) never drained", method: "PROPFIND", contentLen: -1, wantRead: false},
+		{name: "large (>64KB) never drained", method: "PROPFIND", contentLen: 64*1024 + 1, wantRead: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tb := &trackingBodyReader{r: strings.NewReader("propfind-req")}
+			req := httptest.NewRequest(tc.method, "/file.bin", tb)
+			req.ContentLength = tc.contentLen
+			if tc.expect != "" {
+				req.Header.Set("Expect", tc.expect)
+			}
+			drainSmallAuthBody(req)
+			if tb.read != tc.wantRead {
+				t.Fatalf("read=%v, want %v", tb.read, tc.wantRead)
+			}
+		})
+	}
+}
+
+func TestWebDAV_PutExpect100ContinueReturns401Immediately(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{
+		Username: "davuser",
+		Password: "davpass",
+	})
+	defer cleanup()
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("net.Dial failed: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	// Simula la sonda inicial PUT con Expect: 100-continue sin credenciales ni envío de cuerpo
+	// (comportamiento de Synology File Station / libcurl antes de reintentar con Basic Auth).
+	rawReq := "PUT /test.png HTTP/1.1\r\n" +
+		"Host: " + addr + "\r\n" +
+		"Expect: 100-continue\r\n" +
+		"Content-Length: 1048576\r\n" +
+		"\r\n"
+	if _, err := io.WriteString(conn, rawReq); err != nil {
+		t.Fatalf("write request headers failed: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	var headerBuf strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("reading response headers failed (accumulated %q): %v", headerBuf.String(), err)
+		}
+		headerBuf.WriteString(line)
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	respHeaders := headerBuf.String()
+	if strings.Contains(respHeaders, "100 Continue") {
+		t.Fatalf("must NOT send 100 Continue before 401 Unauthorized, got:\n%s", respHeaders)
+	}
+	if !strings.HasPrefix(respHeaders, "HTTP/1.1 401 Unauthorized\r\n") {
+		t.Fatalf("expected immediate 401 Unauthorized status line, got:\n%s", respHeaders)
+	}
+	if !strings.Contains(respHeaders, `Www-Authenticate: Basic realm="WebDAV"`) &&
+		!strings.Contains(respHeaders, `WWW-Authenticate: Basic realm="WebDAV"`) {
+		t.Fatalf("expected WWW-Authenticate Basic header in 401 response, got:\n%s", respHeaders)
 	}
 }

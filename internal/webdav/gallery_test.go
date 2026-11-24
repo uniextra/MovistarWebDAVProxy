@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -668,5 +669,58 @@ func TestBrowserUI_PermissionsAndBreadcrumbs(t *testing.T) {
 	}
 	if !strings.Contains(recGalRW.Body.String(), `data-href="/_gallery/2026" data-dir="true" data-can-rename="false" data-can-delete="false"`) {
 		t.Errorf("subcarpeta virtual /_gallery/2026 nunca debe permitir rename ni delete: %s", recGalRW.Body.String())
+	}
+}
+
+func TestIsGalleryPath_ShortCircuitsNonGalleryPaths(t *testing.T) {
+	t.Setenv("GALLERY_ENABLED", "true")
+	t.Setenv("GALLERY_DIR", "_gallery")
+
+	var folderCalls atomic.Int64
+	mockSAPI := newShimServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		action := r.URL.Query().Get("action")
+		switch {
+		case r.URL.Path == "/sapi/media/folder/root" && action == "get":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"folders": []map[string]interface{}{{"id": 100, "name": "Root", "parentid": 0, "magic": true}},
+				},
+			})
+		case r.URL.Path == "/sapi/media/folder" && action == "list":
+			folderCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{"folders": []map[string]interface{}{}},
+			})
+		default:
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	}))
+	defer mockSAPI.Close()
+
+	client, err := sapi.NewClient(config.AccountConfig{
+		Provider:      "movistar",
+		Phone:         "612345678",
+		AccessToken:   "test-access",
+		RefreshToken:  "test-refresh",
+		ValidationKey: "test-vk",
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	client.SetBaseURLs(mockSAPI.URL+"/sapi", mockSAPI.URL)
+	mfs := NewMovistarFS(client)
+
+	for _, nonGal := range []string{"/", "/Documentos", "/Documentos/foto.jpg", "/_gallery_real/foto.jpg"} {
+		if mfs.isGalleryPath(nonGal) {
+			t.Fatalf("isGalleryPath(%q) = true, want false", nonGal)
+		}
+	}
+	if n := folderCalls.Load(); n != 0 {
+		t.Fatalf("non-gallery paths must not query SAPI/SQLite conflict checks, got %d folder calls", n)
+	}
+
+	if !mfs.isGalleryPath("/_gallery") || !mfs.isGalleryPath("/_gallery/2026/11/foto.jpg") {
+		t.Fatalf("expected /_gallery paths to return true when no conflict exists")
 	}
 }
