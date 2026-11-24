@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,9 @@ func TestWebDAV_LargeFolderPropfindAndQuotaFirstOnly(t *testing.T) {
 	}
 
 	xmlResp := rec.Body.String()
+	if gotCL := rec.Header().Get("Content-Length"); gotCL != strconv.Itoa(len(xmlResp)) {
+		t.Fatalf("Content-Length=%q, want %d", gotCL, len(xmlResp))
+	}
 	gotResponses := strings.Count(xmlResp, "<D:response>")
 	if gotResponses != numFiles+1 {
 		t.Fatalf("got %d <D:response> blocks, want %d", gotResponses, numFiles+1)
@@ -133,4 +137,113 @@ func TestPropfindDirCache_AvoidsSQLitePerChildAfterReaddir(t *testing.T) {
 		t.Fatalf("OpenFile(%s) tras cerrar SQLite debe usar caché PROPFIND: %v", target, err)
 	}
 	_ = f.Close()
+}
+
+func TestWebDAV_PropfindCaseInsensitivePreservesExactCollision(t *testing.T) {
+	t.Setenv("WEBDAV_CASE_INSENSITIVE", "true")
+	ms := seedLargeFolderStore(t, 0)
+	if err := ms.UpsertMediaBatch([]sapi.MediaItem{
+		{ID: "case-upper", Name: "A.txt", Size: 111, FolderID: 200, CreationDate: "20261124T100000Z", ModificationDate: "20261124T100000Z"},
+		{ID: "case-lower", Name: "a.txt", Size: 222, FolderID: 200, CreationDate: "20261124T100000Z", ModificationDate: "20261124T100000Z"},
+	}); err != nil {
+		t.Fatalf("UpsertMediaBatch: %v", err)
+	}
+
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+	srv.fs.SetMetadataStore(ms)
+	srv.fs.RecordSyncTime(time.Now())
+
+	propBody := `<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`
+	req := httptest.NewRequest("PROPFIND", "/Duplicati/", strings.NewReader(propBody))
+	req.Header.Set("Depth", "1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"<D:href>/Duplicati/A.txt</D:href>",
+		"<D:getcontentlength>111</D:getcontentlength>",
+		"<D:href>/Duplicati/a.txt</D:href>",
+		"<D:getcontentlength>222</D:getcontentlength>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %q in response:\n%s", want, body)
+		}
+	}
+}
+
+func TestWebDAV_PropfindRecentUploadOverridesSQLiteMedia(t *testing.T) {
+	ms := seedLargeFolderStore(t, 1)
+	if err := ms.UpsertMedia(sapi.MediaItem{
+		ID:               "old-id-1",
+		Name:             "report.bin",
+		Size:             100,
+		FolderID:         200,
+		CreationDate:     "20261124T100000Z",
+		ModificationDate: "20261124T100000Z",
+	}); err != nil {
+		t.Fatalf("UpsertMedia: %v", err)
+	}
+
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+	srv.fs.SetMetadataStore(ms)
+	srv.fs.RecordSyncTime(time.Now())
+
+	srv.fs.cacheMu.Lock()
+	srv.fs.uploadCache[cacheKey("/Duplicati/report.bin")] = &MemoryFile{
+		ID:       "old-id-1",
+		Name:     "report.bin",
+		FolderID: 200,
+		Size:     9876,
+		ModTime:  time.Now().UTC(),
+		CachedAt: time.Now(),
+	}
+	srv.fs.cacheMu.Unlock()
+
+	propBody := `<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`
+	req := httptest.NewRequest("PROPFIND", "/Duplicati/", strings.NewReader(propBody))
+	req.Header.Set("Depth", "1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<D:getcontentlength>9876</D:getcontentlength>") {
+		t.Fatalf("expected fresher uploadCache size 9876 in response:\n%s", body)
+	}
+	if strings.Contains(body, "<D:getcontentlength>100</D:getcontentlength>") {
+		t.Fatalf("stale SQLite size 100 must not be served when uploadCache is newer:\n%s", body)
+	}
+}
+
+func TestWebDAV_PropfindUppercaseQuotaCleanedInChildren(t *testing.T) {
+	ms := seedLargeFolderStore(t, 2)
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{AuthDisabled: true})
+	defer cleanup()
+	srv.fs.SetMetadataStore(ms)
+	srv.fs.RecordSyncTime(time.Now())
+
+	propBody := `<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:QUOTA-AVAILABLE-BYTES/><D:QUOTA-USED-BYTES/></D:prop></D:propfind>`
+	req := httptest.NewRequest("PROPFIND", "/Duplicati/", strings.NewReader(propBody))
+	req.Header.Set("Depth", "1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("PROPFIND got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "QUOTA-") {
+		t.Fatalf("uppercase QUOTA-* tags should be cleaned from child responses, got:\n%s", body)
+	}
+	if got := strings.Count(body, ":quota-available-bytes>"); got != 2 {
+		t.Fatalf("expected exactly 1 quota-available-bytes pair (2 occurrences), got %d:\n%s", got, body)
+	}
 }

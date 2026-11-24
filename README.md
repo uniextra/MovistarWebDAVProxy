@@ -26,11 +26,12 @@ Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones
 2. [🐳 Paso 1: Despliegue con Docker](#-paso-1-despliegue-con-docker)
 3. [🔑 Paso 2: Vinculación Inicial de la Cuenta](#-paso-2-vinculación-inicial-de-la-cuenta)
 4. [🔌 Paso 3: Conectar Clientes y Unidades de Red](#-paso-3-conectar-clientes-y-unidades-de-red)
-5. [⚙️ Variables de Entorno Principales y Alertas de Telegram](#️-variables-de-entorno-principales-y-alertas-de-telegram)
-6. [⚠️ Aspectos Clave a Tener en Cuenta](#️-aspectos-clave-a-tener-en-cuenta)
-7. [📚 Documentación Detallada](#-documentación-detallada)
-8. [⚖️ Aviso Legal y Marcas](#️-aviso-legal-y-marcas)
-9. [📄 Licencia](#-licencia)
+5. [🌐 Explorador Web (`:5050`) y Galería Virtual (`/_gallery`)](#-explorador-web-5050-y-galería-virtual-_gallery)
+6. [⚙️ Variables de Entorno Principales y Alertas de Telegram](#️-variables-de-entorno-principales-y-alertas-de-telegram)
+7. [⚠️ Aspectos Clave a Tener en Cuenta](#️-aspectos-clave-a-tener-en-cuenta)
+8. [📚 Documentación Detallada](#-documentación-detallada)
+9. [⚖️ Aviso Legal y Marcas](#️-aviso-legal-y-marcas)
+10. [📄 Licencia](#-licencia)
 
 ---
 
@@ -40,6 +41,8 @@ Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones
 * 🔄 **WebDAV Completo (RFC 4918) + Cuotas Virtuales:** Compatible con `PROPFIND`, `PUT` en streaming, `GET`/`HEAD` con `Range`, `MKCOL`, `DELETE`, `MOVE`, `COPY`, bloqueos `LOCK`/`UNLOCK` y espacio virtual RFC 4331 para HyperBackup y Duplicati.
 * 🚦 **Control de Concurrencia y Resiliencia WAF:** Gestiona subidas y descargas paralelas (`2` subidas / `4` descargas por defecto), huella TLS adaptada y protección frente a colisiones de nombres o bloqueos de CloudFront.
 * 🔔 **Alertas de Telegram desde el Arranque (v2.5.6):** Notificaciones automáticas desde el primer segundo si configuras `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (aviso de inicio, cuenta sin vincular, caducidad de sesión o fallos críticos), sin necesidad de abrir antes el panel web.
+* 🌐 **Explorador Web Ágil (`:5050`) y Sesión Compartida:** Navega por tus archivos y la galería desde el navegador en vista de listado rápida (100 % offline), con búsqueda instantánea, subida por **Drag & Drop** (conservando la fecha del archivo), creación de carpetas, renombrado y borrado, compartiendo sesión desde el botón **📁 Explorador** del Dashboard (`:5000`).
+* 🖼️ **Galería Virtual (`/_gallery`):** Carpeta virtual opcional para listar, descargar, subir y borrar fotos y vídeos sueltos de la Galería (`folder_id = 0`) clasificados automáticamente por fecha (`AAAA/MM`).
 * 🌐 **Modo Web Opcional:** Alternativa basada en la sesión web oficial (`micloud.movistar.es`) con renovación automática cada 24 h si el flujo OAuth del cliente de escritorio falla. Ver [docs/web-mode.md](docs/web-mode.md).
 * 🍓 **Ligero también en equipos pequeños:**
   * cola de subidas común con contrapresión y prioridades;
@@ -165,6 +168,30 @@ Abre el panel web (`:5000`), pulsa **🔐 Abrir inicio de sesión**, entra con *
 
 ---
 
+## 🌐 Explorador Web (`:5050`) y Galería Virtual (`/_gallery`)
+
+### 🗂️ Explorador Web Integrado en `:5050`
+Además de usar clientes WebDAV (WinSCP, Rclone, Finder, Synology File Station, etc.), puedes abrir **`http://IP_DE_TU_SERVIDOR:5050/`** directamente en tu navegador:
+* **Acceso único con el Dashboard (`:5000`):** Inicia sesión en `:5000` y pulsa **📁 Explorador** en la cabecera para entrar en `:5050` sin volver a introducir usuario y contraseña *(si publicas WebDAV en otro puerto distinto de `5050`, define `WEBDAV_HOST_PORT`)*. Si abres `:5050` directamente en el navegador, te mostrará la pantalla de login web (`/__login`) en lugar de la ventana nativa Basic Auth.
+* **Vista en modo listado 100 % offline:** Tabla ligera y rápida (sin miniaturas pesadas de imágenes), búsqueda instantánea (`/`), filtro por tipo, ordenación por columnas y *breadcrumbs*.
+* **Gestión directa:** Arrastra y suelta (**Drag & Drop**) para subir archivos enviando automáticamente la fecha de modificación (`X-OC-Mtime`), crea carpetas (`+ Carpeta`), descarga, renombra o envía a la papelera desde el menú `⋮`. *(Nota: en carpetas, Movistar/O2 Cloud no proporciona tamaño agregado desde la API).*
+
+### 🖼️ Cómo funcionan las Carpetas Virtuales de `/_gallery`
+Al activar `GALLERY_ENABLED=true`, aparece en WebDAV y en el explorador web la carpeta **`/_gallery`** con las fotos y vídeos de tu Galería que no pertenecen a carpetas de «Mis Archivos» (`folder_id = 0`).
+
+* **Las carpetas `AAAA/MM` son virtuales:** **No existen** como carpetas reales en Movistar ni en O2 Cloud. Es el proxy quien clasifica dinámicamente cada foto o vídeo en `/AAAA/MM` (o `/unknown` si no tiene fecha) según la fecha real del elemento.
+* **Sin mover nada entre carpetas y sin duplicados:** No hace falta subir a una carpeta temporal para luego mover el archivo; si subes una foto a `/_gallery/` (o dentro de cualquier subcarpeta `AAAA/MM`), el proxy la envía a la Galería y la coloca automáticamente en el año y mes que corresponda a su fecha. Si vuelves a subir un archivo con el mismo nombre a `/_gallery/`, se sobrescribe *in-place* sin crear duplicados.
+* **¿Cómo se calcula la fecha al subir (`GALLERY_UPLOAD=true`)?** Por orden de prioridad:
+  1. Cabecera **`X-OC-Mtime`** (la envían clientes como el **Explorador Web `:5050`** o Rclone).
+  2. Metadatos **EXIF** internos de la foto (`DateTimeOriginal` / `DateTimeDigitized` / `DateTime`).
+  3. **Fecha deducida del nombre del archivo** (útil para capturas PNG sin EXIF, p. ej. `Captura de pantalla AAAA-MM-DD HHMMSS`, `Screenshot_AAAAMMDD-HHMMSS`, `IMG_AAAAMMDD_HHMMSS` o WhatsApp `IMG-AAAAMMDD-WA...`).
+  * 💡 **Consejo para archivos sin EXIF (escaneos, capturas o descargas de PC):** Muchos clientes WebDAV (como el Explorador de Windows o WinSCP en determinadas subidas) no envían la fecha del sistema de archivos antes del `PUT` (en Windows puedes ver una fecha en las propiedades del archivo aunque el fichero no lleve etiqueta EXIF interna). En esos casos, súbelos por **Drag & Drop desde el Explorador Web (`:5050`)** o añade las cabeceras de fecha antes de subir con herramientas gratuitas como **ExifTool** o **ExifToolGUI**.
+
+> [!WARNING]
+> Si activas `GALLERY_ENABLED=true` y ejecutas `rclone sync <local> remoto:` contra la raíz `/`, añade **`--exclude "/_gallery/**"`** (o el nombre que uses en `GALLERY_DIR`) para evitar que `rclone` intente borrar la carpeta virtual.
+
+---
+
 ## ⚙️ Variables de Entorno Principales y Alertas de Telegram
 
 Estas son las variables habituales para el primer despliegue:
@@ -173,8 +200,14 @@ Estas son las variables habituales para el primer despliegue:
 | :--- | :--- | :--- |
 | `WEBDAV_USER` | *(vacío)* | Usuario para clientes WebDAV (y para el panel web si `WEBUI_USER` no se define). |
 | `WEBDAV_PASSWORD` | *(vacío)* | Contraseña para clientes WebDAV. |
+| `WEBDAV_HOST_PORT` | `5050` | Puerto externo del explorador WebDAV enlazado desde el botón **📁 Explorador** del panel (`:5000`). |
 | `WEBUI_USER` | `WEBDAV_USER` | Usuario independiente opcional para acceder al panel web (`:5000`). |
 | `WEBUI_PASSWORD` | `WEBDAV_PASSWORD` | Contraseña independiente opcional para el panel web. |
+| `GALLERY_ENABLED` | `false` | Activa la carpeta virtual `/_gallery` en WebDAV y el explorador web (solo lectura por defecto). |
+| `GALLERY_DIR` | `_gallery` | Nombre de la carpeta virtual en `/` (si existe una carpeta real con ese nombre, prevalece la real). |
+| `GALLERY_LAYOUT` | `year-month` | Organización virtual: `year-month` (`/AAAA/MM` y `/unknown`, recomendada) o `flat`. |
+| `GALLERY_UPLOAD` | `false` | Permite subir fotos/vídeos directamente a `/_gallery` (conservando `X-OC-Mtime`, EXIF o fecha del nombre). |
+| `GALLERY_DELETE` | `false` | Permite enviar a la papelera elementos de `/_gallery` (mantiene bloqueado borrar carpetas virtuales). |
 | `TELEGRAM_BOT_TOKEN` | *(vacío)* | Token de tu bot de Telegram para alertas operativas y de sesión. |
 | `TELEGRAM_CHAT_ID` | *(vacío)* | Chat o canal de Telegram donde recibir las notificaciones. |
 | `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave maestra opcional para cifrar con **AES-256-GCM** los tokens guardados en disco. |

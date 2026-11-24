@@ -928,7 +928,7 @@ func (r *responseInterceptor) flush() {
 			firstResp = emptyQuotaRegex.ReplaceAllString(firstResp, "")
 			firstResp = empty404Regex.ReplaceAllString(firstResp, "")
 
-			if strings.Contains(restXML, "quota-") {
+			if strings.Contains(restXML, "quota-") || strings.Contains(restXML, "QUOTA-") {
 				restXML = anyQuotaRegex.ReplaceAllString(restXML, "")
 				restXML = emptyQuotaRegex.ReplaceAllString(restXML, "")
 				restXML = empty404Regex.ReplaceAllString(restXML, "")

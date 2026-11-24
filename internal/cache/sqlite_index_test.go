@@ -57,11 +57,15 @@ func TestMetadataStore_BinaryCollationUsesCompositeIndex(t *testing.T) {
 		t.Fatalf("UpsertMediaBatch: %v", err)
 	}
 
-	// 1. Modo por defecto (COLLATE BINARY): debe usar ambos campos (folder_id y name) del índice _bin
+	// 1. Modo por defecto (COLLATE BINARY): debe usar ambos campos (folder_id y name) del índice _bin,
+	// incluso con el ORDER BY real de GetMediaByFolderAndName / GetFolderByParentAndName.
 	mediaPlanBin := explainQueryPlan(
 		t, store,
-		`SELECT id FROM media WHERE folder_id = ? AND name = ? COLLATE BINARY`,
-		1000, "duplicati-b1234.dblock.zip.aes",
+		`SELECT id, name, size, url, etag, folder_id, creation_date, modification_date
+		 FROM media
+		 WHERE folder_id = ? AND name = ? COLLATE BINARY
+		 ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END, modification_date DESC, id DESC`,
+		1000, "duplicati-b1234.dblock.zip.aes", "duplicati-b1234.dblock.zip.aes",
 	)
 	if !strings.Contains(mediaPlanBin, "idx_media_folder_name_bin") || !strings.Contains(mediaPlanBin, "folder_id=? AND name=?") {
 		t.Fatalf("BINARY media lookup debe usar idx_media_folder_name_bin(folder_id=? AND name=?), plan:\n%s", mediaPlanBin)
@@ -69,14 +73,18 @@ func TestMetadataStore_BinaryCollationUsesCompositeIndex(t *testing.T) {
 
 	folderPlanBin := explainQueryPlan(
 		t, store,
-		`SELECT id FROM folders WHERE parent_id = ? AND name = ? COLLATE BINARY`,
-		100, "Sub_042",
+		`SELECT id, name, parent_id, magic, offline, creation_date, modification_date
+		 FROM folders
+		 WHERE parent_id = ? AND name = ? COLLATE BINARY
+		 ORDER BY CASE WHEN name = ? COLLATE BINARY THEN 0 ELSE 1 END
+		 LIMIT 1`,
+		100, "Sub_042", "Sub_042",
 	)
 	if !strings.Contains(folderPlanBin, "idx_folders_parent_name_bin") || !strings.Contains(folderPlanBin, "parent_id=? AND name=?") {
 		t.Fatalf("BINARY folder lookup debe usar idx_folders_parent_name_bin(parent_id=? AND name=?), plan:\n%s", folderPlanBin)
 	}
 
-	// 2. Modo opcional (COLLATE NOCASE): debe seguir usando el índice NOCASE
+	// 2. Modo opcional (COLLATE NOCASE): debe seguir usando los índices NOCASE
 	mediaPlanNocase := explainQueryPlan(
 		t, store,
 		`SELECT id FROM media WHERE folder_id = ? AND name = ? COLLATE NOCASE`,
@@ -86,7 +94,7 @@ func TestMetadataStore_BinaryCollationUsesCompositeIndex(t *testing.T) {
 		t.Fatalf("NOCASE media lookup debe usar idx_media_folder_name(folder_id=? AND name=?), plan:\n%s", mediaPlanNocase)
 	}
 
-	// 3. Verificación funcional en modo BINARY (distingue mayúsculas)
+	// 3. Verificación funcional de archivos y carpetas en modo BINARY (distingue mayúsculas) vs NOCASE
 	got, err := store.GetMediaByFolderAndName(1000, "duplicati-b1234.dblock.zip.aes")
 	if err != nil || got == nil || got.ID != "m-1234" {
 		t.Fatalf("GetMediaByFolderAndName exacto falló: got=%+v err=%v", got, err)
@@ -94,5 +102,20 @@ func TestMetadataStore_BinaryCollationUsesCompositeIndex(t *testing.T) {
 	miss, err := store.GetMediaByFolderAndName(1000, "DUPLICATI-B1234.DBLOCK.ZIP.AES")
 	if err != nil || miss != nil {
 		t.Fatalf("GetMediaByFolderAndName con distintas mayúsculas en modo BINARY debe devolver nil, got=%+v err=%v", miss, err)
+	}
+
+	gotF, err := store.GetFolderByParentAndName(100, "Sub_042")
+	if err != nil || gotF == nil || gotF.ID != 1042 {
+		t.Fatalf("GetFolderByParentAndName exacto falló: got=%+v err=%v", gotF, err)
+	}
+	missF, err := store.GetFolderByParentAndName(100, "sub_042")
+	if err != nil || missF != nil {
+		t.Fatalf("GetFolderByParentAndName con distintas mayúsculas en modo BINARY debe devolver nil, got=%+v err=%v", missF, err)
+	}
+
+	store.SetNameFolding(func() bool { return true })
+	gotFNocase, err := store.GetFolderByParentAndName(100, "sub_042")
+	if err != nil || gotFNocase == nil || gotFNocase.ID != 1042 {
+		t.Fatalf("GetFolderByParentAndName en modo NOCASE falló: got=%+v err=%v", gotFNocase, err)
 	}
 }
