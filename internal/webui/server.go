@@ -190,7 +190,7 @@ func (s *Server) Routes() http.Handler {
 	return s.securityMiddleware(mux)
 }
 
-func setPanelSecurityHeaders(w http.ResponseWriter) {
+func setPanelSecurityHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "same-origin")
@@ -206,7 +206,7 @@ func setPanelSecurityHeaders(w http.ResponseWriter) {
 
 func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setPanelSecurityHeaders(w)
+		setPanelSecurityHeaders(w, r)
 
 		// /health (para healthchecks de Docker), favicon y recursos estáticos siempre accesibles sin autenticación
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" || strings.HasPrefix(r.URL.Path, "/static/") {
@@ -770,7 +770,7 @@ func (s *Server) BrowserAuth() *webdav.BrowserAuth {
 			return s.validateSession(s.getSessionToken(r))
 		},
 		HandleLogin: func(w http.ResponseWriter, r *http.Request) {
-			setPanelSecurityHeaders(w)
+			setPanelSecurityHeaders(w, r)
 			if r.Method == http.MethodPost && strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
 				http.Error(w, "Forbidden (cross-site request)", http.StatusForbidden)
 				return
@@ -778,7 +778,7 @@ func (s *Server) BrowserAuth() *webdav.BrowserAuth {
 			s.handleLoginWithAction(w, r, "/__login")
 		},
 		HandleLogout: func(w http.ResponseWriter, r *http.Request) {
-			setPanelSecurityHeaders(w)
+			setPanelSecurityHeaders(w, r)
 			if r.Method == http.MethodPost && (!validateSameOrigin(r) || strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")) {
 				http.Error(w, "Forbidden (CSRF)", http.StatusForbidden)
 				return
