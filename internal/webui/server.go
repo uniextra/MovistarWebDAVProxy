@@ -382,7 +382,10 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) boo
 func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	// PDTE revisar peticiones API, pero asegura se sirvan frescas
-	//w.Header().Set("Cache-Control", "no-store")
+	// Se entiende que todas las llamadas que usan jsonResponse son datos dinámicos de la API y ninguna debería cachearse nunca.
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
@@ -393,6 +396,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// w.Header().Set("Cache-Control", "no-cache") ???
 	w.WriteHeader(http.StatusOK)
 	rendered := bytes.ReplaceAll(indexHTML, []byte("{{.Version}}"), []byte(config.Version))
 	_, _ = w.Write(rendered)
