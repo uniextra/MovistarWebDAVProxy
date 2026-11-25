@@ -38,6 +38,18 @@
   </nav>
 
   <main class="container">
+    <div class="intro-banner" role="region" aria-label="Sobre esta herramienta">
+      <div class="intro-copy">
+        <p class="intro-lead">
+          <strong>Configurador interactivo</strong> para generar tu <code>docker-compose.yml</code>, comando <code>docker run</code>, archivo <code>.env</code> y ajustes de clientes (Rclone, Synology HyperBackup y Duplicati) sin editar archivos a mano.
+        </p>
+      </div>
+      <div class="intro-privacy">
+        <span class="intro-privacy-icon" aria-hidden="true">🔒</span>
+        <span><strong>100 % local en tu navegador:</strong> ninguna contraseña, token ni clave sale de tu equipo.</span>
+      </div>
+    </div>
+
     <!-- TAB 1: DOCKER SETUP -->
     <section id="tab-docker" class="tab-panel">
       <div class="split-layout">
@@ -244,8 +256,9 @@
                       <input id="trustedProxies" type="text" class="mono-input" value="127.0.0.1,172.18.0.0/16">
                     </div>
                     <div class="input-wrap">
-                      <label class="input-label" for="webdavHostPort">Puerto externo enlace «Explorador» <span class="badge-env">WEBDAV_HOST_PORT</span></label>
-                      <input id="webdavHostPort" type="number" min="1" max="65535" value="" placeholder="Solo si difiere del puerto publicado">
+                      <label class="input-label" for="webdavHostPort">Puerto externo tras el proxy (opcional) <span class="badge-env">WEBDAV_HOST_PORT</span></label>
+                      <input id="webdavHostPort" type="number" min="1" max="65535" value="" placeholder="Hereda Paso 3 (ej. 443 o 8443)" aria-describedby="webdavHostPortHint">
+                      <span id="webdavHostPortHint" class="field-hint">Solo rellénalo si tu proxy inverso expone WebDAV en un puerto distinto al publicado por Docker.</span>
                     </div>
                   </div>
                 </div>
@@ -303,11 +316,13 @@
               <div class="form-grid">
                 <div class="input-wrap">
                   <label class="input-label" for="webPort">Puerto Panel Web (<code>:5000</code>)</label>
-                  <input id="webPort" type="number" min="1" max="65535" value="5000">
+                  <input id="webPort" type="number" min="1" max="65535" value="5000" aria-describedby="webPortHint">
+                  <span id="webPortHint" class="field-hint">Puerto del host mapeado al <code>:5000</code> interno (no requiere variable extra).</span>
                 </div>
                 <div class="input-wrap">
                   <label class="input-label" for="webdavPort">Puerto WebDAV y Explorador (<code>:8080</code>)</label>
-                  <input id="webdavPort" type="number" min="1" max="65535" value="5050">
+                  <input id="webdavPort" type="number" min="1" max="65535" value="5050" aria-describedby="webdavPortHint">
+                  <span id="webdavPortHint" class="field-hint">Mapea al <code>:8080</code> interno y actualiza <code>WEBDAV_HOST_PORT</code> automáticamente.</span>
                 </div>
                 <div class="input-wrap">
                   <label class="input-label" for="tzInput">Zona horaria <span class="badge-env">TZ</span></label>
@@ -494,7 +509,7 @@
               <span>🔒 Todo se genera en tu navegador</span>
             </div>
 
-            <div id="dynamicWarnings"></div>
+            <div id="dynamicWarnings" aria-live="polite"></div>
 
             <div class="next-steps">
               <h3>Pasos siguientes</h3>
