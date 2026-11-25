@@ -182,6 +182,7 @@ func (s *MetadataStore) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_folders_parent_name ON folders (parent_id, name COLLATE NOCASE);
+	CREATE INDEX IF NOT EXISTS idx_folders_parent_name_bin ON folders (parent_id, name COLLATE BINARY);
 	CREATE INDEX IF NOT EXISTS idx_folders_magic ON folders (magic);
 
 	CREATE TABLE IF NOT EXISTS media (
@@ -196,6 +197,7 @@ func (s *MetadataStore) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_media_folder_name ON media (folder_id, name COLLATE NOCASE);
+	CREATE INDEX IF NOT EXISTS idx_media_folder_name_bin ON media (folder_id, name COLLATE BINARY);
 
 	CREATE TABLE IF NOT EXISTS virtual_empty_files (
 		folder_id INTEGER NOT NULL,

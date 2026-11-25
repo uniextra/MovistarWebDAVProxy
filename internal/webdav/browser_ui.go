@@ -277,9 +277,55 @@ td.act-col{text-align:center;padding:4px 4px}
   padding:8px 14px;border-radius:8px;font-size:13px;box-shadow:0 8px 20px rgba(0,0,0,.45);
 }
 .toast[hidden]{display:none}
+.lightbox{
+  position:fixed;inset:0;z-index:80;
+  background:rgba(9,12,17,.94);
+  display:flex;flex-direction:column;
+}
+.lightbox[hidden]{display:none}
+.lb-top{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:10px 16px;background:rgba(21,25,33,.92);border-bottom:1px solid var(--border);
+}
+.lb-meta{display:flex;align-items:center;gap:10px;min-width:0}
+.lb-name{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-count{font-size:12px;color:var(--muted);white-space:nowrap}
+.lb-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.lb-body{
+  flex:1;position:relative;min-height:0;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+  padding:16px 76px;
+}
+.lb-stage{
+  max-width:100%;max-height:100%;
+  display:flex;align-items:center;justify-content:center;
+}
+.lb-stage img,.lb-stage video{
+  max-width:100%;max-height:calc(100vh - 96px);
+  object-fit:contain;border-radius:6px;
+  box-shadow:0 14px 40px rgba(0,0,0,.7);
+  background:#000;
+}
+.lb-msg{color:var(--muted);font-size:13.5px}
+.lb-nav{
+  position:absolute;top:50%;transform:translateY(-50%);
+  width:46px;height:68px;border-radius:10px;
+  border:1px solid #2d3646;background:rgba(21,25,33,.82);
+  color:var(--text);font-size:28px;line-height:1;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:background .12s,border-color .12s,opacity .12s;
+}
+.lb-nav:hover:not(:disabled){background:var(--surface-2);border-color:#4b5870}
+.lb-nav:disabled{opacity:.25;cursor:default}
+.lb-prev{left:14px}
+.lb-next{right:14px}
 @media (max-width:700px){
   .th-type,.th-date,td.type,td.date{display:none}
   .th-size{width:84px}
+  .lb-body{padding:12px 54px}
+  .lb-nav{width:38px;height:52px;font-size:24px}
+  .lb-prev{left:8px}
+  .lb-next{right:8px}
 }
 </style>
 </head>
@@ -394,6 +440,24 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
 </div>
 
 <div id="toast" class="toast" hidden></div>
+
+<div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Visor multimedia">
+  <div class="lb-top">
+    <div class="lb-meta">
+      <span id="lbName" class="lb-name"></span>
+      <span id="lbCount" class="lb-count"></span>
+    </div>
+    <div class="lb-actions">
+      <a id="lbDownload" class="btn" href="#" download>⬇ Descargar</a>
+      <button id="lbClose" type="button" class="btn" aria-label="Cerrar visor">✕</button>
+    </div>
+  </div>
+  <div id="lbBody" class="lb-body">
+    <button id="lbPrev" type="button" class="lb-nav lb-prev" aria-label="Elemento anterior">‹</button>
+    <div id="lbStage" class="lb-stage"></div>
+    <button id="lbNext" type="button" class="lb-nav lb-next" aria-label="Elemento siguiente">›</button>
+  </div>
+</div>
 
 <script nonce="{{.Nonce}}">
 (function(){
@@ -849,8 +913,153 @@ var browserBodyTmpl = template.Must(template.New("webdav-browser-body").Parse(`<
     });
   }
 
-  // Keyboard shortcuts: '/' focuses search, Escape closes menu/blurs
+  // Lightbox para navegar entre fotos y vídeos sin salir del explorador
+  var lightbox = document.getElementById('lightbox');
+  var lbName = document.getElementById('lbName');
+  var lbCount = document.getElementById('lbCount');
+  var lbDownload = document.getElementById('lbDownload');
+  var lbClose = document.getElementById('lbClose');
+  var lbBody = document.getElementById('lbBody');
+  var lbStage = document.getElementById('lbStage');
+  var lbPrev = document.getElementById('lbPrev');
+  var lbNext = document.getElementById('lbNext');
+  var lbItems = [];
+  var lbIndex = -1;
+
+  function clearLightboxMedia() {
+    if (!lbStage) return;
+    var activeVid = lbStage.querySelector('video');
+    if (activeVid) {
+      try { activeVid.pause(); } catch (_) {}
+      activeVid.removeAttribute('src');
+      try { activeVid.load(); } catch (_) {}
+    }
+    lbStage.innerHTML = '';
+  }
+
+  function renderLightbox() {
+    if (!lightbox || lbIndex < 0 || lbIndex >= lbItems.length) return;
+    var item = lbItems[lbIndex];
+    lbName.textContent = item.name;
+    lbCount.textContent = (lbIndex + 1) + ' / ' + lbItems.length;
+    lbDownload.href = item.href;
+    lbDownload.setAttribute('download', item.name || 'archivo');
+    lbPrev.disabled = lbIndex <= 0;
+    lbNext.disabled = lbIndex >= lbItems.length - 1;
+
+    clearLightboxMedia();
+    var loading = document.createElement('div');
+    loading.className = 'lb-msg';
+    loading.textContent = item.kind === 'video' ? 'Cargando vídeo...' : 'Cargando imagen...';
+    lbStage.appendChild(loading);
+
+    if (item.kind === 'video') {
+      var vid = document.createElement('video');
+      vid.controls = true;
+      vid.autoplay = true;
+      vid.playsInline = true;
+      vid.preload = 'metadata';
+      vid.hidden = true;
+      vid.onloadedmetadata = function() {
+        if (lbItems[lbIndex] !== item) return;
+        loading.remove();
+        vid.hidden = false;
+      };
+      vid.oncanplay = function() {
+        if (lbItems[lbIndex] !== item) return;
+        loading.remove();
+        vid.hidden = false;
+      };
+      vid.onerror = function() {
+        if (lbItems[lbIndex] !== item) return;
+        vid.hidden = true;
+        loading.textContent = 'No se pudo reproducir el vídeo en el navegador. Usa Descargar.';
+      };
+      vid.src = item.href;
+      lbStage.appendChild(vid);
+      return;
+    }
+
+    var img = document.createElement('img');
+    img.alt = item.name;
+    img.hidden = true;
+    img.onload = function() {
+      if (lbItems[lbIndex] !== item) return;
+      loading.remove();
+      img.hidden = false;
+    };
+    img.onerror = function() {
+      if (lbItems[lbIndex] !== item) return;
+      loading.textContent = 'No se pudo cargar la imagen.';
+    };
+    img.src = item.href;
+    lbStage.appendChild(img);
+  }
+
+  function openLightbox(row) {
+    if (!lightbox) return;
+    var rows = getRows().filter(function(r) {
+      return (r.dataset.kind === 'image' || r.dataset.kind === 'video') &&
+        r.dataset.dir !== 'true' && !r.classList.contains('hide');
+    });
+    lbItems = rows.map(function(r) {
+      return { href: r.dataset.href || '', name: r.dataset.name || '', kind: r.dataset.kind || 'image' };
+    });
+    lbIndex = rows.indexOf(row);
+    if (lbIndex < 0) return;
+    lightbox.hidden = false;
+    renderLightbox();
+  }
+
+  function closeLightbox() {
+    if (!lightbox || lightbox.hidden) return;
+    lightbox.hidden = true;
+    clearLightboxMedia();
+    lbItems = [];
+    lbIndex = -1;
+  }
+
+  if (lightbox) {
+    tbody.addEventListener('click', function(ev) {
+      if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+      var link = ev.target.closest('tr.row[data-kind="image"][data-dir="false"] a.name-link, tr.row[data-kind="video"][data-dir="false"] a.name-link');
+      if (!link) return;
+      var row = link.closest('tr.row');
+      if (!row) return;
+      ev.preventDefault();
+      closeMenu();
+      openLightbox(row);
+    });
+    lbPrev.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      if (lbIndex > 0) { lbIndex--; renderLightbox(); }
+    });
+    lbNext.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      if (lbIndex < lbItems.length - 1) { lbIndex++; renderLightbox(); }
+    });
+    lbClose.addEventListener('click', closeLightbox);
+    lbBody.addEventListener('click', function(ev) {
+      if (ev.target === lbBody || ev.target === lbStage) closeLightbox();
+    });
+  }
+
+  // Keyboard shortcuts: '/' focuses search, Escape closes menu/blurs, arrows navigate lightbox
   document.addEventListener('keydown', function(ev) {
+    if (lightbox && !lightbox.hidden) {
+      if (ev.key === 'Escape') {
+        closeLightbox();
+      } else if (ev.key === 'ArrowLeft' && lbIndex > 0) {
+        ev.preventDefault();
+        lbIndex--;
+        renderLightbox();
+      } else if (ev.key === 'ArrowRight' && lbIndex < lbItems.length - 1) {
+        ev.preventDefault();
+        lbIndex++;
+        renderLightbox();
+      }
+      return;
+    }
     if (ev.key === 'Escape') {
       closeMenu();
       if (document.activeElement === searchInput) {
@@ -1092,7 +1301,7 @@ func (s *Server) serveGalleryBrowserHTML(w http.ResponseWriter, r *http.Request,
 	nonce := newCSPNonce()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; script-src 'nonce-"+nonce+"'; connect-src 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; font-src 'self'; script-src 'nonce-"+nonce+"'; connect-src 'self'; frame-ancestors 'none'")
 
 	var loadErrMsg string
 	if r.Method == http.MethodHead {

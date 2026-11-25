@@ -26,11 +26,13 @@ Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones
 2. [🐳 Paso 1: Despliegue con Docker](#-paso-1-despliegue-con-docker)
 3. [🔑 Paso 2: Vinculación Inicial de la Cuenta](#-paso-2-vinculación-inicial-de-la-cuenta)
 4. [🔌 Paso 3: Conectar Clientes y Unidades de Red](#-paso-3-conectar-clientes-y-unidades-de-red)
-5. [⚙️ Variables de Entorno Principales y Alertas de Telegram](#️-variables-de-entorno-principales-y-alertas-de-telegram)
-6. [⚠️ Aspectos Clave a Tener en Cuenta](#️-aspectos-clave-a-tener-en-cuenta)
-7. [📚 Documentación Detallada](#-documentación-detallada)
-8. [⚖️ Aviso Legal y Marcas](#️-aviso-legal-y-marcas)
-9. [📄 Licencia](#-licencia)
+5. [🌐 Explorador Web (`:5050`)](#-explorador-web-5050)
+6. [🖼️ Galería Virtual (`/_gallery`) — Opcional](#️-galería-virtual-_gallery--opcional)
+7. [⚙️ Variables de Entorno Principales y Alertas de Telegram](#️-variables-de-entorno-principales-y-alertas-de-telegram)
+8. [⚠️ Aspectos Clave a Tener en Cuenta](#️-aspectos-clave-a-tener-en-cuenta)
+9. [📚 Documentación Detallada](#-documentación-detallada)
+10. [⚖️ Aviso Legal y Marcas](#️-aviso-legal-y-marcas)
+11. [📄 Licencia](#-licencia)
 
 ---
 
@@ -40,6 +42,8 @@ Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones
 * 🔄 **WebDAV Completo (RFC 4918) + Cuotas Virtuales:** Compatible con `PROPFIND`, `PUT` en streaming, `GET`/`HEAD` con `Range`, `MKCOL`, `DELETE`, `MOVE`, `COPY`, bloqueos `LOCK`/`UNLOCK` y espacio virtual RFC 4331 para HyperBackup y Duplicati.
 * 🚦 **Control de Concurrencia y Resiliencia WAF:** Gestiona subidas y descargas paralelas (`2` subidas / `4` descargas por defecto), huella TLS adaptada y protección frente a colisiones de nombres o bloqueos de CloudFront.
 * 🔔 **Alertas de Telegram desde el Arranque (v2.5.6):** Notificaciones automáticas desde el primer segundo si configuras `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (aviso de inicio, cuenta sin vincular, caducidad de sesión o fallos críticos), sin necesidad de abrir antes el panel web.
+* 🌐 **Explorador Web Ágil (`:5050`) y Sesión Compartida:** Activo por defecto desde la `v2.7.0` (incluso con `GALLERY_ENABLED=false`). Permite navegar por tus carpetas («Mis Archivos»), buscar al instante, crear carpetas, subir archivos por **Drag & Drop**, descargar, renombrar, borrar y ver fotos/vídeos con visor multimedia 100 % offline, compartiendo sesión desde **📁 Explorador** en el Dashboard (`:5000`).
+* 🖼️ **Galería Virtual (`/_gallery`):** Carpeta virtual opcional para listar, descargar, subir y borrar fotos y vídeos sueltos de la Galería (`folder_id = 0`) clasificados automáticamente por fecha (`AAAA/MM`).
 * 🌐 **Modo Web Opcional:** Alternativa basada en la sesión web oficial (`micloud.movistar.es`) con renovación automática cada 24 h si el flujo OAuth del cliente de escritorio falla. Ver [docs/web-mode.md](docs/web-mode.md).
 * 🍓 **Ligero también en equipos pequeños:**
   * cola de subidas común con contrapresión y prioridades;
@@ -78,6 +82,14 @@ services:
       # Opcional: credenciales distintas para el panel web (si no se definen, usa las de WebDAV)
       # - WEBUI_USER=admin
       # - WEBUI_PASSWORD=OtroPasswordSeguro
+      # Opcional: puerto externo del explorador WebDAV si no usas 5050
+      # - WEBDAV_HOST_PORT=5050
+      # Opcional: carpeta virtual de Galería (/_gallery)
+      # - GALLERY_ENABLED=true          # Expone /_gallery en WebDAV y Explorador Web
+      # - GALLERY_LAYOUT=year-month     # year-month (/AAAA/MM, recomendado) o flat
+      # - GALLERY_DIR=_gallery          # Nombre de la carpeta virtual en /
+      # - GALLERY_UPLOAD=true           # Permite subir fotos/vídeos a /_gallery
+      # - GALLERY_DELETE=true           # Permite mandar elementos de /_gallery a la papelera
       # Opcional: notificaciones de Telegram activas desde el arranque del contenedor
       - TELEGRAM_BOT_TOKEN=
       - TELEGRAM_CHAT_ID=
@@ -87,7 +99,7 @@ services:
       # - WEBDAV_TMPDIR=/app/tmp
     ports:
       - "${BIND_IP:-0.0.0.0}:5000:5000"   # Panel Web de Gestión y Logs (usa BIND_IP=127.0.0.1 para solo localhost)
-      - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV (puerto 5050 en el host)
+      - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV y Explorador Web (puerto 5050 en el host)
     volumes:
       - movistar_tokens:/app/tokens
       # Opcional (requiere WEBDAV_TMPDIR=/app/tmp): útil en NAS con poca RAM para subidas grandes
@@ -168,6 +180,33 @@ Abre el panel web (`:5000`), pulsa **🔐 Abrir inicio de sesión**, entra con *
 
 ---
 
+## 🌐 Explorador Web (`:5050`)
+
+Desde la versión **`v2.7.0`**, el explorador web viene **activo por defecto** en **`http://IP_DE_TU_SERVIDOR:5050/`**, **aunque no tengas activada la galería virtual (`GALLERY_ENABLED=false`)**. Además de conectar clientes WebDAV (WinSCP, Rclone, Finder, Synology File Station, etc.), puedes gestionar directamente tus carpetas y archivos desde cualquier navegador:
+
+* **Gestión completa de archivos y carpetas («Mis Archivos»):** Crea carpetas (**+ Carpeta**), sube archivos arrastrando y soltando (**Drag & Drop** conservando la fecha de modificación `X-OC-Mtime`), descarga, renombra o envía elementos a la papelera desde el menú `⋮`. *(Nota: en carpetas, Movistar/O2 Cloud no proporciona tamaño agregado desde la API).*
+* **Acceso único con el Dashboard (`:5000`):** Inicia sesión en `:5000` y pulsa **📁 Explorador** en la cabecera para entrar en `:5050` sin volver a introducir usuario y contraseña *(si publicas WebDAV en otro puerto distinto de `5050`, define `WEBDAV_HOST_PORT`)*. Si abres `:5050` directamente en el navegador, te mostrará la pantalla de login web (`/__login`) en lugar de la ventana nativa Basic Auth.
+* **Vista en modo listado 100 % offline + visor multimedia:** Tabla ligera y rápida (sin miniaturas pesadas de imágenes), búsqueda instantánea (`/`), filtro por tipo, ordenación por columnas y *breadcrumbs*. Al abrir cualquier foto o vídeo se muestra en un **visor integrado** para avanzar o retroceder entre ellos (`‹` / `›` y teclas `←` / `→`) sin salir del explorador.
+
+---
+
+## 🖼️ Galería Virtual (`/_gallery`) — Opcional
+
+Si además activas **`GALLERY_ENABLED=true`**, aparece tanto en WebDAV como en el Explorador Web la carpeta **`/_gallery`** con las fotos y vídeos de tu Galería que no pertenecen a carpetas de «Mis Archivos» (`folder_id = 0`).
+
+* **Las carpetas `AAAA/MM` son virtuales:** **No existen** como carpetas reales en Movistar ni en O2 Cloud. Es el proxy quien clasifica dinámicamente cada foto o vídeo en `/AAAA/MM` (o `/unknown` si no tiene fecha) según la fecha real del elemento.
+* **Sin mover nada entre carpetas y sin duplicados:** No hace falta subir a una carpeta temporal para luego mover el archivo; si subes una foto a `/_gallery/` (o dentro de cualquier subcarpeta `AAAA/MM`), el proxy la envía a la Galería y la coloca automáticamente en el año y mes que corresponda a su fecha. Si vuelves a subir un archivo con el mismo nombre a `/_gallery/`, se sobrescribe *in-place* sin crear duplicados.
+* **¿Cómo se calcula la fecha al subir (`GALLERY_UPLOAD=true`)?** Por orden de prioridad:
+  1. Cabecera **`X-OC-Mtime`** (la envían clientes como el **Explorador Web `:5050`** o Rclone).
+  2. Metadatos **EXIF** internos de la foto (`DateTimeOriginal` / `DateTimeDigitized` / `DateTime`).
+  3. **Fecha deducida del nombre del archivo** (útil para capturas PNG sin EXIF, p. ej. `Captura de pantalla AAAA-MM-DD HHMMSS`, `Screenshot_AAAAMMDD-HHMMSS`, `IMG_AAAAMMDD_HHMMSS` o WhatsApp `IMG-AAAAMMDD-WA...`).
+  * 💡 **Consejo para archivos sin EXIF (escaneos, capturas o descargas de PC):** Muchos clientes WebDAV (como el Explorador de Windows o WinSCP en determinadas subidas) no envían la fecha del sistema de archivos antes del `PUT` (en Windows puedes ver una fecha en las propiedades del archivo aunque el fichero no lleve etiqueta EXIF interna). En esos casos, súbelos por **Drag & Drop desde el Explorador Web (`:5050`)** o añade las cabeceras de fecha antes de subir con herramientas gratuitas como **ExifTool** o **ExifToolGUI**.
+
+> [!WARNING]
+> Si activas `GALLERY_ENABLED=true` y ejecutas `rclone sync <local> remoto:` contra la raíz `/`, añade **`--exclude "/_gallery/**"`** (o el nombre que uses en `GALLERY_DIR`) para evitar que `rclone` intente borrar la carpeta virtual.
+
+---
+
 ## ⚙️ Variables de Entorno Principales y Alertas de Telegram
 
 Estas son las variables habituales para el primer despliegue:
@@ -176,8 +215,14 @@ Estas son las variables habituales para el primer despliegue:
 | :--- | :--- | :--- |
 | `WEBDAV_USER` | *(vacío)* | Usuario para clientes WebDAV (y para el panel web si `WEBUI_USER` no se define). |
 | `WEBDAV_PASSWORD` | *(vacío)* | Contraseña para clientes WebDAV. |
+| `WEBDAV_HOST_PORT` | `5050` | Puerto externo del explorador WebDAV enlazado desde el botón **📁 Explorador** del panel (`:5000`). |
 | `WEBUI_USER` | `WEBDAV_USER` | Usuario independiente opcional para acceder al panel web (`:5000`). |
 | `WEBUI_PASSWORD` | `WEBDAV_PASSWORD` | Contraseña independiente opcional para el panel web. |
+| `GALLERY_ENABLED` | `false` | Activa la carpeta virtual `/_gallery` en WebDAV y el explorador web (solo lectura por defecto). |
+| `GALLERY_DIR` | `_gallery` | Nombre de la carpeta virtual en `/` (si existe una carpeta real con ese nombre, prevalece la real). |
+| `GALLERY_LAYOUT` | `year-month` | Organización virtual: `year-month` (`/AAAA/MM` y `/unknown`, recomendada) o `flat`. |
+| `GALLERY_UPLOAD` | `false` | Permite subir fotos/vídeos directamente a `/_gallery` (conservando `X-OC-Mtime`, EXIF o fecha del nombre). |
+| `GALLERY_DELETE` | `false` | Permite enviar a la papelera elementos de `/_gallery` (mantiene bloqueado borrar carpetas virtuales). |
 | `TELEGRAM_BOT_TOKEN` | *(vacío)* | Token de tu bot de Telegram para alertas operativas y de sesión. |
 | `TELEGRAM_CHAT_ID` | *(vacío)* | Chat o canal de Telegram donde recibir las notificaciones. |
 | `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave maestra opcional para cifrar con **AES-256-GCM** los tokens guardados en disco. |

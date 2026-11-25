@@ -684,6 +684,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.fs != nil {
 			s.fs.MaybeTriggerSync()
 		}
+		r = r.WithContext(withPropfindCache(r.Context()))
 		rw := &responseInterceptor{
 			ResponseWriter: lw,
 			body:           bytes.NewBuffer(nil),
@@ -916,27 +917,40 @@ func (r *responseInterceptor) flush() {
 
 		quotaXML := fmt.Sprintf("<%[1]s:quota-available-bytes>%[2]d</%[1]s:quota-available-bytes><%[1]s:quota-used-bytes>%[3]d</%[1]s:quota-used-bytes>", prefix, availBytes, usedBytes)
 
-		// 1. Limpiar cualquier tag vacío de cuota
-		rawXML = anyQuotaRegex.ReplaceAllString(rawXML, "")
-		rawXML = emptyQuotaRegex.ReplaceAllString(rawXML, "")
-
-		// 2. Limpiar cualquier <D:propstat> 404 que haya quedado con <D:prop></D:prop> vacío
-		rawXML = empty404Regex.ReplaceAllString(rawXML, "")
-
-		// 3. Inyectar quotaXML SOLO en el primer <response> (el recurso solicitado)
+		// Limpiar e inyectar quotaXML SOLO en el primer <response> (el recurso solicitado).
+		// En restXML solo limpiamos si realmente contiene tags "quota-" (p. ej. PROPFIND con
+		// prop explícita de cuota), evitando copiar/escanear decenas de MB en allprop.
 		if locResp := reResp.FindStringIndex(rawXML); locResp != nil {
 			firstResp := rawXML[:locResp[1]]
 			restXML := rawXML[locResp[1]:]
+
+			firstResp = anyQuotaRegex.ReplaceAllString(firstResp, "")
+			firstResp = emptyQuotaRegex.ReplaceAllString(firstResp, "")
+			firstResp = empty404Regex.ReplaceAllString(firstResp, "")
+
+			if strings.Contains(restXML, "quota-") || strings.Contains(restXML, "QUOTA-") {
+				restXML = anyQuotaRegex.ReplaceAllString(restXML, "")
+				restXML = emptyQuotaRegex.ReplaceAllString(restXML, "")
+				restXML = empty404Regex.ReplaceAllString(restXML, "")
+			}
 
 			if loc200 := re200.FindStringIndex(firstResp); loc200 != nil {
 				firstResp = firstResp[:loc200[0]] + quotaXML + "</" + prefix + ":prop><" + prefix + ":status>HTTP/1.1 200 OK</" + prefix + ":status>" + firstResp[loc200[1]:]
 			} else if idxProp := strings.Index(firstResp, "</"+prefix+":prop>"); idxProp != -1 {
 				firstResp = firstResp[:idxProp] + quotaXML + firstResp[idxProp:]
-			} else {
+			} else if locEnd := reResp.FindStringIndex(firstResp); locEnd != nil {
 				newPropstat := fmt.Sprintf("<%[1]s:propstat><%[1]s:prop>%[2]s</%[1]s:prop><%[1]s:status>HTTP/1.1 200 OK</%[1]s:status></%[1]s:propstat>", prefix, quotaXML)
-				firstResp = firstResp[:locResp[0]] + newPropstat + firstResp[locResp[0]:]
+				firstResp = firstResp[:locEnd[0]] + newPropstat + firstResp[locEnd[0]:]
 			}
-			rawXML = firstResp + restXML
+
+			for k, v := range r.Header() {
+				r.ResponseWriter.Header()[k] = v
+			}
+			r.ResponseWriter.Header().Set("Content-Length", fmt.Sprintf("%d", len(firstResp)+len(restXML)))
+			r.ResponseWriter.WriteHeader(r.statusCode)
+			_, _ = io.WriteString(r.ResponseWriter, firstResp)
+			_, _ = io.WriteString(r.ResponseWriter, restXML)
+			return
 		}
 	}
 
