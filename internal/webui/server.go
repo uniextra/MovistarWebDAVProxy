@@ -195,9 +195,13 @@ func setPanelSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("Content-Security-Policy", panelCSP)
-	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), bluetooth=()")
+
+	// Solo enviar COOP en contextos seguros (HTTPS o localhost) para evitar avisos en HTTP por IP local
+	if isTrustworthyContext(r) {
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	}	
 }
 
 func (s *Server) securityMiddleware(next http.Handler) http.Handler {
@@ -281,6 +285,20 @@ func isLoopbackHost(h string) bool {
 	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
+}
+
+func isTrustworthyContext(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if isHTTPS(r) {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+	return isLoopbackHost(host)
 }
 
 func validateSameOrigin(r *http.Request) bool {
