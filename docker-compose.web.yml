@@ -4,6 +4,9 @@
 #
 #   docker compose -f docker-compose.web.yml up -d --build
 #
+# Generador interactivo preconfigurado en Modo Web:
+#   https://uniextra.github.io/MovistarWebDAVProxy/#modo-web
+#
 # Después, abre el panel (puerto 5000) y pulsa "Abrir inicio de sesión".
 services:
   movistar-webdav-proxy-web:

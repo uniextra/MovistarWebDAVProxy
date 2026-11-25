@@ -69,7 +69,8 @@
     var encryptKey = cleanSingleLine($("encryptKey").value);
 
     var proxyEnabled = $("proxyEnabled").checked;
-    var bindIp = proxyEnabled ? ($("bindIp").value || "127.0.0.1") : "0.0.0.0";
+    var webBindIp = proxyEnabled ? ($("webBindIp").value || "127.0.0.1") : "0.0.0.0";
+    var webdavBindIp = proxyEnabled ? ($("webdavBindIp").value || "0.0.0.0") : "0.0.0.0";
     var trustedProxies = proxyEnabled ? cleanSingleLine($("trustedProxies").value) : "";
 
     var webPort = cleanSingleLine($("webPort").value) || "5000";
@@ -110,7 +111,8 @@
       encryptEnabled: encryptEnabled,
       encryptKey: encryptKey,
       proxyEnabled: proxyEnabled,
-      bindIp: bindIp,
+      webBindIp: webBindIp,
+      webdavBindIp: webdavBindIp,
       trustedProxies: trustedProxies,
       webPort: webPort,
       webdavPort: webdavPort,
@@ -135,12 +137,15 @@
       bwLimit: cleanSingleLine($("bwLimit").value),
       syncInterval: cleanSingleLine($("syncInterval").value),
       smallCacheMb: cleanSingleLine($("smallCacheMb").value),
+      maxUploadMb: cleanSingleLine($("maxUploadMb").value),
       caseInsensitive: $("caseInsensitive").value,
       ntlmMode: $("ntlmMode").value,
       sapiProfile: $("sapiProfile").value,
       logLevel: $("logLevel").value,
+      bruteForceExcluded: cleanSingleLine($("bruteForceExcluded").value),
       webRenewBefore: cleanSingleLine($("webRenewBefore").value),
       webTrashEvery: cleanSingleLine($("webTrashEvery").value),
+      chromeNoSandbox: $("chromeNoSandbox").value,
       useEnvRefs: $("useEnvRefs").checked
     };
   }
@@ -211,14 +216,17 @@
     if (s.bwLimit) env.push(["WEBDAV_UPLOAD_BWLIMIT", s.bwLimit]);
     if (s.syncInterval) env.push(["SYNC_INTERVAL_SEC", s.syncInterval]);
     if (s.smallCacheMb) env.push(["WEBDAV_SMALLFILE_CACHE_MB", s.smallCacheMb]);
+    if (s.maxUploadMb) env.push(["MAX_UPLOAD_MB", s.maxUploadMb]);
     if (s.caseInsensitive) env.push(["WEBDAV_CASE_INSENSITIVE", s.caseInsensitive]);
     if (s.ntlmMode) env.push(["WEBDAV_NTLM", s.ntlmMode]);
     if (s.sapiProfile) env.push(["SAPI_CLIENT_PROFILE", s.sapiProfile]);
     if (s.logLevel) env.push(["LOG_LEVEL", s.logLevel]);
+    if (s.bruteForceExcluded) env.push(["BRUTE_FORCE_EXCLUDED_IPS", s.bruteForceExcluded]);
 
     if (s.mode === "web") {
       if (s.webRenewBefore) env.push(["WEB_SESSION_RENEW_BEFORE", s.webRenewBefore]);
       if (s.webTrashEvery) env.push(["WEB_TRASH_EMPTY_EVERY", s.webTrashEvery]);
+      if (s.chromeNoSandbox) env.push(["CHROME_NO_SANDBOX", s.chromeNoSandbox]);
     }
 
     return env;
@@ -252,9 +260,10 @@
     });
 
     lines.push("    ports:");
-    var hostPrefix = s.bindIp !== "0.0.0.0" ? (s.bindIp + ":") : "";
-    lines.push('      - "' + hostPrefix + s.webPort + ':5000"   # Panel Web');
-    lines.push('      - "' + hostPrefix + s.webdavPort + ':8080"   # Endpoint WebDAV y Explorador Web');
+    var webHostPrefix = s.webBindIp !== "0.0.0.0" ? (s.webBindIp + ":") : "";
+    var davHostPrefix = s.webdavBindIp !== "0.0.0.0" ? (s.webdavBindIp + ":") : "";
+    lines.push('      - "' + webHostPrefix + s.webPort + ':5000"   # Panel Web');
+    lines.push('      - "' + davHostPrefix + s.webdavPort + ':8080"   # Endpoint WebDAV y Explorador Web');
 
     lines.push("    volumes:");
     lines.push("      - " + s.tokensPath + ":/app/tokens");
@@ -296,9 +305,10 @@
       cmd.push("  -e " + escapeSingleQuoteSh(pair[0] + "=" + pair[1]) + " \\");
     });
 
-    var hostPrefix = s.bindIp !== "0.0.0.0" ? (s.bindIp + ":") : "";
-    cmd.push("  -p " + hostPrefix + s.webPort + ":5000 \\");
-    cmd.push("  -p " + hostPrefix + s.webdavPort + ":8080 \\");
+    var webHostPrefix = s.webBindIp !== "0.0.0.0" ? (s.webBindIp + ":") : "";
+    var davHostPrefix = s.webdavBindIp !== "0.0.0.0" ? (s.webdavBindIp + ":") : "";
+    cmd.push("  -p " + webHostPrefix + s.webPort + ":5000 \\");
+    cmd.push("  -p " + davHostPrefix + s.webdavPort + ":8080 \\");
     cmd.push("  -v " + escapeSingleQuoteSh(s.tokensPath + ":/app/tokens") + " \\");
     if (s.tmpdirEnabled) {
       cmd.push("  -v " + escapeSingleQuoteSh(s.tmpdirHostPath + ":/app/tmp") + " \\");
@@ -338,7 +348,8 @@
   }
 
   function renderNextSteps(s) {
-    var ipHost = s.bindIp === "127.0.0.1" ? "127.0.0.1" : "IP_DE_TU_SERVIDOR";
+    var webHost = s.webBindIp === "127.0.0.1" ? "127.0.0.1" : "IP_DE_TU_SERVIDOR";
+    var davHost = s.webdavBindIp === "127.0.0.1" ? "127.0.0.1" : "IP_DE_TU_SERVIDOR";
     var startCmd = s.mode === "web" ? "docker compose up -d --build" : "docker compose up -d";
     var steps = [];
     if (currentOutTab === "compose") {
@@ -349,8 +360,8 @@
     } else {
       steps.push("Guarda este contenido como <code>.env</code> y marca <em>Referenciar secretos como ${VAR}</em> en Compose.");
     }
-    steps.push("Abre el <strong>Panel Web</strong> en <code>http://" + ipHost + ":" + escapeHtml(s.webPort) + "</code>" + (s.mode === "web" ? " y pulsa <strong>🔐 Abrir inicio de sesión</strong>." : " y vincula tu cuenta por SMS (OAuth2)."));
-    steps.push("Conecta tus clientes WebDAV o abre el <strong>Explorador Web</strong> directamente en <code>http://" + ipHost + ":" + escapeHtml(s.webdavHostPort) + "</code>.");
+    steps.push("Abre el <strong>Panel Web</strong> en <code>http://" + webHost + ":" + escapeHtml(s.webPort) + "</code>" + (s.mode === "web" ? " y pulsa <strong>🔐 Abrir inicio de sesión</strong>." : " y vincula tu cuenta por SMS (OAuth2)."));
+    steps.push("Conecta tus clientes WebDAV o abre el <strong>Explorador Web</strong> directamente en <code>http://" + davHost + ":" + escapeHtml(s.webdavHostPort) + "</code>.");
     $("nextStepsList").innerHTML = steps.map(function (st) { return "<li>" + st + "</li>"; }).join("");
   }
 
@@ -492,20 +503,84 @@
     ta.remove();
   }
 
+  function generateRandomPassword(length) {
+    var charset = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    var bytes = new Uint8Array(length);
+    window.crypto.getRandomValues(bytes);
+    var res = "";
+    for (var i = 0; i < bytes.length; i++) {
+      res += charset.charAt(bytes[i] % charset.length);
+    }
+    return res;
+  }
+
+  function activateMainTab(tab) {
+    document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.toggle("active", b.dataset.tab === tab); });
+    document.querySelectorAll(".tab-panel").forEach(function (p) { p.hidden = (p.id !== "tab-" + tab); });
+  }
+
+  function activateOutTab(out) {
+    currentOutTab = out || "compose";
+    document.querySelectorAll(".sub-tab").forEach(function (b) { b.classList.toggle("active", b.dataset.out === currentOutTab); });
+  }
+
+  function applyUrlHash() {
+    var hash = "";
+    try {
+      hash = decodeURIComponent(window.location.hash || "").toLowerCase().trim();
+    } catch (_) {
+      hash = (window.location.hash || "").toLowerCase().trim();
+    }
+    if (!hash) return;
+
+    if (hash === "#modo-web" || hash === "#web") {
+      activateMainTab("docker");
+      var webRadio = document.querySelector('input[type="radio"][name="mode"][value="web"]');
+      if (webRadio && !webRadio.checked) {
+        webRadio.checked = true;
+        var cname = cleanSingleLine($("containerName").value);
+        if (!cname || cname === "movistar-webdav-proxy") {
+          $("containerName").value = "movistar-webdav-proxy-web";
+        }
+      }
+      renderAll();
+    } else if (hash === "#nativo" || hash === "#native") {
+      activateMainTab("docker");
+      var natRadio = document.querySelector('input[type="radio"][name="mode"][value="native"]');
+      if (natRadio && !natRadio.checked) {
+        natRadio.checked = true;
+        var cname2 = cleanSingleLine($("containerName").value);
+        if (!cname2 || cname2 === "movistar-webdav-proxy-web") {
+          $("containerName").value = "movistar-webdav-proxy";
+        }
+      }
+      renderAll();
+    } else if (hash === "#clientes" || hash === "#clients") {
+      activateMainTab("clients");
+    } else if (hash === "#guias" || hash === "#guides" || hash === "#docs") {
+      activateMainTab("guides");
+    } else if (hash === "#docker-run" || hash === "#run") {
+      activateMainTab("docker");
+      activateOutTab("run");
+      renderAll();
+    } else if (hash === "#env") {
+      activateMainTab("docker");
+      activateOutTab("env");
+      renderAll();
+    }
+  }
+
   // Navegación por pestañas principales
   document.querySelectorAll(".tab-btn").forEach(function (btn) {
     btn.addEventListener("click", function () {
-      var tab = btn.dataset.tab;
-      document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.toggle("active", b === btn); });
-      document.querySelectorAll(".tab-panel").forEach(function (p) { p.hidden = (p.id !== "tab-" + tab); });
+      activateMainTab(btn.dataset.tab);
     });
   });
 
   // Sub-pestañas de salida Docker
   document.querySelectorAll(".sub-tab").forEach(function (btn) {
     btn.addEventListener("click", function () {
-      currentOutTab = btn.dataset.out || "compose";
-      document.querySelectorAll(".sub-tab").forEach(function (b) { b.classList.toggle("active", b === btn); });
+      activateOutTab(btn.dataset.out || "compose");
       renderAll();
     });
   });
@@ -533,7 +608,17 @@
     });
   });
 
-  // Generador aleatorio seguro de TOKENS_ENCRYPTION_KEY
+  // Generadores aleatorios seguros en navegador
+  $("genWebdavPassBtn").addEventListener("click", function () {
+    $("webdavPass").value = generateRandomPassword(20);
+    renderAll();
+  });
+
+  $("genWebuiPassBtn").addEventListener("click", function () {
+    $("webuiPass").value = generateRandomPassword(20);
+    renderAll();
+  });
+
   $("genKeyBtn").addEventListener("click", function () {
     var bytes = new Uint8Array(32);
     window.crypto.getRandomValues(bytes);
@@ -568,8 +653,10 @@
     });
   });
 
+  window.addEventListener("hashchange", applyUrlHash);
   document.addEventListener("input", renderAll);
   document.addEventListener("change", renderAll);
 
+  applyUrlHash();
   renderAll();
 })();

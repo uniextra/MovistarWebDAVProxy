@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Movistar / O2 Cloud WebDAV Proxy — Configurador</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2310b981' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -216,27 +217,36 @@
                 <label class="toggle-row">
                   <div class="toggle-info">
                     <span class="toggle-title">Detrás de Proxy Inverso HTTPS / Solo localhost <span class="badge-env">TRUSTED_PROXIES</span></span>
-                    <span class="toggle-help">Para exponer el panel o WebDAV detrás de Nginx, NPM, Traefik o Caddy.</span>
+                    <span class="toggle-help">Para exponer el panel o WebDAV detrás de Nginx, NPM, Traefik, Caddy o <a href="https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/system_login_portal_advanced?version=7" target="_blank" rel="noopener">Reverse Proxy de Synology DSM</a>.</span>
                   </div>
                   <span class="switch"><input type="checkbox" id="proxyEnabled"><span class="slider"></span></span>
                 </label>
                 <div id="proxyOptions" class="sub-panel" hidden>
                   <div class="form-grid">
                     <div class="input-wrap">
-                      <label class="input-label" for="bindIp">IP de escucha en el host <span class="badge-env">BIND_IP</span></label>
-                      <select id="bindIp">
-                        <option value="0.0.0.0">0.0.0.0 (toda la red local)</option>
+                      <label class="input-label" for="webBindIp">Escucha Panel Web (<code>:5000</code>)</label>
+                      <select id="webBindIp">
                         <option value="127.0.0.1" selected>127.0.0.1 (solo localhost / proxy inverso)</option>
+                        <option value="0.0.0.0">0.0.0.0 (toda la red local)</option>
                       </select>
                     </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="webdavBindIp">Escucha WebDAV y Explorador (<code>:8080</code>)</label>
+                      <select id="webdavBindIp">
+                        <option value="0.0.0.0" selected>0.0.0.0 (red local directa, ej. HyperBackup)</option>
+                        <option value="127.0.0.1">127.0.0.1 (solo localhost / proxy inverso)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="form-grid">
                     <div class="input-wrap">
                       <label class="input-label" for="trustedProxies">IPs / subredes de confianza <span class="badge-env">TRUSTED_PROXIES</span></label>
                       <input id="trustedProxies" type="text" class="mono-input" value="127.0.0.1,172.18.0.0/16">
                     </div>
-                  </div>
-                  <div class="input-wrap">
-                    <label class="input-label" for="webdavHostPort">Puerto externo WebDAV para el enlace «Explorador» <span class="badge-env">WEBDAV_HOST_PORT</span></label>
-                    <input id="webdavHostPort" type="number" min="1" max="65535" value="" placeholder="Por defecto igual al puerto WebDAV (5050)">
+                    <div class="input-wrap">
+                      <label class="input-label" for="webdavHostPort">Puerto externo enlace «Explorador» <span class="badge-env">WEBDAV_HOST_PORT</span></label>
+                      <input id="webdavHostPort" type="number" min="1" max="65535" value="" placeholder="Solo si difiere del puerto publicado">
+                    </div>
                   </div>
                 </div>
               </div>
@@ -258,7 +268,10 @@
                 </div>
                 <div class="input-wrap">
                   <label class="input-label" for="webdavPass">Contraseña WebDAV <span class="badge-env">WEBDAV_PASSWORD</span></label>
-                  <input id="webdavPass" type="text" value="CambiaEstaClaveSegura">
+                  <div class="input-row">
+                    <input id="webdavPass" type="text" value="CambiaEstaClaveSegura">
+                    <button type="button" id="genWebdavPassBtn" class="btn">🎲 Generar</button>
+                  </div>
                 </div>
               </div>
               <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">
@@ -273,7 +286,10 @@
                   </div>
                   <div class="input-wrap">
                     <label class="input-label" for="webuiPass">Contraseña Panel Web</label>
-                    <input id="webuiPass" type="text" value="OtraClaveSegura">
+                    <div class="input-row">
+                      <input id="webuiPass" type="text" value="OtraClaveSegura">
+                      <button type="button" id="genWebuiPassBtn" class="btn">🎲 Generar</button>
+                    </div>
                   </div>
                 </div>
                 <label class="checkbox-label">
@@ -376,6 +392,10 @@
                       <label class="input-label" for="smallCacheMb">Caché archivos pequeños (MB) <span class="badge-env">WEBDAV_SMALLFILE_CACHE_MB</span></label>
                       <input id="smallCacheMb" type="number" min="0" max="512" value="" placeholder="32">
                     </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="maxUploadMb">Tamaño máx. subida (MB) <span class="badge-env">MAX_UPLOAD_MB</span></label>
+                      <input id="maxUploadMb" type="number" min="1" max="4096" value="" placeholder="4096">
+                    </div>
                   </div>
                 </div>
 
@@ -413,8 +433,19 @@
                         <option value="debug">debug (trazas detalladas)</option>
                       </select>
                     </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="bruteForceExcluded">IPs exentas bloqueo 429 <span class="badge-env">BRUTE_FORCE_EXCLUDED_IPS</span></label>
+                      <input id="bruteForceExcluded" type="text" class="mono-input" value="" placeholder="127.0.0.1,::1,172.16.0.0/12">
+                    </div>
                   </div>
-                  <div id="webOnlyAdvanced" class="form-grid" hidden style="margin-top:12px;">
+                </div>
+
+                <div id="webOnlyAdvanced" hidden>
+                  <h3 class="adv-section-title">Modo Web (Chromium)</h3>
+                  <div class="notice notice-info" style="margin:0 0 10px;">
+                    <code>WEB_SESSION=true</code> ya viene preconfigurado dentro de <code>Dockerfile.web</code>; no hace falta añadirlo manualmente al YAML.
+                  </div>
+                  <div class="form-grid">
                     <div class="input-wrap">
                       <label class="input-label" for="webRenewBefore">Margen renovación web <span class="badge-env">WEB_SESSION_RENEW_BEFORE</span></label>
                       <input id="webRenewBefore" type="text" class="mono-input" value="" placeholder="1h">
@@ -422,6 +453,14 @@
                     <div class="input-wrap">
                       <label class="input-label" for="webTrashEvery">Vaciar papelera cada <span class="badge-env">WEB_TRASH_EMPTY_EVERY</span></label>
                       <input id="webTrashEvery" type="text" class="mono-input" value="" placeholder="6h (vacío = desactivado)">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="chromeNoSandbox">Chromium sin sandbox <span class="badge-env">CHROME_NO_SANDBOX</span></label>
+                      <select id="chromeNoSandbox">
+                        <option value="">Por defecto (true en Dockerfile.web)</option>
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                      </select>
                     </div>
                   </div>
                 </div>

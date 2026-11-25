@@ -15,6 +15,9 @@ normal no cambia y sigue siendo el recomendado si te funciona: su imagen ocupa
 
 ## Puesta en marcha
 
+> [!TIP]
+> **¿Prefieres generar el Compose y `.env` del Modo Web de forma visual?** Abre el **[Generador Web Interactivo (Modo Web preseleccionado)](https://uniextra.github.io/MovistarWebDAVProxy/#modo-web)** *(100 % local en tu navegador)*.
+
 ```bash
 docker compose -f docker-compose.web.yml up -d --build
 ```
