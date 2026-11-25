@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-ARG APP_VERSION=v2.7.2
+ARG APP_VERSION=v2.7.3
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X movistar-webdav-proxy/internal/config.Version=${APP_VERSION}" -o /movistar-proxy ./cmd/server
 
 # Etapa 2: Imagen Mínima Final (~20 MB)
