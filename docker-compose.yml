@@ -1,3 +1,5 @@
+# Generador interactivo de configuración (Compose, docker run y .env):
+#   https://uniextra.github.io/MovistarWebDAVProxy/
 services:
   movistar-webdav-proxy:
     image: uniextra/movistar-webdav-proxy:latest

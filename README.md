@@ -204,6 +204,7 @@ Al incluir `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en tu `docker-compose.yml`,
 
 ## 📚 Documentación Detallada
 
+* [🧩 Generador Web Interactivo (Compose, `docker run`, `.env`, Rclone, Synology y Duplicati)](https://uniextra.github.io/MovistarWebDAVProxy/)
 * [🔧 Configuración Avanzada, Seguridad, Proxies Inversos y Variables de Entorno](docs/configuration.md)
 * [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone (>4 GB y Cifrado)](docs/backup-clients.md)
 * [💻 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)

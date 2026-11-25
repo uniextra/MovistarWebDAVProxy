@@ -1,6 +1,9 @@
 # Configuración Avanzada, Seguridad y Red 🔧🔒
 
-Esta guía reúne toda la referencia técnica del proxy: variables de entorno completas, alertas de Telegram, arquitectura de autenticación y seguridad, configuración de proxies inversos (Nginx/NPM/Traefik), red Docker, filtro de basura del SO y limitaciones técnicas de la API de Movistar / O2 Cloud.
+Esta guía reúne toda la referencia técnica del proxy: variables de entorno completas, alertas de Telegram, arquitectura de autenticación y seguridad, configuración de proxies inversos (Nginx/NPM/Traefik/Synology DSM), red Docker, filtro de basura del SO y limitaciones técnicas de la API de Movistar / O2 Cloud.
+
+> [!TIP]
+> **¿Prefieres configurarlo sin editar YAML a mano?** Usa el **[Generador Web Interactivo](https://uniextra.github.io/MovistarWebDAVProxy/)** para elegir tus variables y descargar tu `docker-compose.yml`, `docker run` o `.env` listo para usar *(100 % local en tu navegador)*.
 
 ---
 
@@ -207,7 +210,7 @@ Los valores en segundos admiten decimales (`0.5`). Un valor vacío o no válido 
 
 * **No exponer directamente a Internet:** Si necesitas acceder desde fuera de tu red local, coloca siempre un proxy inverso con **TLS/HTTPS** delante (Caddy, Nginx, Traefik) o utiliza un túnel VPN (WireGuard / Tailscale).
 * **Docker Bridge (por defecto):** Mediante `BRUTE_FORCE_EXCLUDED_IPS` (`127.0.0.1,::1,172.16.0.0/12`), el loopback y las subredes puente estándar de Docker (`172.17.0.0/16`, `172.18.0.0/16`, etc.) quedan exentas del bloqueo por fuerza bruta (`HTTP 429`). Esto evita que varios clientes compartiendo el gateway de Docker queden bloqueados accidentalmente. **La autenticación Basic Auth se exige y valida en todo momento; la exclusión nunca elude la contraseña.**
-* **Proxy Inverso (Nginx, Nginx Proxy Manager, Traefik, Caddy, Synology DSM Reverse Proxy):**
+* **Proxy Inverso (Nginx, Nginx Proxy Manager, Traefik, Caddy, [Synology DSM Reverse Proxy](https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/system_login_portal_advanced?version=7)):**
   * Al configurar `TRUSTED_PROXIES` (ej. `127.0.0.1,172.18.0.0/16`), el proxy extrae la IP real del cliente de `X-Forwarded-For` o `X-Real-IP`. Si la petición proviene de un origen no confiable, las cabeceras de reenvío se descartan estrictamente para evitar spoofing.
   * ⚠️ **Importante para subidas grandes (`413 Request Entity Too Large`):** Si sitúas el contenedor detrás de **Nginx** o **Nginx Proxy Manager (NPM)**, desactiva el límite de tamaño de cuerpo y el buffering en la pestaña *Advanced* (*Custom Nginx Configuration*) para no cortar subidas WebDAV de varios GB:
     ```nginx

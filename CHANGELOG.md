@@ -1,6 +1,6 @@
 # Changelog
 
-Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
+Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo. Para consultar las notas compiladas de cada versión publicada, revisa también las [GitHub Releases](https://github.com/uniextra/MovistarWebDAVProxy/releases).
 
 ## [Sin publicar]
 
