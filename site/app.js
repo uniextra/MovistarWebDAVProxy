@@ -12,6 +12,23 @@
     return String(val || "").replace(/[\r\n]+/g, " ").trim();
   }
 
+  function parsePort(el, fallback) {
+    if (el && el.validity && el.validity.badInput) {
+      return { value: fallback, valid: false, raw: "", badInput: true };
+    }
+    var cleaned = cleanSingleLine(el ? el.value : "");
+    if (!cleaned) {
+      return { value: fallback, valid: true, raw: "", badInput: false };
+    }
+    if (/^\d+$/.test(cleaned)) {
+      var n = parseInt(cleaned, 10);
+      if (n >= 1 && n <= 65535) {
+        return { value: String(n), valid: true, raw: cleaned, badInput: false };
+      }
+    }
+    return { value: fallback, valid: false, raw: cleaned, badInput: false };
+  }
+
   function getRadio(name) {
     var el = document.querySelector('input[name="' + name + '"]:checked');
     return el ? el.value : "";
@@ -73,9 +90,24 @@
     var webdavBindIp = proxyEnabled ? ($("webdavBindIp").value || "0.0.0.0") : "0.0.0.0";
     var trustedProxies = proxyEnabled ? cleanSingleLine($("trustedProxies").value) : "";
 
-    var webPort = cleanSingleLine($("webPort").value) || "5000";
-    var webdavPort = cleanSingleLine($("webdavPort").value) || "5050";
-    var webdavHostPortRaw = proxyEnabled ? cleanSingleLine($("webdavHostPort").value) : "";
+    var webPortInfo = parsePort($("webPort"), "5000");
+    var webdavPortInfo = parsePort($("webdavPort"), "5050");
+    var webdavHostPortInfo = proxyEnabled ? parsePort($("webdavHostPort"), "") : { value: "", valid: true, raw: "", badInput: false };
+
+    var invalidPorts = [];
+    if (!webPortInfo.valid) {
+      invalidPorts.push({ id: "webPort", label: "Puerto Panel Web", raw: webPortInfo.raw, badInput: webPortInfo.badInput, fallback: webPortInfo.value });
+    }
+    if (!webdavPortInfo.valid) {
+      invalidPorts.push({ id: "webdavPort", label: "Puerto WebDAV y Explorador", raw: webdavPortInfo.raw, badInput: webdavPortInfo.badInput, fallback: webdavPortInfo.value });
+    }
+    if (!webdavHostPortInfo.valid) {
+      invalidPorts.push({ id: "webdavHostPort", label: "Puerto externo tras el proxy", raw: webdavHostPortInfo.raw, badInput: webdavHostPortInfo.badInput, fallback: webdavPortInfo.value });
+    }
+
+    var webPort = webPortInfo.value;
+    var webdavPort = webdavPortInfo.value;
+    var webdavHostPortRaw = webdavHostPortInfo.value;
     var webdavHostPort = webdavHostPortRaw || webdavPort;
 
     var authDisabled = $("authDisabled").checked;
@@ -118,6 +150,7 @@
       webdavPort: webdavPort,
       webdavHostPort: webdavHostPort,
       webdavHostPortCustom: webdavHostPortRaw,
+      invalidPorts: invalidPorts,
       authDisabled: authDisabled,
       webdavUser: webdavUser,
       webdavPass: webdavPass,
@@ -332,6 +365,14 @@
 
   function renderDynamicNotices(s) {
     var items = [];
+    if (s.invalidPorts && s.invalidPorts.length) {
+      s.invalidPorts.forEach(function (p) {
+        var detail = p.badInput
+          ? "el valor introducido no es un puerto entero válido (<code>1–65535</code>)"
+          : "el puerto <code>" + escapeHtml(p.raw) + "</code> debe ser un entero entre <code>1</code> y <code>65535</code>";
+        items.push('<div class="notice notice-warn">⚠️ <strong>' + escapeHtml(p.label) + ':</strong> ' + detail + '; se ha usado <code>' + escapeHtml(p.fallback) + '</code> en la configuración generada.</div>');
+      });
+    }
     if (s.authDisabled) {
       items.push('<div class="notice notice-warn">⚠️ <strong>AUTH_DISABLED=true:</strong> cualquier equipo que alcance el puerto <code>' + escapeHtml(s.webPort) + '</code> o <code>' + escapeHtml(s.webdavPort) + '</code> entrará sin contraseña. Úsalo solo en localhost o detrás de autenticación externa.</div>');
     }
@@ -454,6 +495,15 @@
     $("webdavUser").disabled = s.authDisabled;
     $("webdavPass").disabled = s.authDisabled;
     $("separateWebui").disabled = s.authDisabled;
+
+    var invalidIds = {};
+    (s.invalidPorts || []).forEach(function (p) { invalidIds[p.id] = true; });
+    ["webPort", "webdavPort", "webdavHostPort"].forEach(function (id) {
+      var el = $(id);
+      var isInvalid = Boolean(invalidIds[id]);
+      el.classList.toggle("input-invalid", isInvalid);
+      el.setAttribute("aria-invalid", isInvalid ? "true" : "false");
+    });
   }
 
   function renderAll() {

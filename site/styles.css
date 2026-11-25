@@ -107,9 +107,9 @@ code {
 }
 
 .brand-sub {
-  margin: 2px 0 0;
-  font-size: 13px;
-  color: var(--text-muted);
+  margin: 3px 0 0;
+  font-size: 14px;
+  color: #c4d1df;
 }
 
 .topbar-links {
@@ -179,6 +179,49 @@ code {
 .container {
   padding-top: 24px;
   padding-bottom: 48px;
+}
+
+.intro-banner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(56, 189, 248, 0.06));
+}
+
+.intro-copy {
+  flex: 1 1 380px;
+}
+
+.intro-lead {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.intro-privacy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: #a7f3d0;
+  font-size: 13px;
+  line-height: 1.4;
+  flex: 0 1 auto;
+}
+
+.intro-privacy-icon {
+  font-size: 16px;
+  flex-shrink: 0;
 }
 
 .tab-panel[hidden] {
@@ -505,6 +548,19 @@ select:focus {
 
 .mono-input {
   font-family: var(--mono) !important;
+}
+
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.input-invalid {
+  border-color: var(--warn) !important;
+  box-shadow: 0 0 0 1px var(--warn-border);
 }
 
 .btn {
