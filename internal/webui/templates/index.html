@@ -775,7 +775,12 @@
 
         async function checkStatus() {
             try {
-                const res = await fetch('/status');
+                const res = await fetch('/status', {
+                    cache: 'no-store',
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    }
+                });
                 if (res.status === 401) {
                     window.location.href = '/login';
                     return;
@@ -811,7 +816,12 @@
 
         async function fetchLogs() {
             try {
-                const res = await fetch('/logs');
+                const res = await fetch('/logs', {
+                    cache: 'no-store',
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    }
+                });
                 const data = await res.json();
                 if (data && Array.isArray(data.logs)) {
                     if (data.logs.length === 0) {
