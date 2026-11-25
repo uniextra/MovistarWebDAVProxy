@@ -5,6 +5,11 @@ on:
     tags: [ 'v*.*.*' ]
     branches: [ 'dev' ]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to build and publish (e.g. v2.7.0)'
+        required: false
+        type: string
   workflow_call:
     inputs:
       version:
@@ -79,10 +84,10 @@ jobs:
         with:
           images: uniextra/movistar-webdav-proxy
           tags: |
-            type=raw,value=latest,enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_call' && inputs.version != '') }}
-            type=semver,pattern={{version}},value=${{ steps.app_version.outputs.version }},enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_call' && inputs.version != '') }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.app_version.outputs.version }},enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_call' && inputs.version != '') }}
-            type=semver,pattern={{major}},value=${{ steps.app_version.outputs.version }},enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_call' && inputs.version != '') }}
+            type=raw,value=latest,enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || inputs.version != '' }}
+            type=semver,pattern={{version}},value=${{ steps.app_version.outputs.version }},enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || inputs.version != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.app_version.outputs.version }},enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || inputs.version != '' }}
+            type=semver,pattern={{major}},value=${{ steps.app_version.outputs.version }},enable=${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || inputs.version != '' }}
             type=raw,value=dev,enable=${{ github.ref_name == 'dev' }}
 
       - name: Build and push Docker image

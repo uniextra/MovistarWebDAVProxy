@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Movistar / O2 Cloud WebDAV Proxy — Configurador</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">Movistar / O2 Cloud WebDAV Proxy</h1>
+          <p class="brand-sub">Generador interactivo de configuración para Docker, Rclone, Synology y Duplicati</p>
+        </div>
+      </div>
+      <div class="topbar-links">
+        <a class="ext-link" href="https://github.com/uniextra/MovistarWebDAVProxy" target="_blank" rel="noopener">GitHub ↗</a>
+        <a class="ext-link" href="https://hub.docker.com/r/uniextra/movistar-webdav-proxy" target="_blank" rel="noopener">Docker Hub ↗</a>
+        <a class="ext-link" href="https://github.com/uniextra/MovistarWebDAVProxy/blob/main/docs/configuration.md" target="_blank" rel="noopener">Documentación ↗</a>
+      </div>
+    </div>
+  </header>
+
+  <nav class="nav-tabs" aria-label="Secciones del configurador">
+    <div class="nav-tabs-inner">
+      <button type="button" class="tab-btn active" data-tab="docker">🐳 Docker Setup</button>
+      <button type="button" class="tab-btn" data-tab="clients">🔌 Clientes (Rclone / NAS / Duplicati)</button>
+      <button type="button" class="tab-btn" data-tab="guides">📚 Guías</button>
+    </div>
+  </nav>
+
+  <main class="container">
+    <!-- TAB 1: DOCKER SETUP -->
+    <section id="tab-docker" class="tab-panel">
+      <div class="split-layout">
+        <div class="config-column">
+          <!-- PASO 1 -->
+          <div class="step-card">
+            <div class="step-header">
+              <span class="step-num">1</span>
+              <h2 class="step-title">Imagen y perfil de ejecución</h2>
+            </div>
+
+            <div class="field-group">
+              <div class="group-label">Modo de funcionamiento</div>
+              <div class="choice-grid" data-radio-group="mode">
+                <label class="choice-card selected">
+                  <input type="radio" name="mode" value="native" checked>
+                  <div class="choice-top">
+                    <span class="choice-name">Nativo Go (OAuth2 SMS)</span>
+                    <span class="badge badge-rec">Recomendado</span>
+                  </div>
+                  <span class="choice-sub">Imagen ligera (~20 MB), ~6,5 MB RAM, Movistar y O2 Cloud.</span>
+                </label>
+                <label class="choice-card">
+                  <input type="radio" name="mode" value="web">
+                  <div class="choice-top">
+                    <span class="choice-name">Modo Web (Chromium)</span>
+                  </div>
+                  <span class="choice-sub">Usa <code>Dockerfile.web</code> con sesión web si OAuth2 falla (solo Movistar).</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="field-group" id="channelGroup">
+              <div class="group-label">Canal de la imagen Docker</div>
+              <div class="choice-grid" data-radio-group="channel">
+                <label class="choice-card selected">
+                  <input type="radio" name="channel" value="latest" checked>
+                  <div class="choice-top">
+                    <span class="choice-name">Última estable (:latest)</span>
+                    <span class="badge badge-rec">Recomendada</span>
+                  </div>
+                  <span class="choice-sub">Release oficial verificada.</span>
+                </label>
+                <label class="choice-card">
+                  <input type="radio" name="channel" value="dev">
+                  <div class="choice-top">
+                    <span class="choice-name">Pruebas (:dev)</span>
+                    <span class="badge badge-warn">Testing</span>
+                  </div>
+                  <span class="choice-sub">Últimas mejoras antes de pasar a <code>:latest</code>.</span>
+                </label>
+                <label class="choice-card">
+                  <input type="radio" name="channel" value="tag">
+                  <div class="choice-top">
+                    <span class="choice-name">Versión fija</span>
+                  </div>
+                  <span class="choice-sub">Fijar un tag concreto (ej. <code>v2.7.0</code>).</span>
+                </label>
+              </div>
+              <div id="customTagWrap" class="sub-panel" hidden style="margin-top:10px;border:1px solid var(--border);border-radius:8px;">
+                <div class="input-wrap">
+                  <label class="input-label" for="customTag">Etiqueta de versión</label>
+                  <input id="customTag" type="text" class="mono-input" value="v2.7.0" placeholder="v2.7.0">
+                </div>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <div class="group-label">Perfil del equipo</div>
+              <div class="choice-grid" data-radio-group="hardware">
+                <label class="choice-card selected">
+                  <input type="radio" name="hardware" value="standard" checked>
+                  <div class="choice-top">
+                    <span class="choice-name">Estándar (NAS / Mini-PC)</span>
+                  </div>
+                  <span class="choice-sub">Copia temporal de subidas activa (32 MB RAM, compatible con HyperBackup).</span>
+                </label>
+                <label class="choice-card">
+                  <input type="radio" name="hardware" value="lowram">
+                  <div class="choice-top">
+                    <span class="choice-name">Baja RAM / Raspberry Pi</span>
+                  </div>
+                  <span class="choice-sub">Subida directa sin disco (<code>SPOOL=false</code>), ChaCha20 TLS y búfer 16 MB.</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- PASO 2 -->
+          <div class="step-card">
+            <div class="step-header">
+              <span class="step-num">2</span>
+              <h2 class="step-title">Funcionalidades</h2>
+            </div>
+            <p class="step-desc">Activa solo lo que necesites; cada bloque añade sus variables recomendadas.</p>
+
+            <div class="toggle-list">
+              <!-- Galería virtual -->
+              <div class="toggle-box">
+                <label class="toggle-row">
+                  <div class="toggle-info">
+                    <span class="toggle-title">Galería virtual <code>/_gallery</code> <span class="badge-env">GALLERY_ENABLED</span></span>
+                    <span class="toggle-help">Expone tus fotos y vídeos sueltos de la Galería en WebDAV y el explorador web.</span>
+                  </div>
+                  <span class="switch"><input type="checkbox" id="galleryEnabled"><span class="slider"></span></span>
+                </label>
+                <div id="galleryOptions" class="sub-panel" hidden>
+                  <div class="form-grid">
+                    <div class="input-wrap">
+                      <label class="input-label" for="galleryLayout">Organización <span class="badge-env">GALLERY_LAYOUT</span></label>
+                      <select id="galleryLayout">
+                        <option value="year-month" selected>year-month (/AAAA/MM, recomendada)</option>
+                        <option value="flat">flat (todos en la raíz)</option>
+                      </select>
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="galleryDir">Nombre de carpeta <span class="badge-env">GALLERY_DIR</span></label>
+                      <input id="galleryDir" type="text" class="mono-input" value="_gallery" placeholder="_gallery">
+                    </div>
+                  </div>
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="galleryUpload">
+                    <span>Permitir subir fotos y vídeos a <code>/_gallery</code> (<span class="badge-env">GALLERY_UPLOAD=true</span>)</span>
+                  </label>
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="galleryDelete">
+                    <span>Permitir enviar elementos de <code>/_gallery</code> a la papelera (<span class="badge-env">GALLERY_DELETE=true</span>)</span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Telegram -->
+              <div class="toggle-box">
+                <label class="toggle-row">
+                  <div class="toggle-info">
+                    <span class="toggle-title">Alertas por Telegram desde el arranque <span class="badge-env">TELEGRAM_*</span></span>
+                    <span class="toggle-help">Notifica inicios, avisos de sesión caducada y errores críticos desde el segundo cero.</span>
+                  </div>
+                  <span class="switch"><input type="checkbox" id="telegramEnabled"><span class="slider"></span></span>
+                </label>
+                <div id="telegramOptions" class="sub-panel" hidden>
+                  <div class="form-grid">
+                    <div class="input-wrap">
+                      <label class="input-label" for="tgToken">Bot Token <span class="badge-env">TELEGRAM_BOT_TOKEN</span></label>
+                      <input id="tgToken" type="text" class="mono-input" value="" placeholder="123456:ABC-DEF...">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="tgChat">Chat ID <span class="badge-env">TELEGRAM_CHAT_ID</span></label>
+                      <input id="tgChat" type="text" class="mono-input" value="" placeholder="-100123456789 o tu ID">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Cifrado tokens -->
+              <div class="toggle-box">
+                <label class="toggle-row">
+                  <div class="toggle-info">
+                    <span class="toggle-title">Cifrar tokens en disco (AES-256-GCM) <span class="badge-env">TOKENS_ENCRYPTION_KEY</span></span>
+                    <span class="toggle-help">Protege los tokens OAuth2 guardados dentro de <code>/app/tokens</code>.</span>
+                  </div>
+                  <span class="switch"><input type="checkbox" id="encryptEnabled"><span class="slider"></span></span>
+                </label>
+                <div id="encryptOptions" class="sub-panel" hidden>
+                  <div class="input-wrap">
+                    <label class="input-label" for="encryptKey">Clave maestra de cifrado</label>
+                    <div class="input-row">
+                      <input id="encryptKey" type="text" class="mono-input" value="" placeholder="Pulsa Generar o pega tu clave">
+                      <button type="button" id="genKeyBtn" class="btn">🎲 Generar</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Proxy inverso -->
+              <div class="toggle-box">
+                <label class="toggle-row">
+                  <div class="toggle-info">
+                    <span class="toggle-title">Detrás de Proxy Inverso HTTPS / Solo localhost <span class="badge-env">TRUSTED_PROXIES</span></span>
+                    <span class="toggle-help">Para exponer el panel o WebDAV detrás de Nginx, NPM, Traefik o Caddy.</span>
+                  </div>
+                  <span class="switch"><input type="checkbox" id="proxyEnabled"><span class="slider"></span></span>
+                </label>
+                <div id="proxyOptions" class="sub-panel" hidden>
+                  <div class="form-grid">
+                    <div class="input-wrap">
+                      <label class="input-label" for="bindIp">IP de escucha en el host <span class="badge-env">BIND_IP</span></label>
+                      <select id="bindIp">
+                        <option value="0.0.0.0">0.0.0.0 (toda la red local)</option>
+                        <option value="127.0.0.1" selected>127.0.0.1 (solo localhost / proxy inverso)</option>
+                      </select>
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="trustedProxies">IPs / subredes de confianza <span class="badge-env">TRUSTED_PROXIES</span></label>
+                      <input id="trustedProxies" type="text" class="mono-input" value="127.0.0.1,172.18.0.0/16">
+                    </div>
+                  </div>
+                  <div class="input-wrap">
+                    <label class="input-label" for="webdavHostPort">Puerto externo WebDAV para el enlace «Explorador» <span class="badge-env">WEBDAV_HOST_PORT</span></label>
+                    <input id="webdavHostPort" type="number" min="1" max="65535" value="" placeholder="Por defecto igual al puerto WebDAV (5050)">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- PASO 3 -->
+          <div class="step-card">
+            <div class="step-header">
+              <span class="step-num">3</span>
+              <h2 class="step-title">Credenciales, red, almacenamiento y avanzado</h2>
+            </div>
+
+            <div class="field-group">
+              <div class="form-grid">
+                <div class="input-wrap">
+                  <label class="input-label" for="webdavUser">Usuario WebDAV <span class="badge-env">WEBDAV_USER</span></label>
+                  <input id="webdavUser" type="text" value="admin">
+                </div>
+                <div class="input-wrap">
+                  <label class="input-label" for="webdavPass">Contraseña WebDAV <span class="badge-env">WEBDAV_PASSWORD</span></label>
+                  <input id="webdavPass" type="text" value="CambiaEstaClaveSegura">
+                </div>
+              </div>
+              <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="separateWebui">
+                  <span>Usar usuario/contraseña distintos para el Panel Web (<span class="badge-env">WEBUI_USER</span> / <span class="badge-env">WEBUI_PASSWORD</span>)</span>
+                </label>
+                <div id="webuiCreds" class="form-grid" hidden>
+                  <div class="input-wrap">
+                    <label class="input-label" for="webuiUser">Usuario Panel Web</label>
+                    <input id="webuiUser" type="text" value="panel">
+                  </div>
+                  <div class="input-wrap">
+                    <label class="input-label" for="webuiPass">Contraseña Panel Web</label>
+                    <input id="webuiPass" type="text" value="OtraClaveSegura">
+                  </div>
+                </div>
+                <label class="checkbox-label">
+                  <input type="checkbox" id="authDisabled">
+                  <span>Desactivar autenticación integrada (<span class="badge-env">AUTH_DISABLED=true</span>, solo en red privada o detrás de auth externa)</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <div class="form-grid">
+                <div class="input-wrap">
+                  <label class="input-label" for="webPort">Puerto Panel Web (<code>:5000</code>)</label>
+                  <input id="webPort" type="number" min="1" max="65535" value="5000">
+                </div>
+                <div class="input-wrap">
+                  <label class="input-label" for="webdavPort">Puerto WebDAV y Explorador (<code>:8080</code>)</label>
+                  <input id="webdavPort" type="number" min="1" max="65535" value="5050">
+                </div>
+                <div class="input-wrap">
+                  <label class="input-label" for="tzInput">Zona horaria <span class="badge-env">TZ</span></label>
+                  <input id="tzInput" type="text" value="Europe/Madrid">
+                </div>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <div class="group-label">Almacenamiento persistente (<code>/app/tokens</code>)</div>
+              <div class="form-grid">
+                <div class="input-wrap">
+                  <label class="input-label" for="tokensType">Tipo de montaje</label>
+                  <select id="tokensType">
+                    <option value="volume" selected>Volumen gestionado por Docker</option>
+                    <option value="bind">Carpeta local del NAS / host</option>
+                  </select>
+                </div>
+                <div class="input-wrap">
+                  <label class="input-label" for="tokensPath">Nombre del volumen o ruta local</label>
+                  <input id="tokensPath" type="text" class="mono-input" value="movistar_tokens">
+                </div>
+              </div>
+              <div style="margin-top:10px;">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="tmpdirEnabled">
+                  <span>Montar disco para temporales grandes (<span class="badge-env">WEBDAV_TMPDIR=/app/tmp</span>, recomendado en NAS con poca RAM)</span>
+                </label>
+                <div id="tmpdirWrap" class="input-wrap" hidden style="margin-top:8px;">
+                  <label class="input-label" for="tmpdirHostPath">Carpeta del host para <code>/app/tmp</code></label>
+                  <input id="tmpdirHostPath" type="text" class="mono-input" value="./tmp">
+                </div>
+              </div>
+            </div>
+
+            <!-- ACORDEÓN AVANZADO -->
+            <details class="adv-box">
+              <summary>⚙️ Opciones avanzadas (concurrencia, SAPI, WebDAV)</summary>
+              <div class="adv-body">
+                <div>
+                  <h3 class="adv-section-title">Contenedor</h3>
+                  <div class="form-grid">
+                    <div class="input-wrap">
+                      <label class="input-label" for="containerName">Nombre del contenedor</label>
+                      <input id="containerName" type="text" class="mono-input" value="movistar-webdav-proxy">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="restartPolicy">Política de reinicio</label>
+                      <select id="restartPolicy">
+                        <option value="unless-stopped" selected>unless-stopped (recomendada)</option>
+                        <option value="always">always</option>
+                        <option value="no">no</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 class="adv-section-title">Rendimiento y caché</h3>
+                  <div class="form-grid">
+                    <div class="input-wrap">
+                      <label class="input-label" for="maxDownloads">Descargas simultáneas <span class="badge-env">WEBDAV_MAX_DOWNLOADS</span></label>
+                      <input id="maxDownloads" type="number" min="1" max="16" value="" placeholder="1 (desktop) / 4 (web)">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="maxUploads">Subidas simultáneas <span class="badge-env">WEBDAV_MAX_UPLOADS</span></label>
+                      <input id="maxUploads" type="number" min="1" max="16" value="" placeholder="1 (desktop) / 2 (web)">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="bufferMb">Búfer RAM por subida (MB) <span class="badge-env">WEBDAV_BUFFER_MB</span></label>
+                      <input id="bufferMb" type="number" min="1" max="512" value="" placeholder="32">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="bwLimit">Límite subida <span class="badge-env">WEBDAV_UPLOAD_BWLIMIT</span></label>
+                      <input id="bwLimit" type="text" class="mono-input" value="" placeholder="Ej. 20M, 500K (vacío = sin límite)">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="syncInterval">Sync SQLite (seg) <span class="badge-env">SYNC_INTERVAL_SEC</span></label>
+                      <input id="syncInterval" type="number" min="15" max="3600" value="" placeholder="300 (desktop) / 60 (web)">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="smallCacheMb">Caché archivos pequeños (MB) <span class="badge-env">WEBDAV_SMALLFILE_CACHE_MB</span></label>
+                      <input id="smallCacheMb" type="number" min="0" max="512" value="" placeholder="32">
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 class="adv-section-title">Protocolo WebDAV y cliente SAPI</h3>
+                  <div class="form-grid">
+                    <div class="input-wrap">
+                      <label class="input-label" for="caseInsensitive">Mayúsculas/minúsculas <span class="badge-env">WEBDAV_CASE_INSENSITIVE</span></label>
+                      <select id="caseInsensitive">
+                        <option value="">Por defecto (exacto en perfil desktop)</option>
+                        <option value="false">false (distingue A.txt / a.txt; recomendado rclone/restic)</option>
+                        <option value="true">true (tolerante; útil con Windows Explorer/Finder)</option>
+                      </select>
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="ntlmMode">Soporte NTLMv2 <span class="badge-env">WEBDAV_NTLM</span></label>
+                      <select id="ntlmMode">
+                        <option value="">auto (por defecto)</option>
+                        <option value="true">true (forzar)</option>
+                        <option value="false">false (desactivar)</option>
+                      </select>
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="sapiProfile">Perfil SAPI <span class="badge-env">SAPI_CLIENT_PROFILE</span></label>
+                      <select id="sapiProfile">
+                        <option value="">Por defecto (desktop / browser en Modo Web)</option>
+                        <option value="desktop">desktop (cliente oficial Windows)</option>
+                        <option value="browser">browser (navegador HTTP/2)</option>
+                      </select>
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="logLevel">Nivel de logs <span class="badge-env">LOG_LEVEL</span></label>
+                      <select id="logLevel">
+                        <option value="">Normal</option>
+                        <option value="debug">debug (trazas detalladas)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div id="webOnlyAdvanced" class="form-grid" hidden style="margin-top:12px;">
+                    <div class="input-wrap">
+                      <label class="input-label" for="webRenewBefore">Margen renovación web <span class="badge-env">WEB_SESSION_RENEW_BEFORE</span></label>
+                      <input id="webRenewBefore" type="text" class="mono-input" value="" placeholder="1h">
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="webTrashEvery">Vaciar papelera cada <span class="badge-env">WEB_TRASH_EMPTY_EVERY</span></label>
+                      <input id="webTrashEvery" type="text" class="mono-input" value="" placeholder="6h (vacío = desactivado)">
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <!-- PANEL DERECHO FIJO -->
+        <aside class="output-column">
+          <div class="output-card">
+            <div class="output-top">
+              <div class="sub-tabs" role="tablist">
+                <button type="button" class="sub-tab active" data-out="compose">docker-compose.yml</button>
+                <button type="button" class="sub-tab" data-out="run">docker run</button>
+                <button type="button" class="sub-tab" data-out="env">.env</button>
+              </div>
+              <div class="output-actions">
+                <button type="button" id="copyOutBtn" class="btn btn-primary">📋 Copiar</button>
+                <button type="button" id="dlOutBtn" class="btn">⬇ Descargar</button>
+              </div>
+            </div>
+
+            <div class="code-box"><pre id="outputCode"></pre></div>
+
+            <div class="inline-options">
+              <label class="checkbox-label">
+                <input type="checkbox" id="useEnvRefs">
+                <span>Referenciar secretos como <code>${VAR}</code> en Compose (para usar junto con <code>.env</code>)</span>
+              </label>
+              <span>🔒 Todo se genera en tu navegador</span>
+            </div>
+
+            <div id="dynamicWarnings"></div>
+
+            <div class="next-steps">
+              <h3>Pasos siguientes</h3>
+              <ol id="nextStepsList"></ol>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- TAB 2: CLIENTES -->
+    <section id="tab-clients" class="tab-panel" hidden>
+      <div class="step-card">
+        <div class="step-header">
+          <span class="step-num">⚙</span>
+          <h2 class="step-title">Parámetros compartidos para tus clientes WebDAV</h2>
+        </div>
+        <div class="form-grid">
+          <div class="input-wrap">
+            <label class="input-label" for="clientHost">IP o dominio de tu servidor/NAS</label>
+            <input id="clientHost" type="text" class="mono-input" value="192.168.1.50" placeholder="192.168.1.50">
+          </div>
+          <div class="input-wrap">
+            <label class="input-label" for="rcloneRemote">Nombre del remoto Rclone</label>
+            <input id="rcloneRemote" type="text" class="mono-input" value="o2cloud">
+          </div>
+          <div class="input-wrap">
+            <label class="input-label" for="rcloneAction">Operación Rclone de ejemplo</label>
+            <select id="rcloneAction">
+              <option value="sync" selected>sync (espejo local → nube)</option>
+              <option value="copy">copy (solo copiar nuevos/modificados)</option>
+              <option value="mount">mount (montar unidad de red)</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:18px;flex-wrap:wrap;">
+          <label class="checkbox-label">
+            <input type="checkbox" id="rcloneChunker">
+            <span>Añadir overlay <code>chunker</code> (obligatorio si subes archivos individuales &gt; 4 GB)</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="rcloneCrypt">
+            <span>Añadir overlay <code>crypt</code> (cifrado en cliente)</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="clients-grid">
+        <div class="client-card">
+          <div class="output-top">
+            <h3 style="margin:0;font-size:15px;">📄 Configuración <code>rclone.conf</code></h3>
+            <button type="button" class="btn btn-primary copy-target" data-target="rcloneConfCode">📋 Copiar</button>
+          </div>
+          <div class="code-box"><pre id="rcloneConfCode"></pre></div>
+          <div class="notice notice-info" style="margin-top:10px;">
+            En <code>rclone.conf</code> la contraseña debe ir ofuscada: ejecuta <code>rclone obscure TU_CLAVE</code> o crea el remoto con <code>rclone config</code>.
+          </div>
+        </div>
+
+        <div class="client-card">
+          <div class="output-top">
+            <h3 style="margin:0;font-size:15px;">💻 Comando Rclone listo para usar</h3>
+            <button type="button" class="btn btn-primary copy-target" data-target="rcloneCmdCode">📋 Copiar</button>
+          </div>
+          <div class="code-box"><pre id="rcloneCmdCode"></pre></div>
+          <div id="rcloneNotice"></div>
+        </div>
+
+        <div class="client-card">
+          <h3 style="margin:0 0 12px;font-size:15px;">🗄️ Synology HyperBackup y File Station</h3>
+          <div id="synologyKv" class="kv-list"></div>
+        </div>
+
+        <div class="client-card">
+          <h3 style="margin:0 0 12px;font-size:15px;">🛡️ Duplicati 2 (WebDAV)</h3>
+          <div id="duplicatiKv" class="kv-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: GUÍAS -->
+    <section id="tab-guides" class="tab-panel" hidden>
+      <div class="guides-list">
+        <a class="guide-row" href="https://github.com/uniextra/MovistarWebDAVProxy/blob/main/README.md" target="_blank" rel="noopener">
+          <div>
+            <div class="guide-title">📖 Guía rápida de inicio (README)</div>
+            <div class="guide-sub">Despliegue inicial, vinculación OAuth2 por SMS, Explorador Web (:5050) y Galería Virtual (/_gallery).</div>
+          </div>
+          <span class="guide-arrow">↗</span>
+        </a>
+        <a class="guide-row" href="https://github.com/uniextra/MovistarWebDAVProxy/blob/main/docs/configuration.md" target="_blank" rel="noopener">
+          <div>
+            <div class="guide-title">🔧 Configuración avanzada, seguridad y red</div>
+            <div class="guide-sub">Referencia completa de variables de entorno, Nginx/Traefik, Telegram, perfil desktop y límites SAPI.</div>
+          </div>
+          <span class="guide-arrow">↗</span>
+        </a>
+        <a class="guide-row" href="https://github.com/uniextra/MovistarWebDAVProxy/blob/main/docs/backup-clients.md" target="_blank" rel="noopener">
+          <div>
+            <div class="guide-title">🛡️ Clientes de backup (HyperBackup, Duplicati, Rclone &gt; 4 GB)</div>
+            <div class="guide-sub">Capturas y pasos para configurar Synology HyperBackup, Duplicati 2 y Rclone con chunker + crypt.</div>
+          </div>
+          <span class="guide-arrow">↗</span>
+        </a>
+        <a class="guide-row" href="https://github.com/uniextra/MovistarWebDAVProxy/blob/main/docs/network-drive.md" target="_blank" rel="noopener">
+          <div>
+            <div class="guide-title">💻 Mapear como unidad de red</div>
+            <div class="guide-sub">Cómo conectarlo en Windows (Rclone + WinFsp), macOS Finder, Linux (davfs2/GVFS) y Synology File Station.</div>
+          </div>
+          <span class="guide-arrow">↗</span>
+        </a>
+        <a class="guide-row" href="https://github.com/uniextra/MovistarWebDAVProxy/blob/main/docs/web-mode.md" target="_blank" rel="noopener">
+          <div>
+            <div class="guide-title">🌐 Modo Web (Chromium integrado)</div>
+            <div class="guide-sub">Alternativa con sesión web oficial de Movistar Cloud y renovación automática si falla el flujo OAuth2.</div>
+          </div>
+          <span class="guide-arrow">↗</span>
+        </a>
+        <a class="guide-row" href="https://github.com/uniextra/MovistarWebDAVProxy/blob/main/CHANGELOG.md" target="_blank" rel="noopener">
+          <div>
+            <div class="guide-title">📝 Historial de versiones (CHANGELOG)</div>
+            <div class="guide-sub">Todas las mejoras, correcciones y notas entre versiones.</div>
+          </div>
+          <span class="guide-arrow">↗</span>
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span>Movistar / O2 Cloud WebDAV Proxy — Proyecto comunitario bajo licencia MIT (sin afiliación con Telefónica).</span>
+      <span>Generador 100 % estático en navegador — ninguna contraseña ni token se envía fuera de tu equipo.</span>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

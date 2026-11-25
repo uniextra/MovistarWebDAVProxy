@@ -56,6 +56,9 @@ Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones
 
 ## 🐳 Paso 1: Despliegue con Docker
 
+> [!TIP]
+> **¿Prefieres configurarlo sin editar YAML a mano?** Usa el **[Generador Web Interactivo](https://uniextra.github.io/MovistarWebDAVProxy/)** para elegir tus opciones (Galería, Telegram, baja RAM, Modo Web, proxy inverso, Rclone/Synology/Duplicati) y copiar o descargar tu `docker-compose.yml`, `docker run` o `.env` listo para usar *(100 % local en tu navegador)*.
+
 ### Opción 1: Docker Compose (Recomendado)
 
 Crea un archivo `docker-compose.yml` (también puedes partir directamente del [`docker-compose.yml`](docker-compose.yml) del repositorio):
