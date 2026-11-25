@@ -587,7 +587,6 @@
         async function bucleLogs() {
             await fetchLogs(); // Espera a que termine de pedir los logs
             //logInterval = setTimeout(bucleLogs, tiempoLogs); // Programa la siguiente vuelta
-
             //const hayActividad = lastCopyStatus && (lastCopyStatus.current || (lastCopyStatus.uploading && lastCopyStatus.uploading.length > 0) || (lastCopyStatus.reading && lastCopyStatus.reading.length > 0) );
 
             // Si stopBtn está deshabilitado, el proxy está pausado -> 25 segundos; si no -> 2 segundos    stopBtn.disabled ? 15000 : 2000;
@@ -833,22 +832,18 @@
                     statusBadge.className = 'px-3.5 py-1.5 bg-emerald-100 text-emerald-700 font-semibold rounded-full text-xs';
                 } else {
                     startBtn.disabled = false;
-                    stopBtn.disabled = true;
+                    stopBtn.disabled = true;    // bucleLogs detectará pausa y aumentará tiempo setTimeout
                     statusBadge.textContent = '⚪ Pausado';
                     statusBadge.className = 'px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs';
                 }
-
-                // si status stopped, pausar logs? subir temporizador
             } catch (err) {
                 // El contenedor Docker está apagado o no hay conexión:
                 // Desactiva los botones y avisa al instante sin mostrar datos falsos
                 startBtn.disabled = true;
-                stopBtn.disabled = true;
+                stopBtn.disabled = true;    // bucleLogs detectará pausa y aumentará tiempo setTimeout
                 statusBadge.textContent = '🔴 Sin conexión con el servidor';
                 statusBadge.className = 'px-3.5 py-1.5 bg-red-100 text-red-700 font-semibold rounded-full text-xs';
-
-                // PDTE parar setInterval            con ERR_CONNECTION_TIMED_OUT ??
-                // en función del estado del botón, irá fetchLogs
+                // PDTE diferenciar tipos?? con ERR_CONNECTION_TIMED_OUT ??
             }
         }
 
