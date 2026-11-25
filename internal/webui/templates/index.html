@@ -453,6 +453,9 @@
         let currentAuthURL = "";
         let currentProvider = localStorage.getItem('mc_provider') || 'movistar';
         let logInterval = null;
+        let tiempoLogs = 2000; // Tiempo inicial en milisegundos (2 segundos)
+        let statusInterval = null;
+        let autoScroll = true;      // PDTE
 
         function setProvider(prov) {
             currentProvider = prov;
@@ -514,11 +517,21 @@
             phoneInput.addEventListener('change', checkCredentials);
             checkCredentials();
             checkStatus();
+            statusInterval = setInterval(checkStatus, 5000);    // PDTE migrar a setInterval para ampliar tiempos según estados
             setInterval(checkStatus, 5000);
-            fetchLogs();
-            logInterval = setInterval(fetchLogs, 2000);
+            //fetchLogs(); logInterval = setInterval(fetchLogs, 2000);
+            bucleLogs(); // Arranca el bucle por primera vez setTimeout
             initWebMode();
             loadTelegramState();
+        });
+
+        // Cuando vuelves atrás en el navegador (bfcache), fuerza una comprobación inmediata. checkStatus cambiará el tiempo del setTimeout para los logs
+        window.addEventListener('pageshow', (event) => {
+            if (event.persisted) {
+                checkStatus();
+                fetchLogs();
+                refreshWebSession();
+            }
         });
 
         // ---- Tema claro / oscuro ----
@@ -569,6 +582,17 @@
 
         async function refreshWebSession() {
             try { renderWebSession(await (await fetch('/web_session')).json()); } catch (err) {}
+        }
+
+        async function bucleLogs() {
+            await fetchLogs(); // Espera a que termine de pedir los logs
+            //logInterval = setTimeout(bucleLogs, tiempoLogs); // Programa la siguiente vuelta
+
+            //const hayActividad = lastCopyStatus && (lastCopyStatus.current || (lastCopyStatus.uploading && lastCopyStatus.uploading.length > 0) || (lastCopyStatus.reading && lastCopyStatus.reading.length > 0) );
+
+            // Si stopBtn está deshabilitado, el proxy está pausado -> 25 segundos; si no -> 2 segundos    stopBtn.disabled ? 15000 : 2000;
+            const tiempo = stopBtn.disabled ? 25000 : tiempoLogs;    // startBtn.disabled
+            logInterval = setTimeout(bucleLogs, tiempo);
         }
 
         let webStorageLoaded = false;
@@ -761,7 +785,7 @@
                 const res = await fetch('/storage_info?phone=' + encodeURIComponent(phone || ''));
                 const data = await res.json();
                 if (data.status === 'ok') {
-                    const storageEl = document.getElementById('cloud-storage-used');
+                    const storageEl = document.getElementById('cloud-storage-used');    // PDTE revisar en iOS. Sin vincular no tiene sentido
                     if (storageEl) {
                         storageEl.textContent = `${data.used_str} / ${data.total_str}`;
                     }
@@ -785,6 +809,8 @@
                     window.location.href = '/login';
                     return;
                 }
+                //if (!res.ok) throw new Error('Server error');    // PDTE
+                
                 const data = await res.json();
                 handleUpdateNotification(data);
                 const logoutBtn = document.getElementById('logout-btn');
@@ -811,7 +837,19 @@
                     statusBadge.textContent = '⚪ Pausado';
                     statusBadge.className = 'px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs';
                 }
-            } catch (err) {}
+
+                // si status stopped, pausar logs? subir temporizador
+            } catch (err) {
+                // El contenedor Docker está apagado o no hay conexión:
+                // Desactiva los botones y avisa al instante sin mostrar datos falsos
+                startBtn.disabled = true;
+                stopBtn.disabled = true;
+                statusBadge.textContent = '🔴 Sin conexión con el servidor';
+                statusBadge.className = 'px-3.5 py-1.5 bg-red-100 text-red-700 font-semibold rounded-full text-xs';
+
+                // PDTE parar setInterval            con ERR_CONNECTION_TIMED_OUT ??
+                // en función del estado del botón, irá fetchLogs
+            }
         }
 
         async function fetchLogs() {
@@ -822,6 +860,8 @@
                         'Cache-Control': 'no-cache'
                     }
                 });
+                if (!res.ok) return false; // Si el servidor da error (ej. 502, 500), no hay conexión válida
+                
                 const data = await res.json();
                 if (data && Array.isArray(data.logs)) {
                     if (data.logs.length === 0) {
@@ -848,7 +888,10 @@
                         }
                     }
                 }
-            } catch (err) {}
+                return true;  // Conexión correcta
+            } catch (err) {
+                return false; // Error de red (Docker apagado o sin conexión)
+            }
         }
 
         function showToast(message, type = 'success', duration = 4000) {
