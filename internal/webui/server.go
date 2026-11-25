@@ -396,7 +396,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// w.Header().Set("Cache-Control", "no-cache") ???
+	// no-cache: Permite que el navegador guarde el archivo localmente, pero le obliga a preguntar al servidor si ha cambiado antes de usarlo.
+	// Con no-store, el navegador destruye la página al salir o cambiar de pestaña y rompe la navegación rápida hacia atrás/adelante (bfcache), haciendo que la interfaz parpadee innecesariamente.
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 	w.WriteHeader(http.StatusOK)
 	rendered := bytes.ReplaceAll(indexHTML, []byte("{{.Version}}"), []byte(config.Version))
 	_, _ = w.Write(rendered)
