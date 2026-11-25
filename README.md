@@ -188,6 +188,8 @@ Desde la versión **`v2.7.0`**, el explorador web viene **activo por defecto** e
 * **Acceso único con el Dashboard (`:5000`):** Inicia sesión en `:5000` y pulsa **📁 Explorador** en la cabecera para entrar en `:5050` sin volver a introducir usuario y contraseña *(si publicas WebDAV en otro puerto distinto de `5050`, define `WEBDAV_HOST_PORT`)*. Si abres `:5050` directamente en el navegador, te mostrará la pantalla de login web (`/__login`) en lugar de la ventana nativa Basic Auth.
 * **Vista en modo listado 100 % offline + visor multimedia:** Tabla ligera y rápida (sin miniaturas pesadas de imágenes), búsqueda instantánea (`/`), filtro por tipo, ordenación por columnas y *breadcrumbs*. Al abrir cualquier foto o vídeo se muestra en un **visor integrado** para avanzar o retroceder entre ellos (`‹` / `›` y teclas `←` / `→`) sin salir del explorador.
 
+![Explorador Web integrado en el puerto 5050](docs/images/web-explorer-5050.png)
+
 ---
 
 ## 🖼️ Galería Virtual (`/_gallery`) — Opcional
