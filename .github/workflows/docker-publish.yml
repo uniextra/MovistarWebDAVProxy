@@ -22,6 +22,7 @@ permissions:
 
 jobs:
   build-and-push:
+    if: github.repository == 'uniextra/MovistarWebDAVProxy'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository

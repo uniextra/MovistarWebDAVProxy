@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'uniextra/MovistarWebDAVProxy'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -33,6 +34,7 @@ jobs:
           path: site
 
   deploy:
+    if: github.repository == 'uniextra/MovistarWebDAVProxy'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
