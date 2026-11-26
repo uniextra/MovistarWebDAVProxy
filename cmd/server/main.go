@@ -256,10 +256,13 @@ func main() {
 	}
 	go runDeltaSync(ctx, client, webdavServer.IsRunning, webdavServer.MetadataStore, webdavServer.FS, syncInterval)
 
-	webdavPort := "8080"
-	if p := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); p != "" {
-		webdavPort = p
-	}
+	// Obtenemos datos
+	webdavPort := config.WebDAVPort()         // Puerto interno del servidor WEBDAV_PORT sino 8080
+	webdavHostPort := config.WebDAVHostPort() // Puerto público de WEBDAV_HOST_PORT sino 5050
+	webPort := config.PanelPort()
+	panelURL := config.BuildServiceURL("WEBUI_URL", webPort, true) // se busca GetLocalIP cuando no definido
+	webdavURL := config.BuildServiceURL("WEBDAV_URL", webdavHostPort, false)
+
 	davHTTP := &http.Server{
 		Addr:              ":" + webdavPort,
 		Handler:           webdavServer,
@@ -270,7 +273,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Log("[WebDAV] ✔ Servidor WebDAV escuchando en :%s", webdavPort)
+		logger.Log("[WebDAV] ✔ Servidor WebDAV escuchando en :%s (público) | :%s (interno)", webdavHostPort, webdavPort)
 		if err := davHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Log("[FATAL] Error en servidor WebDAV: %v", err)
 			_ = notifier.Alert("", "🛑", "Servidor WebDAV detenido", "El servidor WebDAV se detuvo inesperadamente.", err.Error())
@@ -309,10 +312,7 @@ func main() {
 		go runWebHousekeeping(ctx, client, webSess.LoggedIn, acct)
 		uiServer.SetWebSessionStatus(func() map[string]interface{} { return acct.status(webSess.Status()) })
 	}
-	webPort := "5000"
-	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
-		webPort = p
-	}
+
 	uiHTTP := &http.Server{
 		Addr:              ":" + webPort,
 		Handler:           uiServer.Routes(),
@@ -323,7 +323,12 @@ func main() {
 	}
 
 	go func() {
-		logger.Log("[WebUI] ✔ Panel de Control escuchando en :%s", webPort)
+		// por privacidad, sólo se añade la url en logs con modo debug
+		if logger.IsDebugEnabled() {
+			logger.Log("[WebUI] ✔ Panel de Control escuchando en %s", panelURL)
+		} else {
+			logger.Log("[WebUI] ✔ Panel de Control escuchando en :%s", webPort)
+		}
 		if err := uiHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Log("[FATAL] Error en servidor Web UI: %v", err)
 			_ = notifier.Alert("", "🛑", "Servidor WebUI detenido", "El panel de control WebUI se detuvo inesperadamente.", err.Error())
@@ -346,7 +351,7 @@ func main() {
 		avisoInicialIcon,
 		avisoInicialTitle,
 		avisoInicialBody,
-		fmt.Sprintf("WebDAV :%s | Panel Web :%s\nVersión: %s", webdavPort, webPort, AppVersion),
+		fmt.Sprintf("WebDAV host %s | Panel Web %s\nVersión: %s", webdavURL, panelURL, AppVersion),
 	)
 
 	// Manejo de señales de terminación
