@@ -210,7 +210,6 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-
 		// Protección CSRF / Cross-Origin para métodos que modifican estado
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
 			if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" {
@@ -836,7 +835,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"status":           status,
 		"phone":            logger.Mask(cfg.Phone),
 		"auth_enabled":     s.authCfg.IsEnabled(),
-		"webdav_host_port": webDAVHostPort(),
+		"webdav_host_port": config.WebDAVHostPort(),
+		"webdav_url":       config.BuildServiceURL("WEBDAV_URL", config.WebDAVHostPort(), true),
 		"version":          config.Version,
 	}
 	if s.updateChecker != nil {
@@ -847,16 +847,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["notify_update_session"] = st.UpdateAvailable && s.shouldNotifySessionForRelease(r, st.LatestVersion)
 	}
 	jsonResponse(w, http.StatusOK, resp)
-}
-
-func webDAVHostPort() string {
-	if port := strings.TrimSpace(os.Getenv("WEBDAV_HOST_PORT")); port != "" {
-		return port
-	}
-	if port := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); port != "" {
-		return port
-	}
-	return "5050"
 }
 
 func (s *Server) handleVerifyPhone(w http.ResponseWriter, r *http.Request) {
