@@ -93,6 +93,8 @@
     var webPortInfo = parsePort($("webPort"), "5000");
     var webdavPortInfo = parsePort($("webdavPort"), "5050");
     var webdavHostPortInfo = proxyEnabled ? parsePort($("webdavHostPort"), "") : { value: "", valid: true, raw: "", badInput: false };
+    var internalWebPortInfo = parsePort($("internalWebPort"), "5000");
+    var internalWebdavPortInfo = parsePort($("internalWebdavPort"), "8080");
 
     var invalidPorts = [];
     if (!webPortInfo.valid) {
@@ -104,11 +106,19 @@
     if (!webdavHostPortInfo.valid) {
       invalidPorts.push({ id: "webdavHostPort", label: "Puerto externo tras el proxy", raw: webdavHostPortInfo.raw, badInput: webdavHostPortInfo.badInput, fallback: webdavPortInfo.value });
     }
+    if (!internalWebPortInfo.valid) {
+      invalidPorts.push({ id: "internalWebPort", label: "Puerto interno Panel Web (PORT)", raw: internalWebPortInfo.raw, badInput: internalWebPortInfo.badInput, fallback: internalWebPortInfo.value });
+    }
+    if (!internalWebdavPortInfo.valid) {
+      invalidPorts.push({ id: "internalWebdavPort", label: "Puerto interno WebDAV (WEBDAV_PORT)", raw: internalWebdavPortInfo.raw, badInput: internalWebdavPortInfo.badInput, fallback: internalWebdavPortInfo.value });
+    }
 
     var webPort = webPortInfo.value;
     var webdavPort = webdavPortInfo.value;
     var webdavHostPortRaw = webdavHostPortInfo.value;
     var webdavHostPort = webdavHostPortRaw || webdavPort;
+    var internalWebPort = internalWebPortInfo.value;
+    var internalWebdavPort = internalWebdavPortInfo.value;
 
     var authDisabled = $("authDisabled").checked;
     var webdavUser = cleanSingleLine($("webdavUser").value);
@@ -150,6 +160,8 @@
       webdavPort: webdavPort,
       webdavHostPort: webdavHostPort,
       webdavHostPortCustom: webdavHostPortRaw,
+      internalWebPort: internalWebPort,
+      internalWebdavPort: internalWebdavPort,
       invalidPorts: invalidPorts,
       authDisabled: authDisabled,
       webdavUser: webdavUser,
@@ -207,6 +219,12 @@
 
     if (s.webdavHostPort !== "5050" || s.webdavHostPortCustom) {
       env.push(["WEBDAV_HOST_PORT", s.webdavHostPort]);
+    }
+    if (s.internalWebPort !== "5000") {
+      env.push(["PORT", s.internalWebPort]);
+    }
+    if (s.internalWebdavPort !== "8080") {
+      env.push(["WEBDAV_PORT", s.internalWebdavPort]);
     }
 
     if (s.galleryEnabled) {
@@ -295,8 +313,8 @@
     lines.push("    ports:");
     var webHostPrefix = s.webBindIp !== "0.0.0.0" ? (s.webBindIp + ":") : "";
     var davHostPrefix = s.webdavBindIp !== "0.0.0.0" ? (s.webdavBindIp + ":") : "";
-    lines.push('      - "' + webHostPrefix + s.webPort + ':5000"   # Panel Web');
-    lines.push('      - "' + davHostPrefix + s.webdavPort + ':8080"   # Endpoint WebDAV y Explorador Web');
+    lines.push('      - "' + webHostPrefix + s.webPort + ':' + s.internalWebPort + '"   # Panel Web');
+    lines.push('      - "' + davHostPrefix + s.webdavPort + ':' + s.internalWebdavPort + '"   # Endpoint WebDAV y Explorador Web');
 
     lines.push("    volumes:");
     lines.push("      - " + s.tokensPath + ":/app/tokens");
@@ -340,8 +358,8 @@
 
     var webHostPrefix = s.webBindIp !== "0.0.0.0" ? (s.webBindIp + ":") : "";
     var davHostPrefix = s.webdavBindIp !== "0.0.0.0" ? (s.webdavBindIp + ":") : "";
-    cmd.push("  -p " + webHostPrefix + s.webPort + ":5000 \\");
-    cmd.push("  -p " + davHostPrefix + s.webdavPort + ":8080 \\");
+    cmd.push("  -p " + webHostPrefix + s.webPort + ":" + s.internalWebPort + " \\");
+    cmd.push("  -p " + davHostPrefix + s.webdavPort + ":" + s.internalWebdavPort + " \\");
     cmd.push("  -v " + escapeSingleQuoteSh(s.tokensPath + ":/app/tokens") + " \\");
     if (s.tmpdirEnabled) {
       cmd.push("  -v " + escapeSingleQuoteSh(s.tmpdirHostPath + ":/app/tmp") + " \\");
@@ -498,7 +516,7 @@
 
     var invalidIds = {};
     (s.invalidPorts || []).forEach(function (p) { invalidIds[p.id] = true; });
-    ["webPort", "webdavPort", "webdavHostPort"].forEach(function (id) {
+    ["webPort", "webdavPort", "webdavHostPort", "internalWebPort", "internalWebdavPort"].forEach(function (id) {
       var el = $(id);
       var isInvalid = Boolean(invalidIds[id]);
       el.classList.toggle("input-invalid", isInvalid);

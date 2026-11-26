@@ -377,6 +377,16 @@
                         <option value="no">no</option>
                       </select>
                     </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="internalWebPort">Puerto interno Panel Web <span class="badge-env">PORT</span></label>
+                      <input id="internalWebPort" type="number" min="1" max="65535" value="" placeholder="5000" aria-describedby="internalWebPortHint">
+                      <span id="internalWebPortHint" class="field-hint">Por defecto 5000; actualiza el segundo puerto del mapeo.</span>
+                    </div>
+                    <div class="input-wrap">
+                      <label class="input-label" for="internalWebdavPort">Puerto interno WebDAV <span class="badge-env">WEBDAV_PORT</span></label>
+                      <input id="internalWebdavPort" type="number" min="1" max="65535" value="" placeholder="8080" aria-describedby="internalWebdavPortHint">
+                      <span id="internalWebdavPortHint" class="field-hint">Por defecto 8080; actualiza el segundo puerto del mapeo.</span>
+                    </div>
                   </div>
                 </div>
 
