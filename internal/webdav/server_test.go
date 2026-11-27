@@ -778,3 +778,38 @@ func TestWebDAV_PutExpect100ContinueReturns401Immediately(t *testing.T) {
 		t.Fatalf("expected WWW-Authenticate Basic header in 401 response, got:\n%s", respHeaders)
 	}
 }
+
+func TestWebDAVServeHTTP_Favicon(t *testing.T) {
+	srv, cleanup := setupTestWebDAVServer(t, config.AuthConfig{
+		Username: "davuser",
+		Password: "davpass",
+	})
+	defer cleanup()
+
+	fakeICO := []byte{0x00, 0x00, 0x01, 0x00}
+	srv.SetBrowserAuth(&BrowserAuth{
+		HandleFavicon: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/x-icon")
+			w.Header().Set("Cache-Control", "public, max-age=604800")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(fakeICO)
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
+	rec := httptest.NewRecorder()
+
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("código HTTP esperado %d, obtenido %d", http.StatusOK, rec.Code)
+	}
+
+	if ct := rec.Header().Get("Content-Type"); ct != "image/x-icon" {
+		t.Errorf("Content-Type esperado %q, obtenido %q", "image/x-icon", ct)
+	}
+
+	if !bytes.Equal(rec.Body.Bytes(), fakeICO) {
+		t.Errorf("cuerpo devuelto %v, esperado %v", rec.Body.Bytes(), fakeICO)
+	}
+}
