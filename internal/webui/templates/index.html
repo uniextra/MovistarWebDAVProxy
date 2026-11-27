@@ -781,7 +781,7 @@
                 if (webdavPort && data.webdav_host_port) {
                     webdavPort.textContent = data.webdav_host_port;
                 }
-                updateExplorerLink(data.webdav_host_port || '5050');
+                updateExplorerLink(data.webdav_host_port || '5050', data.webdav_url);
                 if (data.status === 'running') {
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
@@ -1180,10 +1180,31 @@
             }
         }
 
-        function updateExplorerLink(port) {
+        function updateExplorerLink(port, url) {
             const btn = document.getElementById('explorer-header-btn');
             if (!btn) return;
+
             const p = String(port || '5050').trim() || '5050';
+
+            const customUrl = String(url || '').trim();
+            if (customUrl) {
+                try {
+                    const withProto = customUrl.includes('://') ? customUrl : 'http://' + customUrl;
+                    const parsed = new URL(withProto);
+                    if (!parsed.port && parsed.protocol !== 'https:') {
+                        parsed.port = p;
+                    }
+                    if (!parsed.pathname.endsWith('/')) {
+                        parsed.pathname += '/';
+                    }
+                    btn.href = parsed.toString();
+                    return;
+                } catch (e) {
+                    btn.href = customUrl.endsWith('/') ? customUrl : customUrl + '/';
+                    return;
+                }
+            }
+
             btn.href = window.location.protocol + '//' + window.location.hostname + ':' + p + '/';
         }
 

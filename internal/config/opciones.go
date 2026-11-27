@@ -2,6 +2,8 @@ package config
 
 import (
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -252,4 +254,94 @@ func envSeconds(name string, def time.Duration) time.Duration {
 		return def
 	}
 	return time.Duration(f * float64(time.Second))
+}
+
+func PanelPort() string {
+	// Puerto panel
+	if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
+		return port
+	}
+	return "5000"
+}
+
+func WebDAVPort() string {
+	// Puerto interno del servidor WebDAV
+	if port := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); port != "" {
+		return port
+	}
+	return "8080" // valor por defecto
+}
+
+func WebDAVHostPort() string {
+	// Puerto público de WebDAV mostrado en el panel
+	if port := strings.TrimSpace(os.Getenv("WEBDAV_HOST_PORT")); port != "" {
+		return port
+	}
+	return "5050"
+}
+
+// Obtiene la IP local
+func GetLocalIP() string {
+	// 1. Detectar la IP de la interfaz con ruta de salida real (evita adaptadores virtuales inactivos)
+	conn, err := net.Dial("udp", "1.1.1.1:80")
+	if err == nil {
+		defer conn.Close()
+		if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && localAddr.IP != nil {
+			return localAddr.IP.String()
+		}
+	}
+
+	// 2. Fallback: recorrer interfaces de red (funciona incluso sin internet)
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "localhost"
+	}
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if ipNet.IP.To4() != nil {
+				return ipNet.IP.String()
+			}
+		}
+	}
+	return "localhost"
+}
+
+// BuildServiceURL construye la URL a partir de envVar (ej. WEBUI_URL o WEBDAV_URL).		variable de entorno (ej. WEBUI_HOST o WEBDAV_HOST).
+// - defaultPort es opcional (si se pasa "", no añade puerto cuando no viene en la variable).
+// - fallbackLocalIP es opcional (si es true y no hay variable, usa GetLocalIP()).
+// Si no existe envVar y fallbackLocalIP es false, devuelve ":defaultPort" (sin http://).
+func BuildServiceURL(envVar, defaultPort string, fallbackLocalIP bool) string {
+	raw := strings.TrimSpace(os.Getenv(envVar))
+	raw = strings.TrimRight(raw, "/")
+
+	// 1. Si no hay variable configurada
+	if raw == "" {
+		if !fallbackLocalIP {
+			if defaultPort != "" {
+				return ":" + defaultPort
+			}
+			return ""
+		}
+		raw = GetLocalIP()
+	}
+
+	// 2. Si no trae esquema (http:// o https://), le ponemos http:// para poder parsearla bien
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		if defaultPort != "" {
+			return ":" + defaultPort
+		}
+		return ""
+	}
+
+	// 3. Si es HTTP sin puerto explícito y hay defaultPort, lo añadimos
+	if u.Port() == "" && u.Scheme != "https" && defaultPort != "" {
+		u.Host = net.JoinHostPort(u.Hostname(), defaultPort)
+	}
+
+	return strings.TrimRight(u.String(), "/")
 }

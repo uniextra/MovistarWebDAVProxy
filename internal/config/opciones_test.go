@@ -1,6 +1,8 @@
 package config
 
 import (
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -163,4 +165,150 @@ func TestGalleryOptions(t *testing.T) {
 			t.Errorf("GALLERY_LAYOUT=%q -> %q, esperado %q", raw, got, want)
 		}
 	}
+}
+
+func TestPanelPort(t *testing.T) {
+	t.Run("valor por defecto", func(t *testing.T) {
+		t.Setenv("PORT", "")
+		if got := PanelPort(); got != "5000" {
+			t.Errorf("esperaba 5000, obtuvo %q", got)
+		}
+	})
+
+	t.Run("puerto personalizado con espacios", func(t *testing.T) {
+		t.Setenv("PORT", " 8090 ")
+		if got := PanelPort(); got != "8090" {
+			t.Errorf("esperaba 8090, obtuvo %q", got)
+		}
+	})
+}
+
+func TestWebDAVPort(t *testing.T) {
+	t.Run("valor por defecto", func(t *testing.T) {
+		t.Setenv("WEBDAV_PORT", "")
+		if got := WebDAVPort(); got != "8080" {
+			t.Errorf("esperaba 8080, obtuvo %q", got)
+		}
+	})
+
+	t.Run("puerto personalizado", func(t *testing.T) {
+		t.Setenv("WEBDAV_PORT", "9090")
+		if got := WebDAVPort(); got != "9090" {
+			t.Errorf("esperaba 9090, obtuvo %q", got)
+		}
+	})
+}
+
+func TestWebDAVHostPort(t *testing.T) {
+	t.Run("valor por defecto", func(t *testing.T) {
+		t.Setenv("WEBDAV_HOST_PORT", "")
+		if got := WebDAVHostPort(); got != "5050" {
+			t.Errorf("esperaba 5050, obtuvo %q", got)
+		}
+	})
+
+	t.Run("puerto personalizado", func(t *testing.T) {
+		t.Setenv("WEBDAV_HOST_PORT", "5555")
+		if got := WebDAVHostPort(); got != "5555" {
+			t.Errorf("esperaba 5555, obtuvo %q", got)
+		}
+	})
+}
+
+func TestGetLocalIP(t *testing.T) {
+	ip := GetLocalIP()
+	if ip == "" {
+		t.Fatal("GetLocalIP() devolvió cadena vacía")
+	}
+	if ip != "localhost" && net.ParseIP(ip) == nil {
+		t.Errorf("GetLocalIP() devolvió una IP inválida: %q", ip)
+	}
+}
+
+func TestBuildServiceURL(t *testing.T) {
+	const envKey = "TEST_SERVICE_URL"
+
+	casos := []struct {
+		nombre      string
+		envVal      string
+		defaultPort string
+		fallbackIP  bool
+		esperado    string
+	}{
+		{
+			nombre:      "vacio sin fallback y con puerto",
+			envVal:      "",
+			defaultPort: "5000",
+			fallbackIP:  false,
+			esperado:    ":5000",
+		},
+		{
+			nombre:      "vacio sin fallback y sin puerto",
+			envVal:      "",
+			defaultPort: "",
+			fallbackIP:  false,
+			esperado:    "",
+		},
+		{
+			nombre:      "solo IP sin esquema ni puerto",
+			envVal:      "192.168.1.44",
+			defaultPort: "5000",
+			fallbackIP:  false,
+			esperado:    "http://192.168.1.44:5000",
+		},
+		{
+			nombre:      "http sin puerto añade defaultPort",
+			envVal:      "http://192.168.1.44",
+			defaultPort: "5050",
+			fallbackIP:  false,
+			esperado:    "http://192.168.1.44:5050",
+		},
+		{
+			nombre:      "http con puerto explicito lo respeta",
+			envVal:      "http://192.168.1.44:8888",
+			defaultPort: "5050",
+			fallbackIP:  false,
+			esperado:    "http://192.168.1.44:8888",
+		},
+		{
+			nombre:      "https sin puerto no añade defaultPort",
+			envVal:      "https://dominio.local",
+			defaultPort: "5050",
+			fallbackIP:  false,
+			esperado:    "https://dominio.local",
+		},
+		{
+			nombre:      "https con puerto explicito lo respeta",
+			envVal:      "https://192.168.1.44:4432",
+			defaultPort: "5050",
+			fallbackIP:  false,
+			esperado:    "https://192.168.1.44:4432",
+		},
+		{
+			nombre:      "url mal formada vuelve al fallback seguro",
+			envVal:      ":5000",
+			defaultPort: "5050",
+			fallbackIP:  false,
+			esperado:    ":5050",
+		},
+	}
+
+	for _, tc := range casos {
+		t.Run(tc.nombre, func(t *testing.T) {
+			t.Setenv(envKey, tc.envVal)
+			got := BuildServiceURL(envKey, tc.defaultPort, tc.fallbackIP)
+			if got != tc.esperado {
+				t.Errorf("BuildServiceURL(%q, %q, %v) = %q; esperaba %q",
+					tc.envVal, tc.defaultPort, tc.fallbackIP, got, tc.esperado)
+			}
+		})
+	}
+
+	t.Run("vacio con fallbackLocalIP true devuelve http://IP:puerto", func(t *testing.T) {
+		t.Setenv(envKey, "")
+		got := BuildServiceURL(envKey, "5000", true)
+		if !strings.HasPrefix(got, "http://") || !strings.HasSuffix(got, ":5000") {
+			t.Errorf("esperaba formato http://<ip>:5000, obtuvo %q", got)
+		}
+	})
 }
