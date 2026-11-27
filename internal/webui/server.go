@@ -787,6 +787,7 @@ func (s *Server) BrowserAuth() *webdav.BrowserAuth {
 			s.handleLogoutWithRedirect(w, r, "/__login")
 		},
 		HandleStatic: newStaticHandler("/__static/"),
+		HandleFavicon: s.handleFavicon,
 	}
 }
 
