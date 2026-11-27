@@ -29,6 +29,7 @@ import (
 	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/updater"
 	"movistar-webdav-proxy/internal/webdav"
+	"movistar-webdav-proxy/static"
 )
 
 //go:embed templates/index.html
@@ -794,10 +795,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Content-Type", "image/x-icon")
 	w.Header().Set("Cache-Control", "public, max-age=604800")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-	_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#2563eb"/><path d="M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z" fill="white"/></svg>`))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(static.FaviconICO)
 }
 
 // UpdateChecker returns the background GitHub release checker bound to the WebUI server.
