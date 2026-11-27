@@ -44,7 +44,7 @@ func noteRequestError(method string, err error, now time.Time) {
 	n := len(uploadErrs.at)
 	uploadErrs.Unlock()
 	if n >= uploadErrAlert {
-		_ = notifier.Alert("upload_errors", "❌", "Las subidas a Movistar están fallando",
+		_ = notifier.Alert("", "❌", "Las subidas a Movistar están fallando",
 			fmt.Sprintf("%d errores de escritura en los últimos %d minutos.", n, int(uploadErrWindow.Minutes())), msg)
 	}
 }
