@@ -1,10 +1,17 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-version="{{.Version}}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#f8fafc" id="theme-color-meta">       <!-- pintar la barra superior del navegador (la barra de direcciones, pestañas y la barra de estado del móvil)  #2563eb color logo -->
     <title>Movistar & O2 WebDAV Proxy (Go)</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%232563eb'/%3E%3Cpath d='M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z' fill='white'/%3E%3C/svg%3E">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/web-app-manifest-192x192.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-title" content="WebDAV Proxy">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
     <script>
         // Tema: el elegido con el botón (guardado en el navegador) o, si no hay, el del sistema.
         // Se aplica antes de pintar para evitar el destello blanco al cargar en modo oscuro.
@@ -13,6 +20,9 @@
             try { saved = localStorage.getItem('mc_theme'); } catch (e) {}
             const dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
             if (dark) document.documentElement.classList.add('dark');
+            // Sincroniza la barra del navegador al instante
+            const meta = document.getElementById('theme-color-meta');
+            if (meta) meta.setAttribute('content', dark ? '#0b1120' : '#f8fafc');
         })();
     </script>
     <script src="https://cdn.tailwindcss.com"  referrerpolicy="no-referrer"></script>
@@ -444,6 +454,9 @@
         let currentAuthURL = "";
         let currentProvider = localStorage.getItem('mc_provider') || 'movistar';
         let logInterval = null;
+        let tiempoLogs = 2000; // Tiempo inicial en milisegundos (2 segundos)
+        let statusInterval = null;
+        let autoScroll = true;      // PDTE
 
         function setProvider(prov) {
             currentProvider = prov;
@@ -505,11 +518,21 @@
             phoneInput.addEventListener('change', checkCredentials);
             checkCredentials();
             checkStatus();
+            statusInterval = setInterval(checkStatus, 5000);    // PDTE migrar a setInterval para ampliar tiempos según estados
             setInterval(checkStatus, 5000);
-            fetchLogs();
-            logInterval = setInterval(fetchLogs, 2000);
+            //fetchLogs(); logInterval = setInterval(fetchLogs, 2000);
+            bucleLogs(); // Arranca el bucle por primera vez setTimeout
             initWebMode();
             loadTelegramState();
+        });
+
+        // Cuando vuelves atrás en el navegador (bfcache), fuerza una comprobación inmediata. checkStatus cambiará el tiempo del setTimeout para los logs
+        window.addEventListener('pageshow', (event) => {
+            if (event.persisted) {
+                checkStatus();
+                fetchLogs();
+                refreshWebSession();
+            }
         });
 
         // ---- Tema claro / oscuro ----
@@ -517,6 +540,10 @@
             const dark = document.documentElement.classList.contains('dark');
             const b = document.getElementById('theme-toggle');
             if (b) { b.textContent = dark ? '☀️' : '🌙'; b.title = dark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'; }
+            const meta = document.getElementById('theme-color-meta');
+            if (meta) {
+                meta.setAttribute('content', dark ? '#0b1120' : '#f8fafc');
+            }
         }
         function toggleTheme() {
             const dark = !document.documentElement.classList.contains('dark');
@@ -556,6 +583,16 @@
 
         async function refreshWebSession() {
             try { renderWebSession(await (await fetch('/web_session')).json()); } catch (err) {}
+        }
+
+        async function bucleLogs() {
+            await fetchLogs(); // Espera a que termine de pedir los logs
+            //logInterval = setTimeout(bucleLogs, tiempoLogs); // Programa la siguiente vuelta
+            //const hayActividad = lastCopyStatus && (lastCopyStatus.current || (lastCopyStatus.uploading && lastCopyStatus.uploading.length > 0) || (lastCopyStatus.reading && lastCopyStatus.reading.length > 0) );
+
+            // Si stopBtn está deshabilitado, el proxy está pausado -> 25 segundos; si no -> 2 segundos    stopBtn.disabled ? 15000 : 2000;
+            const tiempo = stopBtn.disabled ? 25000 : tiempoLogs;    // startBtn.disabled
+            logInterval = setTimeout(bucleLogs, tiempo);
         }
 
         let webStorageLoaded = false;
@@ -748,7 +785,7 @@
                 const res = await fetch('/storage_info?phone=' + encodeURIComponent(phone || ''));
                 const data = await res.json();
                 if (data.status === 'ok') {
-                    const storageEl = document.getElementById('cloud-storage-used');
+                    const storageEl = document.getElementById('cloud-storage-used');    // PDTE revisar en iOS. Sin vincular no tiene sentido
                     if (storageEl) {
                         storageEl.textContent = `${data.used_str} / ${data.total_str}`;
                     }
@@ -762,11 +799,18 @@
 
         async function checkStatus() {
             try {
-                const res = await fetch('/status');
+                const res = await fetch('/status', {
+                    cache: 'no-store',
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    }
+                });
                 if (res.status === 401) {
                     window.location.href = '/login';
                     return;
                 }
+                //if (!res.ok) throw new Error('Server error');    // PDTE
+                
                 const data = await res.json();
                 handleUpdateNotification(data);
                 const logoutBtn = document.getElementById('logout-btn');
@@ -789,16 +833,31 @@
                     statusBadge.className = 'px-3.5 py-1.5 bg-emerald-100 text-emerald-700 font-semibold rounded-full text-xs';
                 } else {
                     startBtn.disabled = false;
-                    stopBtn.disabled = true;
+                    stopBtn.disabled = true;    // bucleLogs detectará pausa y aumentará tiempo setTimeout
                     statusBadge.textContent = '⚪ Pausado';
                     statusBadge.className = 'px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs';
                 }
-            } catch (err) {}
+            } catch (err) {
+                // El contenedor Docker está apagado o no hay conexión:
+                // Desactiva los botones y avisa al instante sin mostrar datos falsos
+                startBtn.disabled = true;
+                stopBtn.disabled = true;    // bucleLogs detectará pausa y aumentará tiempo setTimeout
+                statusBadge.textContent = '🔴 Sin conexión con el servidor';
+                statusBadge.className = 'px-3.5 py-1.5 bg-red-100 text-red-700 font-semibold rounded-full text-xs';
+                // PDTE diferenciar tipos?? con ERR_CONNECTION_TIMED_OUT ??
+            }
         }
 
         async function fetchLogs() {
             try {
-                const res = await fetch('/logs');
+                const res = await fetch('/logs', {
+                    cache: 'no-store',
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    }
+                });
+                if (!res.ok) return false; // Si el servidor da error (ej. 502, 500), no hay conexión válida
+                
                 const data = await res.json();
                 if (data && Array.isArray(data.logs)) {
                     if (data.logs.length === 0) {
@@ -825,7 +884,10 @@
                         }
                     }
                 }
-            } catch (err) {}
+                return true;  // Conexión correcta
+            } catch (err) {
+                return false; // Error de red (Docker apagado o sin conexión)
+            }
         }
 
         function showToast(message, type = 'success', duration = 4000) {

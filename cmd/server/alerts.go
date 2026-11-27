@@ -38,7 +38,7 @@ func (c *healthCheck) step(now time.Time) {
 	}
 	if !c.alerted && now.Sub(c.badSince) >= healthAlertAfter {
 		c.alerted = true
-		_ = notifier.Alert(c.key, "⚠️", c.title, c.desc, "")
+		_ = notifier.Alert("", "⚠️", c.title, c.desc, "")
 	}
 }
 

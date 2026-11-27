@@ -66,6 +66,9 @@ var browserHeadTmpl = template.Must(template.New("webdav-browser-head").Parse(`<
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.HeadTitle}}</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/__static/icons/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/__static/icons/web-app-manifest-192x192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/__static/icons/apple-touch-icon.png">
 <style>
 {{if .UseLocalFont}}
 @font-face{font-display:swap;font-family:'Inter';font-style:normal;font-weight:400;src:url('/__static/fonts/inter-v20-latin-400-700.woff2') format('woff2');}

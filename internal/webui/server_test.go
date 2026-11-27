@@ -19,6 +19,7 @@ import (
 	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/updater"
 	"movistar-webdav-proxy/internal/webdav"
+	"movistar-webdav-proxy/static"
 )
 
 func setupTestWebUI(t *testing.T, authCfg config.AuthConfig) (http.Handler, string) {
@@ -1186,6 +1187,31 @@ func TestStaticFilesPublicAccessAndDirectoryListing(t *testing.T) {
 			t.Fatalf("fallo de seguridad: /static/../status devolvió 200 sin autenticación")
 		}
 	})
+}
+
+func TestHandleFavicon(t *testing.T) {
+	s := &Server{}
+
+	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleFavicon(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("código HTTP esperado %d, obtenido %d", http.StatusOK, rec.Code)
+	}
+
+	if ct := rec.Header().Get("Content-Type"); ct != "image/x-icon" {
+		t.Errorf("Content-Type esperado %q, obtenido %q", "image/x-icon", ct)
+	}
+
+	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=604800" {
+		t.Errorf("Cache-Control esperado %q, obtenido %q", "public, max-age=604800", cc)
+	}
+
+	if !bytes.Equal(rec.Body.Bytes(), static.FaviconICO) {
+		t.Errorf("el cuerpo de la respuesta (%d bytes) no coincide con static.FaviconICO (%d bytes)", rec.Body.Len(), len(static.FaviconICO))
+	}
 }
 
 func TestWebUI_SharedBrowserSessionAndExplorerLink(t *testing.T) {

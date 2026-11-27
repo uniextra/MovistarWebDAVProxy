@@ -29,6 +29,7 @@ import (
 	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/updater"
 	"movistar-webdav-proxy/internal/webdav"
+	"movistar-webdav-proxy/static"
 )
 
 //go:embed templates/index.html
@@ -190,19 +191,23 @@ func (s *Server) Routes() http.Handler {
 	return s.securityMiddleware(mux)
 }
 
-func setPanelSecurityHeaders(w http.ResponseWriter) {
+func setPanelSecurityHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("Content-Security-Policy", panelCSP)
-	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), bluetooth=()")
+
+	// Solo enviar COOP en contextos seguros (HTTPS o localhost) para evitar avisos en HTTP por IP local
+	if isTrustworthyContext(r) {
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	}	
 }
 
 func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setPanelSecurityHeaders(w)
+		setPanelSecurityHeaders(w, r)
 
 		// /health (para healthchecks de Docker), favicon y recursos estáticos siempre accesibles sin autenticación
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" || strings.HasPrefix(r.URL.Path, "/static/") {
@@ -281,6 +286,20 @@ func isLoopbackHost(h string) bool {
 	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
+}
+
+func isTrustworthyContext(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if isHTTPS(r) {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+	return isLoopbackHost(host)
 }
 
 func validateSameOrigin(r *http.Request) bool {
@@ -382,7 +401,10 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) boo
 func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	// PDTE revisar peticiones API, pero asegura se sirvan frescas
-	//w.Header().Set("Cache-Control", "no-store")
+	// Se entiende que todas las llamadas que usan jsonResponse son datos dinámicos de la API y ninguna debería cachearse nunca.
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
@@ -393,6 +415,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// no-cache: Permite que el navegador guarde el archivo localmente, pero le obliga a preguntar al servidor si ha cambiado antes de usarlo.
+	// Con no-store, el navegador destruye la página al salir o cambiar de pestaña y rompe la navegación rápida hacia atrás/adelante (bfcache), haciendo que la interfaz parpadee innecesariamente.
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 	w.WriteHeader(http.StatusOK)
 	rendered := bytes.ReplaceAll(indexHTML, []byte("{{.Version}}"), []byte(config.Version))
 	_, _ = w.Write(rendered)
@@ -746,7 +771,7 @@ func (s *Server) BrowserAuth() *webdav.BrowserAuth {
 			return s.validateSession(s.getSessionToken(r))
 		},
 		HandleLogin: func(w http.ResponseWriter, r *http.Request) {
-			setPanelSecurityHeaders(w)
+			setPanelSecurityHeaders(w, r)
 			if r.Method == http.MethodPost && strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
 				http.Error(w, "Forbidden (cross-site request)", http.StatusForbidden)
 				return
@@ -754,7 +779,7 @@ func (s *Server) BrowserAuth() *webdav.BrowserAuth {
 			s.handleLoginWithAction(w, r, "/__login")
 		},
 		HandleLogout: func(w http.ResponseWriter, r *http.Request) {
-			setPanelSecurityHeaders(w)
+			setPanelSecurityHeaders(w, r)
 			if r.Method == http.MethodPost && (!validateSameOrigin(r) || strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")) {
 				http.Error(w, "Forbidden (CSRF)", http.StatusForbidden)
 				return
@@ -762,6 +787,7 @@ func (s *Server) BrowserAuth() *webdav.BrowserAuth {
 			s.handleLogoutWithRedirect(w, r, "/__login")
 		},
 		HandleStatic: newStaticHandler("/__static/"),
+		HandleFavicon: s.handleFavicon,
 	}
 }
 
@@ -770,10 +796,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Content-Type", "image/x-icon")
 	w.Header().Set("Cache-Control", "public, max-age=604800")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-	_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#2563eb"/><path d="M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z" fill="white"/></svg>`))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(static.FaviconICO)
 }
 
 // UpdateChecker returns the background GitHub release checker bound to the WebUI server.

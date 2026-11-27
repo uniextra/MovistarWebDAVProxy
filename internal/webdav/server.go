@@ -101,6 +101,7 @@ const (
 	browserLoginPath    = "/__login"
 	browserLogoutPath   = "/__logout"
 	browserStaticPrefix = "/__static/"
+	browserFaviconPath  = "/favicon.ico"
 )
 
 // BrowserAuth permite compartir la sesión web y el formulario de login del
@@ -110,6 +111,7 @@ type BrowserAuth struct {
 	HandleLogin    http.HandlerFunc
 	HandleLogout   http.HandlerFunc
 	HandleStatic   http.Handler
+	HandleFavicon  http.HandlerFunc
 }
 
 type Server struct {
@@ -420,6 +422,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if strings.HasPrefix(urlPath, browserStaticPrefix) && s.browserAuth.HandleStatic != nil {
 			s.browserAuth.HandleStatic.ServeHTTP(lw, r)
+			return
+		}
+		if urlPath == browserFaviconPath && s.browserAuth.HandleFavicon != nil {
+			s.browserAuth.HandleFavicon(lw, r)
 			return
 		}
 	}
